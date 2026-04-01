@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(conda list:*)",
+      "Bash(python astroview/scripts/make_sample_fits.py -o astroview/sample.fits)",
+      "Bash(D:/Miniforge/envs/astro/python.exe D:/workspace/fitson/astroview/scripts/make_sample_fits.py -o D:/workspace/fitson/astroview/sample.fits)",
+      "Bash(conda run:*)",
+      "Bash(find D:/workspace/fitson/astroview -type d -name __pycache__ -exec rm -rf {} +)",
+      "Read(//d/workspace/fitson/**)",
+      "Bash(find astroview:*)"
+    ]
+  }
+}
