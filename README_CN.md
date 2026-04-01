@@ -1,4 +1,4 @@
-# AstroView
+# AstroView [English](README.md) | [简体中文](README_CN.md)
 
 基于 PySide6 的桌面端 FITS 天文图像查看器。
 
@@ -90,3 +90,10 @@ python -m astroview image.fits --hdu 1  # 指定 HDU 打开
   - `status_bar.py` — 光标/缩放/帧状态显示
 
 `MainWindow` 是唯一的协调器 — 视图模块通过信号和 setter 通信，不直接调用服务；服务模块返回领域对象，不操作界面组件。
+
+
+## 开发说明
+
+- 项目的初始构思与整体框架由 GPT-5.4 协助梳理。
+- 框架代码实现以及大部分功能开发随后由 Claude Opus 4.6 完成。
+- 其余实现细节与后续打磨，则由 GPT-5.4 完成。

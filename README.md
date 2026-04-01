@@ -1,4 +1,4 @@
-# AstroView
+# AstroView [English](README.md) | [简体中文](README_CN.md)
 
 A desktop FITS astronomical image viewer built with PySide6.
 
@@ -90,3 +90,10 @@ python -m astroview image.fits --hdu 1  # open a specific HDU
   - `status_bar.py` — cursor/zoom/frame status display
 
 `MainWindow` is the sole coordinator — view modules emit signals and expose setters but never call services directly. Service modules return domain objects but never touch widgets.
+
+
+## Development Notes
+
+- The initial project framing and high-level structure were shaped with GPT-5.4.
+- The framework implementation and most feature work were then carried out with Claude Opus 4.6.
+- Remaining implementation details and later refinements were completed with GPT-5.4.

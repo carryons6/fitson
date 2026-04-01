@@ -35,7 +35,7 @@ class MarkerDock(QDockWidget):
         super().__init__("Markers", parent)
         self.setObjectName("marker_dock")
 
-        self._color = QColor(0, 255, 0)
+        self._color = QColor(255, 0, 0)
 
         content = QWidget(self)
         layout = QVBoxLayout(content)

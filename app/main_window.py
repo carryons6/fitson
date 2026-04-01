@@ -275,6 +275,7 @@ class MainWindow(QMainWindow):
 
         for action in (
             self.action_open_file,
+            self.action_show_header,
             self.action_fit_to_window,
             self.action_actual_pixels,
             self.action_zoom_in,

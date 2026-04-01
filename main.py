@@ -2,11 +2,20 @@ from __future__ import annotations
 
 import argparse
 import sys
+from pathlib import Path
 
+from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication
 
 from .app import MainWindow
 from .core import OpenFileRequest
+
+
+def _resource_path() -> Path:
+    """Return the resources directory, works both in dev and PyInstaller bundle."""
+    if getattr(sys, "frozen", False):
+        return Path(sys._MEIPASS) / "astroview" / "resources"
+    return Path(__file__).resolve().parent / "resources"
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -47,6 +56,11 @@ def main() -> int:
     args = parser.parse_args()
 
     app = QApplication(sys.argv)
+
+    icon_path = _resource_path() / "icons" / "main_icon.png"
+    if icon_path.exists():
+        app.setWindowIcon(QIcon(str(icon_path)))
+
     window = build_main_window(args)
     window.initialize()
     window.show()

@@ -39,7 +39,7 @@ class ImageCanvas(QGraphicsView):
         self._drag_origin: QPoint | None = None
         self._marker_items: list[QGraphicsEllipseItem] = []
         self._source_items: list[QGraphicsEllipseItem] = []
-        self._source_pen = QPen(QColor(0, 200, 255))
+        self._source_pen = QPen(QColor(255, 0, 0))
         self._source_pen.setWidth(1)
         self._source_pen.setCosmetic(True)
         self._highlight_pen = QPen(QColor(255, 255, 0))
@@ -189,7 +189,7 @@ class ImageCanvas(QGraphicsView):
         """Draw circle markers at the given pixel coordinates."""
 
         self.clear_markers()
-        pen = QPen(color or QColor(0, 255, 0))
+        pen = QPen(color or QColor(255, 0, 0))
         pen.setWidth(line_width)
         pen.setCosmetic(True)
         for x, y in coords:

@@ -11,7 +11,24 @@
       "Bash(timeout 5 python -m astroview)",
       "Bash(echo \"EXIT: $?\")",
       "Bash(python -c \"import ast; ast.parse\\(open\\(''astroview/app/main_window.py''\\).read\\(\\)\\); print\\(''Syntax OK''\\)\")",
-      "Bash(python -c \"import ast; ast.parse\\(open\\(''astroview/app/main_window.py'', encoding=''utf-8''\\).read\\(\\)\\); print\\(''Syntax OK''\\)\")"
+      "Bash(python -c \"import ast; ast.parse\\(open\\(''astroview/app/main_window.py'', encoding=''utf-8''\\).read\\(\\)\\); print\\(''Syntax OK''\\)\")",
+      "Bash(python -c \"from PIL import Image; img = Image.open\\(''astroview/resources/icons/main_icon.png''\\); print\\(img.size, img.mode\\)\")",
+      "Bash(python -c \"import struct; f=open\\(''astroview/resources/icons/main_icon.png'',''rb''\\); d=f.read\\(33\\); f.close\\(\\); w=struct.unpack\\(''>I'',d[16:20]\\)[0]; h=struct.unpack\\(''>I'',d[20:24]\\)[0]; print\\(f''{w}x{h}''\\)\")",
+      "Bash(pip list:*)",
+      "Bash(python -c \"import ast; ast.parse\\(open\\(''astroview/main.py'', encoding=''utf-8''\\).read\\(\\)\\); print\\(''Syntax OK''\\)\")",
+      "Bash(grep:*)",
+      "Bash(python:*)",
+      "Bash(conda activate:*)",
+      "Bash(where python:*)",
+      "Bash(D:/Miniforge/python.exe -c \"from astropy.io import fits; print\\('ok'\\)\")",
+      "Bash(D:/Miniforge/envs/astro/python.exe -c \"\nfrom astropy.io import fits\nhdul = fits.open\\('G:/BD-Tongbu/7851/001402/1.FITS'\\)\nprint\\('Number of HDUs:', len\\(hdul\\)\\)\nfor i, hdu in enumerate\\(hdul\\):\n    tp = type\\(hdu\\).__name__\n    has_data = hdu.data is not None\n    print\\(f'HDU {i}: type={tp}, name={hdu.name}, has_data={has_data}'\\)\n    if has_data:\n        print\\(f'  shape={hdu.data.shape}, ndim={hdu.data.ndim}, dtype={hdu.data.dtype}'\\)\n    print\\(f'  PrimaryHDU={isinstance\\(hdu, fits.PrimaryHDU\\)}, ImageHDU={isinstance\\(hdu, fits.ImageHDU\\)}, CompImageHDU={isinstance\\(hdu, fits.CompImageHDU\\)}'\\)\nhdul.close\\(\\)\n\")",
+      "Read(//d/Miniforge/envs/astro/**)",
+      "Read(//d/Miniforge/envs/astro/Scripts/**)",
+      "Bash(D:\\\\\\\\Miniforge\\\\\\\\envs\\\\\\\\astro\\\\\\\\python.exe -c \"print\\('hello'\\)\")",
+      "Bash(/d/Miniforge/envs/astro/python.exe -c \"print\\('hello'\\)\")",
+      "Bash(/d/Miniforge/envs/astro/python.exe -c \"\nfrom astropy.io import fits\nhdul = fits.open\\('G:/BD-Tongbu/7851/001402/1.FITS'\\)\nprint\\('Number of HDUs:', len\\(hdul\\)\\)\nfor i, hdu in enumerate\\(hdul\\):\n    tp = type\\(hdu\\).__name__\n    has_data = hdu.data is not None\n    print\\(f'HDU {i}: type={tp}, name={hdu.name}, has_data={has_data}'\\)\n    if has_data:\n        print\\(f'  shape={hdu.data.shape}, ndim={hdu.data.ndim}, dtype={hdu.data.dtype}'\\)\n    print\\(f'  PrimaryHDU={isinstance\\(hdu, fits.PrimaryHDU\\)}, ImageHDU={isinstance\\(hdu, fits.ImageHDU\\)}, CompImageHDU={isinstance\\(hdu, fits.CompImageHDU\\)}'\\)\nhdul.close\\(\\)\n\")",
+      "Bash(/d/Miniforge/envs/astro/python.exe << 'PYEOF'\nfrom astropy.io import fits\nhdul = fits.open\\('G:/BD-Tongbu/7851/001402/1.FITS'\\)\nprint\\('Number of HDUs:', len\\(hdul\\)\\)\nfor i, hdu in enumerate\\(hdul\\):\n    tp = type\\(hdu\\).__name__\n    has_data = hdu.data is not None\n    print\\(f'HDU {i}: type={tp}, name={hdu.name}, has_data={has_data}'\\)\n    if has_data:\n        print\\(f'  shape={hdu.data.shape}, ndim={hdu.data.ndim}, dtype={hdu.data.dtype}'\\)\n    print\\(f'  PrimaryHDU={isinstance\\(hdu, fits.PrimaryHDU\\)}, ImageHDU={isinstance\\(hdu, fits.ImageHDU\\)}, CompImageHDU={isinstance\\(hdu, fits.CompImageHDU\\)}'\\)\nhdul.close\\(\\)\nPYEOF)",
+      "Bash(cmd.exe /c \"D:\\\\Miniforge\\\\envs\\\\astro\\\\python.exe /tmp/inspect_fits.py\")"
     ]
   }
 }
