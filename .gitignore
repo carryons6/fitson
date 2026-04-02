@@ -79,3 +79,5 @@ Thumbs.db
 *.fits
 *.FITS
 
+# EXE iss
+*.exe

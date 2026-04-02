@@ -94,6 +94,7 @@ python -m astroview image.fits --hdu 1  # 指定 HDU 打开
 
 ## 开发说明
 
-- 项目的初始构思与整体框架由 GPT-5.4 协助梳理。
+- 项目的初始构思与整体架构由 GPT-5.4 协助梳理。
 - 框架代码实现以及大部分功能开发随后由 Claude Opus 4.6 完成。
-- 其余实现细节、兼容性修复、打包工作与后续打磨，则由 GPT-5.4 完成。
+- 其余实现细节、兼容性修复、打包工作与后续打磨则由 GPT-5.4 完成。
+- 最近由 GPT-5.4 完成的工作还包括 Windows 打包稳定性修复：定位打包后启动失败问题，恢复 `astropy` 运行所需的 `pydoc` 依赖，将 PyInstaller 的 bootstrap 入口收回仓库内，并验证重建后的 `AstroView.exe` 可以正常启动。

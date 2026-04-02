@@ -97,3 +97,4 @@ python -m astroview image.fits --hdu 1  # open a specific HDU
 - The initial project framing and high-level structure were shaped with GPT-5.4.
 - The framework implementation and most feature work were then carried out with Claude Opus 4.6.
 - Remaining implementation details, compatibility fixes, packaging work, and later refinements were completed with GPT-5.4.
+- Recent GPT-5.4 contributions also include the Windows packaging stabilization work: diagnosing the packaged startup failure, restoring the missing `pydoc` dependency required by `astropy`, moving the PyInstaller bootstrap into the repository, and verifying that the rebuilt `AstroView.exe` starts correctly.

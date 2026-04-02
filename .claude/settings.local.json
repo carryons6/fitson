@@ -28,7 +28,24 @@
       "Bash(/d/Miniforge/envs/astro/python.exe -c \"print\\('hello'\\)\")",
       "Bash(/d/Miniforge/envs/astro/python.exe -c \"\nfrom astropy.io import fits\nhdul = fits.open\\('G:/BD-Tongbu/7851/001402/1.FITS'\\)\nprint\\('Number of HDUs:', len\\(hdul\\)\\)\nfor i, hdu in enumerate\\(hdul\\):\n    tp = type\\(hdu\\).__name__\n    has_data = hdu.data is not None\n    print\\(f'HDU {i}: type={tp}, name={hdu.name}, has_data={has_data}'\\)\n    if has_data:\n        print\\(f'  shape={hdu.data.shape}, ndim={hdu.data.ndim}, dtype={hdu.data.dtype}'\\)\n    print\\(f'  PrimaryHDU={isinstance\\(hdu, fits.PrimaryHDU\\)}, ImageHDU={isinstance\\(hdu, fits.ImageHDU\\)}, CompImageHDU={isinstance\\(hdu, fits.CompImageHDU\\)}'\\)\nhdul.close\\(\\)\n\")",
       "Bash(/d/Miniforge/envs/astro/python.exe << 'PYEOF'\nfrom astropy.io import fits\nhdul = fits.open\\('G:/BD-Tongbu/7851/001402/1.FITS'\\)\nprint\\('Number of HDUs:', len\\(hdul\\)\\)\nfor i, hdu in enumerate\\(hdul\\):\n    tp = type\\(hdu\\).__name__\n    has_data = hdu.data is not None\n    print\\(f'HDU {i}: type={tp}, name={hdu.name}, has_data={has_data}'\\)\n    if has_data:\n        print\\(f'  shape={hdu.data.shape}, ndim={hdu.data.ndim}, dtype={hdu.data.dtype}'\\)\n    print\\(f'  PrimaryHDU={isinstance\\(hdu, fits.PrimaryHDU\\)}, ImageHDU={isinstance\\(hdu, fits.ImageHDU\\)}, CompImageHDU={isinstance\\(hdu, fits.CompImageHDU\\)}'\\)\nhdul.close\\(\\)\nPYEOF)",
-      "Bash(cmd.exe /c \"D:\\\\Miniforge\\\\envs\\\\astro\\\\python.exe /tmp/inspect_fits.py\")"
+      "Bash(cmd.exe /c \"D:\\\\Miniforge\\\\envs\\\\astro\\\\python.exe /tmp/inspect_fits.py\")",
+      "Bash(du -sh D:/workspace/fitson/astroview/dist/AstroView/_internal/*/)",
+      "Bash(ls -lhS D:/workspace/fitson/astroview/dist/AstroView/_internal/*.dll)",
+      "Bash(ls -lhS D:/workspace/fitson/astroview/dist/AstroView/_internal/*.pyd)",
+      "Bash(du -sh D:/workspace/fitson/astroview/dist/AstroView/_internal/PySide6/*.dll)",
+      "Bash(du -sh D:/workspace/fitson/astroview/dist/AstroView/_internal/PySide6/*.pyd)",
+      "Bash(du -ch D:/workspace/fitson/astroview/dist/AstroView/_internal/mkl_*.dll)",
+      "Bash(du -ch D:/workspace/fitson/astroview/dist/AstroView/_internal/icu*.dll)",
+      "Bash(du -ch D:/workspace/fitson/astroview/dist/AstroView/_internal/tcl*.dll D:/workspace/fitson/astroview/dist/AstroView/_internal/tk*.dll)",
+      "Bash(conda install:*)",
+      "Bash(D:/Miniforge/envs/astro/python.exe -c \"import numpy as np; print\\('numpy OK, version:', np.__version__\\); a = np.array\\([1,2,3]\\); print\\('dot product:', np.dot\\(a,a\\)\\); import astropy; print\\('astropy OK'\\)\" 2>&1)",
+      "Bash(rm -rf build dist)",
+      "Bash(D:/Miniforge/envs/astro/python.exe -m PyInstaller astroview.spec --noconfirm)",
+      "Bash(timeout 5 ./AstroView.exe)",
+      "Bash(timeout 5 D:/workspace/fitson/astroview/dist/AstroView/AstroView.exe)",
+      "Bash(timeout 8 D:/workspace/fitson/astroview/dist/AstroView/AstroView.exe)",
+      "Bash(rm -rf build)",
+      "Bash(rm -rf dist)"
     ]
   }
 }
