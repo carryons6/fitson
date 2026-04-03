@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Iterator
+from math import sqrt
+from typing import Any, Iterator, Sequence
 
 
 @dataclass(slots=True)
@@ -57,6 +58,7 @@ class SourceCatalog:
         x_offset: int = 0,
         y_offset: int = 0,
         wcs: Any = None,
+        background_rms: float | None = None,
     ) -> "SourceCatalog":
         """Build a catalog from SEP output objects.
 
@@ -68,6 +70,8 @@ class SourceCatalog:
         for i in range(n):
             abs_x = float(objects["x"][i]) + x_offset
             abs_y = float(objects["y"][i]) + y_offset
+            flux = round(float(objects["flux"][i]), 2)
+            snr = cls._compute_snr(objects, i, background_rms)
 
             ra_str = "-"
             dec_str = "-"
@@ -85,14 +89,35 @@ class SourceCatalog:
                 y=round(abs_y, 2),
                 ra=ra_str,
                 dec=dec_str,
-                flux=round(float(objects["flux"][i]), 2),
+                flux=flux,
                 peak=round(float(objects["peak"][i]), 2),
+                snr=round(snr, 2),
                 a=round(float(objects["a"][i]), 3),
                 b=round(float(objects["b"][i]), 3),
                 theta=round(float(objects["theta"][i]), 4),
                 flag=int(objects["flag"][i]),
             ))
         return cls(records=records)
+
+    @staticmethod
+    def _compute_snr(objects: Any, index: int, background_rms: float | None) -> float:
+        """Estimate source SNR from SEP flux, ROI background RMS, and source area."""
+
+        if background_rms is None or background_rms <= 0:
+            return 0.0
+
+        dtype = getattr(objects, "dtype", None)
+        dtype_names = getattr(dtype, "names", ()) or ()
+        npix_values = None
+        if "npix" in dtype_names:
+            npix_values = objects["npix"]
+        elif isinstance(objects, dict) and "npix" in objects:
+            npix_values = objects["npix"]
+        npix = max(1.0, float(npix_values[index])) if npix_values is not None else 1.0
+        noise = float(background_rms) * sqrt(npix)
+        if noise <= 0:
+            return 0.0
+        return abs(float(objects["flux"][index])) / noise
 
     def __len__(self) -> int:
         """Return the number of records in the catalog."""
@@ -126,31 +151,36 @@ class SourceCatalog:
 
         self.records.clear()
 
-    def to_rows(self) -> list[dict[str, Any]]:
+    def to_rows(self, columns: Sequence[str] | None = None) -> list[dict[str, Any]]:
         """Convert the catalog into table/CSV row dictionaries.
 
         Expected caller: `SourceTableDock.populate()`.
         """
 
+        selected = tuple(columns or self.COLUMN_NAMES)
         return [
             {
-                "ID": r.source_id,
-                "X": r.x,
-                "Y": r.y,
-                "RA": r.ra,
-                "Dec": r.dec,
-                "Flux": r.flux,
-                "Peak": r.peak,
-                "SNR": round(r.snr, 2),
-                "A": r.a,
-                "B": r.b,
-                "Theta": r.theta,
-                "Flag": r.flag,
+                key: value
+                for key, value in {
+                    "ID": r.source_id,
+                    "X": r.x,
+                    "Y": r.y,
+                    "RA": r.ra,
+                    "Dec": r.dec,
+                    "Flux": r.flux,
+                    "Peak": r.peak,
+                    "SNR": round(r.snr, 2),
+                    "A": r.a,
+                    "B": r.b,
+                    "Theta": r.theta,
+                    "Flag": r.flag,
+                }.items()
+                if key in selected
             }
             for r in self.records
         ]
 
-    def to_csv(self, path: str) -> None:
+    def to_csv(self, path: str, columns: Sequence[str] | None = None) -> None:
         """Export the catalog to CSV.
 
         Expected caller: `MainWindow.export_catalog()`.
@@ -158,10 +188,11 @@ class SourceCatalog:
 
         import csv
 
-        rows = self.to_rows()
+        field_names = list(columns or self.COLUMN_NAMES)
+        rows = self.to_rows(field_names)
         if not rows:
             return
         with open(path, "w", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=list(self.COLUMN_NAMES))
+            writer = csv.DictWriter(f, fieldnames=field_names)
             writer.writeheader()
             writer.writerows(rows)

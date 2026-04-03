@@ -36,6 +36,7 @@ class TestSourceCatalog(unittest.TestCase):
         objects = {
             "x": np.array([1.234]),
             "y": np.array([5.678]),
+            "npix": np.array([9]),
             "flux": np.array([12.345]),
             "peak": np.array([6.789]),
             "a": np.array([1.23456]),
@@ -44,7 +45,13 @@ class TestSourceCatalog(unittest.TestCase):
             "flag": np.array([2]),
         }
 
-        catalog = SourceCatalog.from_sep_objects(objects, x_offset=10, y_offset=20, wcs=_FakeWCS())
+        catalog = SourceCatalog.from_sep_objects(
+            objects,
+            x_offset=10,
+            y_offset=20,
+            wcs=_FakeWCS(),
+            background_rms=2.0,
+        )
 
         self.assertEqual(len(catalog), 1)
         record = catalog[0]
@@ -55,6 +62,7 @@ class TestSourceCatalog(unittest.TestCase):
         self.assertEqual(record.dec, "22.567800")
         self.assertEqual(record.flux, 12.35)
         self.assertEqual(record.peak, 6.79)
+        self.assertEqual(record.snr, 2.06)
         self.assertEqual(record.a, 1.235)
         self.assertEqual(record.b, 0.988)
         self.assertEqual(record.theta, 0.1235)
@@ -64,6 +72,7 @@ class TestSourceCatalog(unittest.TestCase):
         objects = {
             "x": np.array([1.0]),
             "y": np.array([2.0]),
+            "npix": np.array([4]),
             "flux": np.array([3.0]),
             "peak": np.array([4.0]),
             "a": np.array([1.0]),
@@ -108,6 +117,15 @@ class TestSourceCatalog(unittest.TestCase):
         catalog.clear()
         self.assertEqual(len(catalog), 0)
 
+    def test_to_rows_can_filter_visible_columns(self) -> None:
+        catalog = SourceCatalog(
+            records=[SourceRecord(source_id=1, x=10.0, y=20.0, flux=3.0, peak=4.0, snr=5.0)]
+        )
+
+        rows = catalog.to_rows(["ID", "Flux", "SNR"])
+
+        self.assertEqual(rows, [{"ID": 1, "Flux": 3.0, "SNR": 5.0}])
+
     def test_to_csv_writes_header_and_rows(self) -> None:
         catalog = SourceCatalog(
             records=[SourceRecord(source_id=1, x=10.0, y=20.0, ra="1.0", dec="2.0", flux=3.0, peak=4.0)]
@@ -125,6 +143,20 @@ class TestSourceCatalog(unittest.TestCase):
         self.assertEqual(rows[0]["X"], "10.0")
         self.assertEqual(rows[0]["RA"], "1.0")
         self.assertEqual(rows[0]["Peak"], "4.0")
+
+    def test_to_csv_can_write_selected_columns_only(self) -> None:
+        catalog = SourceCatalog(
+            records=[SourceRecord(source_id=1, x=10.0, y=20.0, flux=3.0, peak=4.0, snr=5.0)]
+        )
+
+        with TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "catalog.csv"
+            catalog.to_csv(str(path), columns=["ID", "Flux", "SNR"])
+
+            with path.open(newline="") as handle:
+                rows = list(csv.DictReader(handle))
+
+        self.assertEqual(rows, [{"ID": "1", "Flux": "3.0", "SNR": "5.0"}])
 
 
 if __name__ == "__main__":

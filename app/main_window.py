@@ -20,6 +20,7 @@ from .contracts import (
     TableSelectionState,
     ViewFeedbackState,
 )
+from .catalog_field_dialog import CatalogFieldDialog
 from .canvas import ImageCanvas
 from .file_load_worker import FITSLoadWorker
 from .frame_player_dock import FramePlayerDock
@@ -82,6 +83,7 @@ class MainWindow(QMainWindow):
         self.action_run_sep: QAction | None = None
         self.action_show_markers: QAction | None = None
         self.action_append_frames: QAction | None = None
+        self.action_target_info_fields: QAction | None = None
 
         self.fits_service = fits_service or FITSService()
         self.sep_service = sep_service or SEPService()
@@ -271,6 +273,8 @@ class MainWindow(QMainWindow):
             self.menu_tools.addAction(self.action_run_sep)
         if self.action_show_markers is not None:
             self.menu_tools.addAction(self.action_show_markers)
+        if self.action_target_info_fields is not None:
+            self.menu_tools.addAction(self.action_target_info_fields)
 
         self.menu_view.addSeparator()
         if self.source_table_dock is not None:
@@ -370,6 +374,7 @@ class MainWindow(QMainWindow):
         self.action_run_sep.setShortcut("Ctrl+R")
         self.action_show_markers = QAction("Markers", self)
         self.action_show_markers.setShortcut("Ctrl+M")
+        self.action_target_info_fields = QAction("Target Info Fields...", self)
 
         self.stretch_selector = QComboBox(self)
         self.stretch_selector.setObjectName("stretch_selector")
@@ -436,6 +441,8 @@ class MainWindow(QMainWindow):
             self.action_run_sep.triggered.connect(self.run_sep_extract)
         if self.action_show_markers is not None:
             self.action_show_markers.triggered.connect(self._show_marker_dock)
+        if self.action_target_info_fields is not None:
+            self.action_target_info_fields.triggered.connect(self._show_target_info_fields_dialog)
         if self.action_append_frames is not None:
             self.action_append_frames.triggered.connect(self._append_frames)
         if self.marker_dock is not None:
@@ -870,9 +877,10 @@ class MainWindow(QMainWindow):
 
         if catalog is None:
             return []
+        visible_columns = self._visible_source_table_columns()
         return [
             TableRowViewModel(row_index=i, values=row)
-            for i, row in enumerate(catalog.to_rows())
+            for i, row in enumerate(catalog.to_rows(visible_columns))
         ]
 
     def build_table_selection_state(self, selected_row: int | None = None) -> TableSelectionState:
@@ -1024,6 +1032,26 @@ class MainWindow(QMainWindow):
             self.marker_dock.show()
             self.marker_dock.raise_()
 
+    def _show_target_info_fields_dialog(self) -> None:
+        """Open the source-field selection dialog from the menu bar."""
+
+        if self.source_table_dock is None:
+            return
+
+        dialog = CatalogFieldDialog(self.source_table_dock.columns, self)
+        if dialog.exec() != dialog.DialogCode.Accepted:
+            return
+
+        self.source_table_dock.configure_columns(dialog.selected_columns())
+        self.sync_catalog_views()
+
+    def _visible_source_table_columns(self) -> list[str]:
+        """Return enabled source-table column keys in display order."""
+
+        if self.source_table_dock is None:
+            return list(SourceCatalog.COLUMN_NAMES)
+        return [column.key for column in self.source_table_dock.columns if column.visible]
+
     def _apply_markers(self, entries: list) -> None:
         """Draw markers on the canvas. Converts WCS entries to pixel coords."""
 
@@ -1089,7 +1117,7 @@ class MainWindow(QMainWindow):
         if not path:
             return
         try:
-            self.current_catalog.to_csv(path)
+            self.current_catalog.to_csv(path, columns=self._visible_source_table_columns())
             if self.app_status_bar is not None:
                 self.app_status_bar.showMessage(f"Exported {len(self.current_catalog)} sources to {path}", 3000)
         except Exception as e:

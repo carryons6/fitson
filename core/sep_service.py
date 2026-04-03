@@ -105,6 +105,7 @@ class SEPService:
             x_offset=x_offset,
             y_offset=y_offset,
             wcs=wcs,
+            background_rms=float(bkg.globalrms),
         )
 
     def extract_from_roi(

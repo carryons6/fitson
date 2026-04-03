@@ -88,7 +88,13 @@ class TestSEPService(unittest.TestCase):
         self.assertEqual(extract_kwargs["deblend_cont"], 0.02)
         self.assertTrue(extract_kwargs["clean"])
         self.assertEqual(extract_kwargs["clean_param"], 1.0)
-        catalog_mock.assert_called_once_with(sep_objects, x_offset=10, y_offset=20, wcs=wcs)
+        catalog_mock.assert_called_once_with(
+            sep_objects,
+            x_offset=10,
+            y_offset=20,
+            wcs=wcs,
+            background_rms=0.25,
+        )
 
     def test_extract_from_roi_forwards_offsets(self) -> None:
         service = SEPService()

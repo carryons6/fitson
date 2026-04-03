@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import os
 import unittest
-from unittest.mock import Mock, patch
+from types import SimpleNamespace
+from unittest.mock import MagicMock, Mock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -15,8 +16,10 @@ REPO_PARENT = Path(__file__).resolve().parents[2]
 if str(REPO_PARENT) not in sys.path:
     sys.path.insert(0, str(REPO_PARENT))
 
+from astroview.app.contracts import TableColumnSpec
 from astroview.app.main_window import MainWindow
 from astroview.core.fits_data import FITSData
+from astroview.core.source_catalog import SourceCatalog, SourceRecord
 
 
 class _FakeSignal:
@@ -191,6 +194,63 @@ class TestMainWindowLoading(unittest.TestCase):
             cancel_mock.assert_not_called()
             self.assertIn(8, window._render_threads)
             self.assertIn(1, window._latest_render_request_by_index)
+        finally:
+            window.deleteLater()
+
+    def test_build_table_rows_uses_visible_source_columns(self) -> None:
+        window = MainWindow()
+        window.source_table_dock = Mock(
+            columns=[
+                TableColumnSpec(key="ID", title="ID", visible=True),
+                TableColumnSpec(key="Flux", title="Flux", visible=True),
+                TableColumnSpec(key="SNR", title="SNR", visible=False),
+            ]
+        )
+        catalog = SourceCatalog(
+            records=[SourceRecord(source_id=1, x=10.0, y=20.0, flux=3.0, peak=4.0, snr=5.0)]
+        )
+        try:
+            rows = window.build_table_rows(catalog)
+
+            self.assertEqual(rows[0].values, {"ID": 1, "Flux": 3.0})
+        finally:
+            window.deleteLater()
+
+    def test_show_target_info_fields_dialog_reconfigures_columns(self) -> None:
+        window = MainWindow()
+        window.source_table_dock = Mock(columns=[TableColumnSpec(key="ID", title="ID")])
+        selected_columns = [TableColumnSpec(key="Flux", title="Flux")]
+        dialog = Mock()
+        dialog.DialogCode = SimpleNamespace(Accepted=1)
+        dialog.exec.return_value = 1
+        dialog.selected_columns.return_value = selected_columns
+        try:
+            with patch("astroview.app.main_window.CatalogFieldDialog", return_value=dialog):
+                with patch.object(window, "sync_catalog_views") as sync_mock:
+                    window._show_target_info_fields_dialog()
+
+            window.source_table_dock.configure_columns.assert_called_once_with(selected_columns)
+            sync_mock.assert_called_once_with()
+        finally:
+            window.deleteLater()
+
+    def test_export_catalog_uses_visible_source_columns(self) -> None:
+        window = MainWindow()
+        window.current_catalog = MagicMock()
+        window.app_status_bar = Mock()
+        window.source_table_dock = Mock(
+            columns=[
+                TableColumnSpec(key="ID", title="ID", visible=True),
+                TableColumnSpec(key="Flux", title="Flux", visible=True),
+                TableColumnSpec(key="SNR", title="SNR", visible=False),
+            ]
+        )
+        window.current_catalog.__len__.return_value = 1
+        try:
+            with patch("astroview.app.main_window.QFileDialog.getSaveFileName", return_value=("catalog.csv", "")):
+                window.export_catalog()
+
+            window.current_catalog.to_csv.assert_called_once_with("catalog.csv", columns=["ID", "Flux"])
         finally:
             window.deleteLater()
 
