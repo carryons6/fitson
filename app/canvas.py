@@ -39,6 +39,7 @@ class ImageCanvas(QGraphicsView):
         self._drag_origin: QPoint | None = None
         self._marker_items: list[QGraphicsEllipseItem] = []
         self._source_items: list[QGraphicsEllipseItem] = []
+        self._roi_color = QColor(255, 0, 0)
         self._source_pen = QPen(QColor(255, 0, 0))
         self._source_pen.setWidth(1)
         self._source_pen.setCosmetic(True)
@@ -55,6 +56,7 @@ class ImageCanvas(QGraphicsView):
         self._scene.addItem(self._pixmap_item)
         self._scene.addItem(self._feedback_item)
         self._feedback_item.setVisible(True)
+        self.set_roi_color(self._roi_color)
 
     def set_image(self, image: QImage | None) -> None:
         """Set the current image shown on the canvas.
@@ -206,6 +208,17 @@ class ImageCanvas(QGraphicsView):
         for item in self._marker_items:
             self._scene.removeItem(item)
         self._marker_items.clear()
+
+    def set_roi_color(self, color: QColor | None) -> None:
+        """Update the right-drag ROI rubber-band color."""
+
+        self._roi_color = QColor(color or QColor(255, 0, 0))
+        self._rubber_band.setStyleSheet(
+            "QRubberBand {"
+            f"border: 2px solid {self._roi_color.name()};"
+            f"background-color: rgba({self._roi_color.red()}, {self._roi_color.green()}, {self._roi_color.blue()}, 32);"
+            "}"
+        )
 
     def emit_roi_selected(self, selection: ROISelection) -> None:
         """Bridge structured ROI state to the public Qt signal contract."""

@@ -30,6 +30,7 @@ class MarkerDock(QDockWidget):
     """
 
     markers_updated = Signal(list)  # list[MarkerSpec]
+    color_changed = Signal(QColor)
 
     def __init__(self, parent: Any | None = None) -> None:
         super().__init__("Markers", parent)
@@ -220,6 +221,7 @@ class MarkerDock(QDockWidget):
         if color.isValid():
             self._color = color
             self._update_color_preview()
+            self.color_changed.emit(self.color())
 
     def _update_color_preview(self) -> None:
         self.color_preview.setStyleSheet(
