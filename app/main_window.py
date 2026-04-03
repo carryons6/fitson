@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import QByteArray, Qt, QThread, QSettings
+from PySide6.QtCore import QByteArray, Qt, QThread, QSettings, QTimer
 from PySide6.QtGui import QAction, QImage, QKeySequence
 from PySide6.QtWidgets import QComboBox, QDockWidget, QFileDialog, QLabel, QMainWindow, QToolBar
 
@@ -119,8 +119,9 @@ class MainWindow(QMainWindow):
         self._render_workers: dict[int, FrameRenderWorker] = {}
         self._render_request_index_by_id: dict[int, int] = {}
         self._latest_render_request_by_index: dict[int, int] = {}
+        self._startup_request_applied = False
 
-    def initialize(self) -> None:
+    def initialize(self, *, apply_startup_request: bool = True) -> None:
         """High-level bootstrap entry for the window skeleton.
 
         Intended sequence:
@@ -137,7 +138,15 @@ class MainWindow(QMainWindow):
         self._restore_workspace_state()
         self.connect_signals()
         self.reset_view_state()
-        self.apply_startup_request()
+        if apply_startup_request:
+            self.apply_startup_request()
+
+    def schedule_startup_request(self) -> None:
+        """Defer startup-file opening until the window and event loop are ready."""
+
+        if not self.initial_path or self._startup_request_applied:
+            return
+        QTimer.singleShot(0, self.apply_startup_request)
 
     def build_ui(self) -> None:
         """Create menus, toolbars, central widgets, and docks.
@@ -486,6 +495,10 @@ class MainWindow(QMainWindow):
         - startup path provided: build `OpenFileRequest` and forward to `open_file_from_request()`
         """
 
+        if self._startup_request_applied or not self.initial_path:
+            return
+
+        self._startup_request_applied = True
         if self.initial_path:
             self.open_file_from_request(
                 OpenFileRequest(path=self.initial_path, hdu_index=self.initial_hdu)

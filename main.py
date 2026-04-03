@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 
 from PySide6.QtGui import QIcon
+from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication
 
 from .app import MainWindow
@@ -62,8 +63,9 @@ def main() -> int:
         app.setWindowIcon(QIcon(str(icon_path)))
 
     window = build_main_window(args)
-    window.initialize()
+    window.initialize(apply_startup_request=False)
     window.show()
+    QTimer.singleShot(0, window.schedule_startup_request)
     return app.exec()
 
 

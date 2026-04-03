@@ -81,6 +81,30 @@ class TestMainWindowLoading(unittest.TestCase):
         finally:
             window.deleteLater()
 
+    def test_apply_startup_request_opens_initial_file_only_once(self) -> None:
+        window = MainWindow(initial_path="tests/data/1.FITS", initial_hdu=2)
+        try:
+            with patch.object(window, "open_file_from_request") as open_mock:
+                window.apply_startup_request()
+                window.apply_startup_request()
+
+            open_mock.assert_called_once()
+            request = open_mock.call_args.args[0]
+            self.assertEqual(request.path, "tests/data/1.FITS")
+            self.assertEqual(request.hdu_index, 2)
+        finally:
+            window.deleteLater()
+
+    def test_schedule_startup_request_defers_when_initial_path_is_present(self) -> None:
+        window = MainWindow(initial_path="tests/data/1.FITS")
+        try:
+            with patch("astroview.app.main_window.QTimer.singleShot") as single_shot_mock:
+                window.schedule_startup_request()
+
+            single_shot_mock.assert_called_once_with(0, window.apply_startup_request)
+        finally:
+            window.deleteLater()
+
     def test_open_file_with_explicit_path_remembers_parent_directory(self) -> None:
         window = MainWindow()
         window._settings = Mock()
