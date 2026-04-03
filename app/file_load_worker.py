@@ -20,6 +20,7 @@ class FITSLoadWorker(QObject):
         hdu_index: int | None = None,
         *,
         preview_first_frame: bool = False,
+        preview_each_frame: bool = False,
         stretch_name: str = "Linear",
         interval_name: str = "ZScale",
         preview_max_dimension: int = 2048,
@@ -28,6 +29,7 @@ class FITSLoadWorker(QObject):
         self.paths = list(paths)
         self.hdu_index = hdu_index
         self.preview_first_frame = preview_first_frame
+        self.preview_each_frame = preview_each_frame
         self.stretch_name = stretch_name
         self.interval_name = interval_name
         self.preview_max_dimension = preview_max_dimension
@@ -47,7 +49,9 @@ class FITSLoadWorker(QObject):
                 self.file_error.emit(path, str(exc))
             else:
                 preview_image_u8 = None
-                if preview_pending:
+                if self.preview_each_frame:
+                    preview_image_u8 = self._render_preview(data)
+                elif preview_pending:
                     preview_pending = False
                     preview_image_u8 = self._render_preview(data)
                 self.file_loaded.emit(data, preview_image_u8)

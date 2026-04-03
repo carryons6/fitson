@@ -127,8 +127,11 @@ class FramePlayerDock(QDockWidget):
 
         self._frame_count = count
         max_idx = max(0, count - 1)
+        if count < 2 and self._playing:
+            self._stop_playback()
         self.frame_slider.setMaximum(max_idx)
         self.frame_spin.setMaximum(max_idx)
+        self.set_current_frame(min(self.current_frame(), max_idx))
         self.total_label.setText(f"/ {count}")
         if count > 0:
             self.info_label.setText(f"{count} frame(s) loaded.")

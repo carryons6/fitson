@@ -19,6 +19,30 @@ from astroview.app.main_window import MainWindow
 from astroview.core.fits_data import FITSData
 
 
+class _FakeSignal:
+    def connect(self, _slot) -> None:
+        return None
+
+
+class _FakeThread:
+    def __init__(self, parent=None) -> None:
+        self.parent = parent
+        self.started = _FakeSignal()
+        self.finished = _FakeSignal()
+
+    def isRunning(self) -> bool:
+        return False
+
+    def start(self) -> None:
+        return None
+
+    def quit(self) -> None:
+        return None
+
+    def deleteLater(self) -> None:
+        return None
+
+
 class TestMainWindowLoading(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -139,6 +163,34 @@ class TestMainWindowLoading(unittest.TestCase):
             self.assertEqual(window._frame_dirty, [False])
             qimage_mock.assert_called_once_with("full-u8")
             show_mock.assert_called_once_with()
+        finally:
+            window.deleteLater()
+
+    def test_schedule_frame_render_does_not_cancel_other_active_render_requests(self) -> None:
+        window = MainWindow()
+        window._frames = [FITSData(path="frame-0.fits"), FITSData(path="frame-1.fits")]
+        window._frame_images = [None, None]
+        window._frame_dirty = [True, True]
+        running_thread = Mock()
+        running_thread.isRunning.return_value = True
+        window._render_threads[8] = running_thread
+        window._latest_render_request_by_index[0] = 8
+        try:
+            with patch.object(window, "_cancel_active_frame_renders") as cancel_mock:
+                with patch("astroview.app.main_window.QThread", _FakeThread):
+                    with patch("astroview.app.main_window.FrameRenderWorker") as worker_cls:
+                        worker_cls.return_value = Mock(
+                            moveToThread=Mock(),
+                            preview_ready=_FakeSignal(),
+                            render_ready=_FakeSignal(),
+                            render_error=_FakeSignal(),
+                            finished=_FakeSignal(),
+                        )
+                        window._schedule_frame_render(1)
+
+            cancel_mock.assert_not_called()
+            self.assertIn(8, window._render_threads)
+            self.assertIn(1, window._latest_render_request_by_index)
         finally:
             window.deleteLater()
 

@@ -507,6 +507,7 @@ class MainWindow(QMainWindow):
             paths,
             hdu_index=hdu_index,
             preview_first_frame=not append,
+            preview_each_frame=True,
             stretch_name=self.fits_service.current_stretch,
             interval_name=self.fits_service.current_interval,
             preview_max_dimension=2048,
@@ -555,11 +556,6 @@ class MainWindow(QMainWindow):
             for thread in list(self._render_threads.values()):
                 thread.wait()
 
-        for request_id, thread in list(self._render_threads.items()):
-            if not thread.isRunning():
-                self._render_threads.pop(request_id, None)
-                self._render_workers.pop(request_id, None)
-
     def _handle_frame_render_thread_finished(self, request_id: int) -> None:
         """Drop bookkeeping for a completed frame-render request."""
 
@@ -580,7 +576,6 @@ class MainWindow(QMainWindow):
             if thread is not None and thread.isRunning():
                 return
 
-        self._cancel_active_frame_renders(wait=False)
         self._render_request_id += 1
         request_id = self._render_request_id
         self._latest_render_request_by_index[index] = request_id
@@ -602,9 +597,9 @@ class MainWindow(QMainWindow):
         worker.preview_ready.connect(self._handle_frame_preview_rendered)
         worker.render_ready.connect(self._handle_frame_rendered)
         worker.render_error.connect(self._handle_frame_render_error)
-        worker.finished.connect(self._handle_frame_render_thread_finished)
         worker.finished.connect(thread.quit)
         worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(lambda rid=request_id: self._handle_frame_render_thread_finished(rid))
         thread.finished.connect(thread.deleteLater)
 
         self._render_threads[request_id] = thread

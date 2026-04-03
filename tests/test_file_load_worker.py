@@ -113,6 +113,24 @@ class TestFITSLoadWorker(unittest.TestCase):
         self.assertIsNone(loaded[1][1])
         render_mock.assert_called_once()
 
+    def test_run_renders_preview_for_every_frame_when_enabled(self) -> None:
+        worker = FITSLoadWorker(["a.fits", "b.fits"], preview_each_frame=True)
+        loaded: list[tuple[FITSData, object]] = []
+
+        worker.file_loaded.connect(lambda data, preview: loaded.append((data, preview)))
+
+        with patch("astroview.app.file_load_worker.QThread.currentThread", return_value=_FakeThread()):
+            with patch(
+                "astroview.app.file_load_worker.FITSData.load",
+                side_effect=lambda path, hdu_index: FITSData(path=path, hdu_index=hdu_index),
+            ):
+                with patch.object(worker, "_render_preview", side_effect=["preview-a", "preview-b"]) as render_mock:
+                    worker.run()
+
+        self.assertEqual([item.path for item, _ in loaded], ["a.fits", "b.fits"])
+        self.assertEqual([preview for _, preview in loaded], ["preview-a", "preview-b"])
+        self.assertEqual(render_mock.call_count, 2)
+
 
 if __name__ == "__main__":
     unittest.main()
