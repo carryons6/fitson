@@ -28,6 +28,9 @@ class FramePlayerDock(QDockWidget):
 
         self._frame_count = 0
         self._playing = False
+        self._rendering_current_frame = False
+        self._awaiting_current_frame_preview = False
+        self._base_info_text = "No frames loaded."
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._advance_frame)
 
@@ -103,7 +106,7 @@ class FramePlayerDock(QDockWidget):
         layout.addWidget(param_row)
 
         # --- Info ---
-        self.info_label = QLabel("No frames loaded.", content)
+        self.info_label = QLabel(self._base_info_text, content)
         layout.addWidget(self.info_label)
 
         layout.addStretch()
@@ -134,9 +137,30 @@ class FramePlayerDock(QDockWidget):
         self.set_current_frame(min(self.current_frame(), max_idx))
         self.total_label.setText(f"/ {count}")
         if count > 0:
-            self.info_label.setText(f"{count} frame(s) loaded.")
+            self._base_info_text = f"{count} frame(s) loaded."
         else:
-            self.info_label.setText("No frames loaded.")
+            self._base_info_text = "No frames loaded."
+        self._refresh_info_label()
+
+    def set_render_state(self, is_rendering: bool, *, has_preview: bool) -> None:
+        """Annotate playback UI with the active frame's render progress."""
+
+        self._rendering_current_frame = is_rendering
+        self._awaiting_current_frame_preview = is_rendering and not has_preview
+        self._refresh_info_label()
+
+    def _refresh_info_label(self) -> None:
+        """Rebuild the dock's passive status text."""
+
+        if not self._rendering_current_frame:
+            self.info_label.setText(self._base_info_text)
+            return
+
+        if self._awaiting_current_frame_preview:
+            suffix = " Waiting for preview..."
+        else:
+            suffix = " Rendering full frame..."
+        self.info_label.setText(f"{self._base_info_text}{suffix}")
 
     def current_frame(self) -> int:
         return self.frame_slider.value()
@@ -186,6 +210,9 @@ class FramePlayerDock(QDockWidget):
         self._timer.setInterval(int(1000.0 / fps))
 
     def _advance_frame(self) -> None:
+        if self._awaiting_current_frame_preview:
+            return
+
         current = self.frame_slider.value()
         last = self._frame_count - 1
 

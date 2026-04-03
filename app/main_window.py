@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import Qt, QThread
+from PySide6.QtCore import QByteArray, Qt, QThread, QSettings
 from PySide6.QtGui import QAction, QImage, QKeySequence
 from PySide6.QtWidgets import QComboBox, QDockWidget, QFileDialog, QLabel, QMainWindow, QToolBar
 
@@ -41,6 +41,13 @@ class MainWindow(QMainWindow):
     - Keeps all module-to-module calls centralized here.
     """
 
+    PREVIEW_PROFILE_CONFIGS: dict[str, dict[str, int | tuple[int, ...]]] = {
+        "Fast": {"load_dimension": 1024, "render_dimensions": (1024,)},
+        "Balanced": {"load_dimension": 2048, "render_dimensions": (1024, 2048)},
+        "Detailed": {"load_dimension": 3072, "render_dimensions": (1024, 2048, 3072)},
+    }
+    DEFAULT_PREVIEW_PROFILE = "Balanced"
+
     def __init__(
         self,
         initial_path: str | None = None,
@@ -70,6 +77,7 @@ class MainWindow(QMainWindow):
         self.main_toolbar: Any = None
         self.stretch_selector: Any = None
         self.interval_selector: Any = None
+        self.preview_profile_selector: Any = None
 
         self.action_open_file: QAction | None = None
         self.action_export_catalog: QAction | None = None
@@ -88,12 +96,15 @@ class MainWindow(QMainWindow):
         self.fits_service = fits_service or FITSService()
         self.sep_service = sep_service or SEPService()
         self.current_catalog: SourceCatalog | None = None
+        self._settings = QSettings("AstroView", "AstroView")
+        self._preview_profile_name = self.DEFAULT_PREVIEW_PROFILE
 
         from ..core.fits_data import FITSData
         self._frames: list[FITSData] = []
         self._frame_images: list[QImage | None] = []
         self._frame_dirty: list[bool] = []
         self._current_frame_index: int = 0
+        self._frame_step_direction: int = 1
 
         self._load_thread: QThread | None = None
         self._load_worker: FITSLoadWorker | None = None
@@ -106,6 +117,7 @@ class MainWindow(QMainWindow):
         self._render_request_id: int = 0
         self._render_threads: dict[int, QThread] = {}
         self._render_workers: dict[int, FrameRenderWorker] = {}
+        self._render_request_index_by_id: dict[int, int] = {}
         self._latest_render_request_by_index: dict[int, int] = {}
 
     def initialize(self) -> None:
@@ -120,7 +132,9 @@ class MainWindow(QMainWindow):
         """
 
         self.create_actions()
+        self._restore_render_preferences()
         self.build_ui()
+        self._restore_workspace_state()
         self.connect_signals()
         self.reset_view_state()
         self.apply_startup_request()
@@ -311,6 +325,9 @@ class MainWindow(QMainWindow):
         self.main_toolbar.addWidget(QLabel("Interval:", self))
         if self.interval_selector is not None:
             self.main_toolbar.addWidget(self.interval_selector)
+        self.main_toolbar.addWidget(QLabel("Preview:", self))
+        if self.preview_profile_selector is not None:
+            self.main_toolbar.addWidget(self.preview_profile_selector)
         self.sync_render_controls()
 
     def create_file_actions(self) -> None:
@@ -380,6 +397,8 @@ class MainWindow(QMainWindow):
         self.stretch_selector.setObjectName("stretch_selector")
         self.interval_selector = QComboBox(self)
         self.interval_selector.setObjectName("interval_selector")
+        self.preview_profile_selector = QComboBox(self)
+        self.preview_profile_selector.setObjectName("preview_profile_selector")
 
     def bind_canvas_signals(self) -> None:
         """Bind `ImageCanvas` signals to window controller methods."""
@@ -411,6 +430,12 @@ class MainWindow(QMainWindow):
             self.stretch_selector.currentTextChanged.connect(self._handle_stretch_changed)
         if self.interval_selector is not None:
             self.interval_selector.currentTextChanged.connect(self._handle_interval_changed)
+        if self.preview_profile_selector is not None:
+            self.preview_profile_selector.currentTextChanged.connect(self._handle_preview_profile_changed)
+        if self.marker_dock is not None:
+            self.marker_dock.radius_spin.valueChanged.connect(self._persist_marker_preferences)
+            self.marker_dock.line_width_spin.valueChanged.connect(self._persist_marker_preferences)
+            self.marker_dock.color_changed.connect(self._persist_marker_preferences)
 
     def bind_action_triggers(self) -> None:
         """Bind QAction triggers to their command handlers."""
@@ -448,6 +473,8 @@ class MainWindow(QMainWindow):
         if self.marker_dock is not None:
             self.marker_dock.markers_updated.connect(self._apply_markers)
             self.marker_dock.color_changed.connect(self._handle_marker_color_changed)
+            self.marker_dock.line_width_changed.connect(self._handle_marker_line_width_changed)
+            self._sync_marker_visual_style()
         if self.frame_player_dock is not None:
             self.frame_player_dock.frame_changed.connect(self._switch_frame)
 
@@ -472,19 +499,110 @@ class MainWindow(QMainWindow):
 
         if not path:
             paths, _ = QFileDialog.getOpenFileNames(
-                self, "Open FITS File(s)", "", "FITS Files (*.fits *.fit *.fts);;All Files (*)"
+                self,
+                "Open FITS File(s)",
+                self._last_open_directory(),
+                "FITS Files (*.fits *.fit *.fts);;All Files (*)",
             )
             if not paths:
                 return
         else:
             paths = [path]
 
+        self._remember_open_directory(paths)
         self._start_frame_load(paths, hdu_index=hdu_index, append=False)
 
     def open_file_from_request(self, request: OpenFileRequest) -> None:
         """Structured wrapper around the public open-file entry point."""
 
         self.open_file(path=request.path, hdu_index=request.hdu_index)
+
+    def _restore_render_preferences(self) -> None:
+        """Load persisted render preferences into the service before UI build."""
+
+        stretch = self._settings.value("render/stretch", self.fits_service.current_stretch, type=str)
+        if stretch in self.fits_service.AVAILABLE_STRETCHES:
+            self.fits_service.set_stretch(stretch)
+
+        interval = self._settings.value("render/interval", self.fits_service.current_interval, type=str)
+        if interval in self.fits_service.AVAILABLE_INTERVALS:
+            self.fits_service.set_interval(interval)
+
+        preview_profile = self._settings.value(
+            "render/preview_profile",
+            self._preview_profile_name,
+            type=str,
+        )
+        self._preview_profile_name = self._normalize_preview_profile_name(preview_profile)
+
+    def _restore_workspace_state(self) -> None:
+        """Restore persisted marker preferences and window layout."""
+
+        if self.marker_dock is not None:
+            self.marker_dock.set_radius(self._settings.value("markers/radius", self.marker_dock.radius(), type=float))
+            self.marker_dock.set_line_width(
+                self._settings.value("markers/line_width", self.marker_dock.line_width(), type=int)
+            )
+            self.marker_dock.set_color(
+                self._settings.value("markers/color", self.marker_dock.color().name(), type=str)
+            )
+
+        geometry = self._settings.value("window/geometry", QByteArray(), type=QByteArray)
+        if geometry:
+            self.restoreGeometry(geometry)
+
+        state = self._settings.value("window/state", QByteArray(), type=QByteArray)
+        if state:
+            self.restoreState(state)
+
+        self.sync_render_controls()
+        self._sync_marker_visual_style()
+
+    def _persist_render_preferences(self) -> None:
+        """Store the current render-control selections."""
+
+        self._settings.setValue("render/stretch", self.fits_service.current_stretch)
+        self._settings.setValue("render/interval", self.fits_service.current_interval)
+        self._settings.setValue("render/preview_profile", self._preview_profile_name)
+
+    def _normalize_preview_profile_name(self, name: str | None) -> str:
+        """Return a valid preview-profile name, falling back to the default."""
+
+        if name in self.PREVIEW_PROFILE_CONFIGS:
+            return str(name)
+        return self.DEFAULT_PREVIEW_PROFILE
+
+    def _preview_profile_config(self) -> dict[str, int | tuple[int, ...]]:
+        """Return the active preview pipeline configuration."""
+
+        return self.PREVIEW_PROFILE_CONFIGS[self._preview_profile_name]
+
+    def _preview_load_dimension(self) -> int:
+        """Return the max preview dimension used during file loading."""
+
+        return int(self._preview_profile_config()["load_dimension"])
+
+    def _preview_render_dimensions(self) -> tuple[int, ...]:
+        """Return the staged preview dimensions used during background rendering."""
+
+        dimensions = self._preview_profile_config()["render_dimensions"]
+        return tuple(int(value) for value in dimensions)
+
+    def _persist_marker_preferences(self, *_args: Any) -> None:
+        """Store the current marker parameter selections."""
+
+        if self.marker_dock is None:
+            return
+
+        self._settings.setValue("markers/radius", self.marker_dock.radius())
+        self._settings.setValue("markers/line_width", self.marker_dock.line_width())
+        self._settings.setValue("markers/color", self.marker_dock.color().name())
+
+    def _persist_window_state(self) -> None:
+        """Store the current window geometry and dock layout."""
+
+        self._settings.setValue("window/geometry", self.saveGeometry())
+        self._settings.setValue("window/state", self.saveState())
 
 
     def _start_frame_load(
@@ -518,7 +636,7 @@ class MainWindow(QMainWindow):
             preview_each_frame=True,
             stretch_name=self.fits_service.current_stretch,
             interval_name=self.fits_service.current_interval,
-            preview_max_dimension=2048,
+            preview_max_dimension=self._preview_load_dimension(),
         )
         self._load_worker.moveToThread(self._load_thread)
 
@@ -569,6 +687,35 @@ class MainWindow(QMainWindow):
 
         self._render_threads.pop(request_id, None)
         self._render_workers.pop(request_id, None)
+        self._render_request_index_by_id.pop(request_id, None)
+
+    def _cancel_frame_render_request(self, request_id: int, *, wait: bool = False) -> None:
+        """Request cancellation for one active frame-render request."""
+
+        thread = self._render_threads.get(request_id)
+        if thread is None or not thread.isRunning():
+            return
+
+        thread.requestInterruption()
+        thread.quit()
+        if wait:
+            thread.wait()
+
+    def _cancel_stale_frame_renders(self, preferred_index: int, *, wait: bool = False) -> None:
+        """Stop active render requests for frames other than the preferred one."""
+
+        for request_id, index in list(self._render_request_index_by_id.items()):
+            if index != preferred_index:
+                self._cancel_frame_render_request(request_id, wait=wait)
+
+    def _has_active_render_for_index(self, index: int) -> bool:
+        """Return whether the given frame currently has a running render request."""
+
+        request_id = self._latest_render_request_by_index.get(index)
+        if request_id is None:
+            return False
+        thread = self._render_threads.get(request_id)
+        return thread is not None and thread.isRunning()
 
     def _schedule_frame_render(self, index: int) -> None:
         """Render the requested frame in the background."""
@@ -577,6 +724,8 @@ class MainWindow(QMainWindow):
             return
         if not self._frame_dirty[index]:
             return
+        if index != self._current_frame_index and self._has_active_render_for_index(self._current_frame_index):
+            return
 
         request_id = self._latest_render_request_by_index.get(index)
         if request_id is not None:
@@ -584,9 +733,13 @@ class MainWindow(QMainWindow):
             if thread is not None and thread.isRunning():
                 return
 
+        if index == self._current_frame_index:
+            self._cancel_stale_frame_renders(index)
+
         self._render_request_id += 1
         request_id = self._render_request_id
         self._latest_render_request_by_index[index] = request_id
+        self._render_request_index_by_id[request_id] = index
 
         thread = QThread(self)
         worker = FrameRenderWorker(
@@ -596,7 +749,7 @@ class MainWindow(QMainWindow):
             data=self._frames[index],
             stretch_name=self.fits_service.current_stretch,
             interval_name=self.fits_service.current_interval,
-            preview_max_dimension=2048,
+            preview_dimensions=self._preview_render_dimensions(),
         )
         worker.moveToThread(thread)
         self._render_workers[request_id] = worker
@@ -637,6 +790,7 @@ class MainWindow(QMainWindow):
         self._frame_images[index] = self._qimage_from_u8(image_u8)
         if self._current_frame_index == index:
             self._show_current_frame_image()
+            self._sync_current_canvas_image_state()
             if self.canvas is not None and len(self._frames) == 1:
                 self.canvas.show_actual_pixels()
                 self.canvas.centerOn(self.canvas._pixmap_item)
@@ -657,6 +811,8 @@ class MainWindow(QMainWindow):
         self._frame_dirty[index] = False
         if self._current_frame_index == index:
             self._show_current_frame_image()
+            self._sync_current_canvas_image_state()
+            self._prewarm_adjacent_frame()
 
     def _handle_frame_render_error(
         self,
@@ -669,6 +825,9 @@ class MainWindow(QMainWindow):
 
         if not self._should_accept_render_result(request_id, generation, index):
             return
+        self._frame_dirty[index] = False
+        if self._current_frame_index == index:
+            self._sync_current_canvas_image_state()
         self.show_error("Render failed", detail)
 
     def _set_loading_state(
@@ -769,6 +928,7 @@ class MainWindow(QMainWindow):
         self._stop_active_frame_load(wait=True)
         self._cancel_active_frame_renders(wait=True)
         self._render_generation += 1
+        self._render_request_index_by_id.clear()
         self._latest_render_request_by_index.clear()
         self._render_workers.clear()
         self.fits_service.close_file()
@@ -854,6 +1014,16 @@ class MainWindow(QMainWindow):
             self.interval_selector.setEnabled(state.enabled)
             self.interval_selector.setToolTip(state.disabled_reason)
             self.interval_selector.blockSignals(False)
+        if self.preview_profile_selector is not None:
+            self.preview_profile_selector.blockSignals(True)
+            self.preview_profile_selector.clear()
+            self.preview_profile_selector.addItems(list(state.available_preview_profiles))
+            self.preview_profile_selector.setCurrentText(state.current_preview_profile)
+            self.preview_profile_selector.setEnabled(True)
+            self.preview_profile_selector.setToolTip(
+                "Controls how aggressively AstroView renders preview stages before the full frame."
+            )
+            self.preview_profile_selector.blockSignals(False)
 
     def build_render_control_state(self) -> RenderControlState:
         """Construct the toolbar render-control state from the FITS service."""
@@ -862,8 +1032,10 @@ class MainWindow(QMainWindow):
         return RenderControlState(
             available_stretches=tuple(self.fits_service.AVAILABLE_STRETCHES),
             available_intervals=tuple(self.fits_service.AVAILABLE_INTERVALS),
+            available_preview_profiles=tuple(self.PREVIEW_PROFILE_CONFIGS),
             current_stretch=self.fits_service.current_stretch,
             current_interval=self.fits_service.current_interval,
+            current_preview_profile=self._preview_profile_name,
             enabled=has_data,
             disabled_reason="" if has_data else "No FITS image is currently loaded.",
         )
@@ -917,11 +1089,16 @@ class MainWindow(QMainWindow):
         if current_data is None or current_data.data is None:
             return CanvasImageState(feedback=self.build_empty_image_feedback())
         height, width = current_data.data.shape[:2]
+        feedback = ViewFeedbackState(status="ready")
+        if self._is_frame_rendering(self._current_frame_index):
+            feedback = self.build_rendering_image_feedback(
+                has_preview=self._current_frame_has_preview_image()
+            )
         return CanvasImageState(
             width=width,
             height=height,
             has_image=True,
-            feedback=ViewFeedbackState(status="ready"),
+            feedback=feedback,
         )
 
     def build_canvas_overlay_state(self, highlighted_index: int | None = None) -> CanvasOverlayState:
@@ -978,6 +1155,22 @@ class MainWindow(QMainWindow):
             status="empty",
             title="No Image Loaded",
             detail="Open a FITS file to populate the canvas.",
+            visible=True,
+        )
+
+    def build_rendering_image_feedback(self, *, has_preview: bool) -> ViewFeedbackState:
+        """Feedback shown while the current frame is rendering in the background."""
+
+        title = "Rendering Full Frame" if has_preview else "Rendering Preview"
+        detail = (
+            "Preview shown while the full-resolution render finishes."
+            if has_preview
+            else "Preparing the first visible render for this frame."
+        )
+        return ViewFeedbackState(
+            status="loading",
+            title=title,
+            detail=detail,
             visible=True,
         )
 
@@ -1099,10 +1292,34 @@ class MainWindow(QMainWindow):
         )
 
     def _handle_marker_color_changed(self, color: Any) -> None:
-        """Keep ROI selection color aligned with the marker color."""
+        """Keep ROI selection color aligned and repaint existing markers."""
 
-        if self.canvas is not None:
-            self.canvas.set_roi_color(color)
+        self._sync_marker_visual_style()
+        if self.marker_dock is not None:
+            entries = self.marker_dock.parse_coordinates()
+            if entries:
+                self._apply_markers(entries)
+
+    def _handle_marker_line_width_changed(self, line_width: int) -> None:
+        """Keep ROI selection width aligned and repaint existing markers."""
+
+        self._sync_marker_visual_style()
+        if self.marker_dock is not None:
+            entries = self.marker_dock.parse_coordinates()
+            if entries:
+                self._apply_markers(entries)
+
+    def _sync_marker_visual_style(self) -> None:
+        """Apply the current marker color/width to ROI and source overlays."""
+
+        if self.canvas is None or self.marker_dock is None:
+            return
+
+        color = self.marker_dock.color()
+        line_width = self.marker_dock.line_width()
+        self.canvas.set_roi_color(color)
+        self.canvas.set_roi_line_width(line_width)
+        self.canvas.set_source_overlay_style(color=color, line_width=line_width)
 
     def reset_view_state(self) -> None:
         """Clear image, overlays, table state, dialog state, and status labels."""
@@ -1272,6 +1489,7 @@ class MainWindow(QMainWindow):
 
         if name:
             self.fits_service.set_stretch(name)
+            self._persist_render_preferences()
             if self.fits_service.current_data is not None:
                 self._rerender_all_frames()
                 self._show_current_frame_image()
@@ -1281,9 +1499,23 @@ class MainWindow(QMainWindow):
 
         if name:
             self.fits_service.set_interval(name)
+            self._persist_render_preferences()
             if self.fits_service.current_data is not None:
                 self._rerender_all_frames()
                 self._show_current_frame_image()
+
+    def _handle_preview_profile_changed(self, name: str) -> None:
+        """Update preview aggressiveness for future loads and current rerenders."""
+
+        profile_name = self._normalize_preview_profile_name(name)
+        if profile_name == self._preview_profile_name:
+            return
+
+        self._preview_profile_name = profile_name
+        self._persist_render_preferences()
+        if self.fits_service.current_data is not None:
+            self._rerender_all_frames()
+            self._show_current_frame_image()
 
     # --- Frame management ---
 
@@ -1308,9 +1540,11 @@ class MainWindow(QMainWindow):
 
         self._render_generation += 1
         self._cancel_active_frame_renders(wait=False)
+        self._render_request_index_by_id.clear()
         self._latest_render_request_by_index.clear()
         for i in range(len(self._frames)):
             self._frame_dirty[i] = True
+        self._sync_current_canvas_image_state()
         self._ensure_frame_rendered(self._current_frame_index)
 
     def _ensure_frame_rendered(self, index: int) -> None:
@@ -1354,18 +1588,42 @@ class MainWindow(QMainWindow):
 
         self.sync_sep_panel_state()
         self._ensure_frame_rendered(index)
+        self._prewarm_adjacent_frame()
 
     def _show_current_frame_image(self) -> None:
         """Push the cached QImage for the current frame into the canvas."""
 
         if self.canvas is None:
             return
+        view_state = self.canvas.capture_view_state()
         idx = self._current_frame_index
         if 0 <= idx < len(self._frame_images):
             img = self._frame_images[idx]
+            if img is None:
+                self.canvas.clear_image()
+                return
             self.canvas.set_image(img)
+            self.canvas.restore_view_state(view_state)
         else:
             self.canvas.clear_image()
+
+    def _sync_current_canvas_image_state(self) -> None:
+        """Refresh the current canvas feedback from render/load state."""
+
+        if self.canvas is not None:
+            self.canvas.set_image_state(self.build_canvas_image_state())
+        self._sync_frame_player_render_state()
+
+    def _is_frame_rendering(self, index: int) -> bool:
+        """Return whether the given frame still has a background render pending."""
+
+        return 0 <= index < len(self._frame_dirty) and self._frame_dirty[index]
+
+    def _current_frame_has_preview_image(self) -> bool:
+        """Return whether the active frame already has a visible preview image."""
+
+        idx = self._current_frame_index
+        return 0 <= idx < len(self._frame_images) and self._frame_images[idx] is not None
 
     def _sync_frame_player(self) -> None:
         """Update frame player dock state and visibility."""
@@ -1379,29 +1637,116 @@ class MainWindow(QMainWindow):
             self.frame_player_dock.show()
         else:
             self.frame_player_dock.hide()
+        self._sync_frame_player_render_state()
+
+    def _sync_frame_player_render_state(self) -> None:
+        """Push current-frame render progress into the frame-player dock."""
+
+        if self.frame_player_dock is None:
+            return
+
+        index = self._current_frame_index
+        has_frames = 0 <= index < len(self._frames)
+        is_rendering = has_frames and self._is_frame_rendering(index)
+        has_preview = has_frames and self._current_frame_has_preview_image()
+        self.frame_player_dock.set_render_state(is_rendering, has_preview=has_preview)
 
     def _switch_frame(self, index: int) -> None:
         """Handle frame change signal from the player dock."""
 
+        self._update_frame_step_direction(self._current_frame_index, index)
         self._activate_frame(index)
         if self.frame_player_dock is not None:
             self.frame_player_dock.set_current_frame(index)
+
+    def _update_frame_step_direction(self, previous_index: int, next_index: int) -> None:
+        """Track the most recent frame-navigation direction for prewarming."""
+
+        if next_index == previous_index:
+            return
+
+        last_index = len(self._frames) - 1
+        if previous_index == last_index and next_index == 0:
+            self._frame_step_direction = 1
+        elif previous_index == 0 and next_index == last_index:
+            self._frame_step_direction = -1
+        else:
+            self._frame_step_direction = 1 if next_index > previous_index else -1
+
+    def _preferred_adjacent_frame_index(self) -> int | None:
+        """Return the most likely next frame to view, if any."""
+
+        count = len(self._frames)
+        if count < 2:
+            return None
+
+        candidate = self._current_frame_index + self._frame_step_direction
+        last_index = count - 1
+
+        if 0 <= candidate <= last_index:
+            return candidate
+
+        if self.frame_player_dock is None:
+            return None
+
+        if self.frame_player_dock.bounce_btn.isChecked():
+            bounce_candidate = self._current_frame_index - self._frame_step_direction
+            if 0 <= bounce_candidate <= last_index:
+                return bounce_candidate
+            return None
+
+        if self.frame_player_dock.loop_btn.isChecked():
+            return candidate % count
+
+        return None
+
+    def _prewarm_adjacent_frame(self) -> None:
+        """Opportunistically pre-render the likely next frame for smoother stepping."""
+
+        candidate = self._preferred_adjacent_frame_index()
+        if candidate is None:
+            return
+        if not self._frame_dirty[candidate]:
+            return
+        self._schedule_frame_render(candidate)
 
     def _append_frames(self) -> None:
         """Append additional FITS files to the frame list."""
 
         paths, _ = QFileDialog.getOpenFileNames(
-            self, "Append FITS Frame(s)", "", "FITS Files (*.fits *.fit *.fts);;All Files (*)"
+            self,
+            "Append FITS Frame(s)",
+            self._last_open_directory(),
+            "FITS Files (*.fits *.fit *.fts);;All Files (*)",
         )
         if not paths:
             return
 
+        self._remember_open_directory(paths)
         self._start_frame_load(paths, append=True)
+
+    def _last_open_directory(self) -> str:
+        """Return the most recently used FITS directory for file dialogs."""
+
+        value = self._settings.value("paths/last_open_dir", "", type=str)
+        return value or ""
+
+    def _remember_open_directory(self, paths: list[str]) -> None:
+        """Persist the parent directory of the most recently opened FITS path."""
+
+        if not paths:
+            return
+
+        directory = str(Path(paths[0]).parent)
+        if directory:
+            self._settings.setValue("paths/last_open_dir", directory)
 
     def closeEvent(self, event: Any) -> None:
         """Stop any active background load before the window closes."""
 
         self._stop_active_frame_load(wait=True)
+        self._cancel_active_frame_renders(wait=True)
+        self._persist_window_state()
         super().closeEvent(event)
 
     def _go_prev_frame(self) -> None:

@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import os
+import time
 import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+import numpy as np
+from PySide6.QtCore import QByteArray
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import QApplication
 
@@ -53,6 +56,21 @@ class TestMainWindowLoading(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls._app = QApplication.instance() or QApplication([])
 
+    @staticmethod
+    def _assert_settings_write(settings_mock: Mock, key: str, value: object) -> None:
+        writes = [call.args for call in settings_mock.setValue.call_args_list]
+        assert (key, value) in writes, f"Missing settings write {(key, value)!r}; got {writes!r}"
+
+    @classmethod
+    def _wait_until(cls, predicate, timeout: float = 3.0) -> None:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            cls._app.processEvents()
+            if predicate():
+                return
+            time.sleep(0.01)
+        raise AssertionError("Timed out while waiting for Qt background work to finish.")
+
     def test_open_file_with_explicit_path_starts_background_load(self) -> None:
         window = MainWindow()
         try:
@@ -60,6 +78,269 @@ class TestMainWindowLoading(unittest.TestCase):
                 window.open_file(path="tests/data/1.FITS", hdu_index=2)
 
             start_mock.assert_called_once_with(["tests/data/1.FITS"], hdu_index=2, append=False)
+        finally:
+            window.deleteLater()
+
+    def test_open_file_with_explicit_path_remembers_parent_directory(self) -> None:
+        window = MainWindow()
+        window._settings = Mock()
+        try:
+            with patch.object(window, "_start_frame_load"):
+                window.open_file(path="tests/data/1.FITS")
+
+            window._settings.setValue.assert_called_once_with("paths/last_open_dir", "tests\\data")
+        finally:
+            window.deleteLater()
+
+    def test_open_file_dialog_uses_and_updates_last_open_directory(self) -> None:
+        window = MainWindow()
+        window._settings = Mock()
+        window._settings.value.return_value = "D:\\fits"
+        try:
+            with patch.object(window, "_start_frame_load") as start_mock:
+                with patch(
+                    "astroview.app.main_window.QFileDialog.getOpenFileNames",
+                    return_value=(["D:\\fits\\new\\image.fits"], ""),
+                ) as dialog_mock:
+                    window.open_file()
+
+            dialog_mock.assert_called_once_with(
+                window,
+                "Open FITS File(s)",
+                "D:\\fits",
+                "FITS Files (*.fits *.fit *.fts);;All Files (*)",
+            )
+            window._settings.setValue.assert_called_once_with("paths/last_open_dir", "D:\\fits\\new")
+            start_mock.assert_called_once_with(["D:\\fits\\new\\image.fits"], hdu_index=None, append=False)
+        finally:
+            window.deleteLater()
+
+    def test_append_frames_dialog_uses_and_updates_last_open_directory(self) -> None:
+        window = MainWindow()
+        window._settings = Mock()
+        window._settings.value.return_value = "D:\\fits"
+        try:
+            with patch.object(window, "_start_frame_load") as start_mock:
+                with patch(
+                    "astroview.app.main_window.QFileDialog.getOpenFileNames",
+                    return_value=(["D:\\fits\\append\\frame2.fits"], ""),
+                ) as dialog_mock:
+                    window._append_frames()
+
+            dialog_mock.assert_called_once_with(
+                window,
+                "Append FITS Frame(s)",
+                "D:\\fits",
+                "FITS Files (*.fits *.fit *.fts);;All Files (*)",
+            )
+            window._settings.setValue.assert_called_once_with("paths/last_open_dir", "D:\\fits\\append")
+            start_mock.assert_called_once_with(["D:\\fits\\append\\frame2.fits"], append=True)
+        finally:
+            window.deleteLater()
+
+    def test_restore_render_preferences_uses_persisted_values(self) -> None:
+        window = MainWindow()
+        window._settings = Mock()
+
+        def value_side_effect(key, default=None, type=None):
+            if key == "render/stretch":
+                return "Asinh"
+            if key == "render/interval":
+                return "99%"
+            if key == "render/preview_profile":
+                return "Detailed"
+            return default
+
+        window._settings.value.side_effect = value_side_effect
+        try:
+            window._restore_render_preferences()
+
+            self.assertEqual(window.fits_service.current_stretch, "Asinh")
+            self.assertEqual(window.fits_service.current_interval, "99%")
+            self.assertEqual(window._preview_profile_name, "Detailed")
+        finally:
+            window.deleteLater()
+
+    def test_restore_workspace_state_applies_marker_preferences_and_window_state(self) -> None:
+        window = MainWindow()
+        window.create_actions()
+        window.build_ui()
+        window._settings = Mock()
+
+        geometry = QByteArray(b"geometry")
+        state = QByteArray(b"state")
+
+        def value_side_effect(key, default=None, type=None):
+            values = {
+                "markers/radius": 42.0,
+                "markers/line_width": 7,
+                "markers/color": "#00ff00",
+                "window/geometry": geometry,
+                "window/state": state,
+            }
+            return values.get(key, default)
+
+        window._settings.value.side_effect = value_side_effect
+        try:
+            with patch.object(window, "restoreGeometry") as restore_geometry_mock:
+                with patch.object(window, "restoreState") as restore_state_mock:
+                    window._restore_workspace_state()
+
+            self.assertEqual(window.marker_dock.radius(), 42.0)
+            self.assertEqual(window.marker_dock.line_width(), 7)
+            self.assertEqual(window.marker_dock.color().name(), "#00ff00")
+            restore_geometry_mock.assert_called_once_with(geometry)
+            restore_state_mock.assert_called_once_with(state)
+        finally:
+            window.deleteLater()
+
+    def test_handle_stretch_changed_persists_render_preferences(self) -> None:
+        window = MainWindow()
+        window._settings = Mock()
+        try:
+            window._handle_stretch_changed("Asinh")
+
+            self.assertEqual(window.fits_service.current_stretch, "Asinh")
+            self._assert_settings_write(window._settings, "render/stretch", "Asinh")
+            self._assert_settings_write(window._settings, "render/interval", "ZScale")
+            self._assert_settings_write(window._settings, "render/preview_profile", "Balanced")
+        finally:
+            window.deleteLater()
+
+    def test_handle_interval_changed_persists_render_preferences(self) -> None:
+        window = MainWindow()
+        window._settings = Mock()
+        try:
+            window._handle_interval_changed("99%")
+
+            self.assertEqual(window.fits_service.current_interval, "99%")
+            self._assert_settings_write(window._settings, "render/stretch", "Linear")
+            self._assert_settings_write(window._settings, "render/interval", "99%")
+            self._assert_settings_write(window._settings, "render/preview_profile", "Balanced")
+        finally:
+            window.deleteLater()
+
+    def test_handle_preview_profile_changed_persists_selection_and_rerenders(self) -> None:
+        window = MainWindow()
+        window._settings = Mock()
+        window.fits_service.current_data = FITSData(path="frame.fits", data=np.zeros((2, 2)))
+        try:
+            with patch.object(window, "_rerender_all_frames") as rerender_mock:
+                with patch.object(window, "_show_current_frame_image") as show_mock:
+                    window._handle_preview_profile_changed("Detailed")
+
+            self.assertEqual(window._preview_profile_name, "Detailed")
+            self._assert_settings_write(window._settings, "render/preview_profile", "Detailed")
+            rerender_mock.assert_called_once_with()
+            show_mock.assert_called_once_with()
+        finally:
+            window.deleteLater()
+
+    def test_repeated_render_control_changes_restart_in_flight_renders(self) -> None:
+        window = MainWindow()
+        window.canvas = Mock()
+        window.fits_service.current_data = FITSData(path="frame.fits", data=np.zeros((2, 2)))
+        window._frames = [window.fits_service.current_data]
+        window._frame_images = ["old-image"]
+        window._frame_dirty = [False]
+        window._current_frame_index = 0
+        window._render_generation = 4
+        window._render_request_index_by_id = {9: 0}
+        window._latest_render_request_by_index = {0: 9}
+        try:
+            with patch.object(window, "_cancel_active_frame_renders") as cancel_mock:
+                with patch.object(window, "_ensure_frame_rendered") as ensure_mock:
+                    with patch.object(window, "_show_current_frame_image") as show_mock:
+                        window._handle_stretch_changed("Asinh")
+                        window._handle_interval_changed("99%")
+
+            self.assertEqual(window._render_generation, 6)
+            self.assertEqual(window._frame_dirty, [True])
+            self.assertEqual(window._render_request_index_by_id, {})
+            self.assertEqual(window._latest_render_request_by_index, {})
+            self.assertEqual(cancel_mock.call_count, 2)
+            cancel_mock.assert_any_call(wait=False)
+            self.assertEqual(ensure_mock.call_count, 2)
+            ensure_mock.assert_any_call(0)
+            self.assertEqual(show_mock.call_count, 2)
+        finally:
+            window.deleteLater()
+
+    def test_stale_render_results_are_ignored_after_repeated_render_control_changes(self) -> None:
+        window = MainWindow()
+        window.canvas = Mock()
+        window.fits_service.current_data = FITSData(path="frame.fits", data=np.zeros((2, 2)))
+        window._frames = [window.fits_service.current_data]
+        window._frame_images = ["fresh-image"]
+        window._frame_dirty = [False]
+        window._current_frame_index = 0
+        window._render_generation = 10
+        window._latest_render_request_by_index = {0: 40}
+        try:
+            with patch.object(window, "_cancel_active_frame_renders"):
+                with patch.object(window, "_ensure_frame_rendered"):
+                    with patch.object(window, "_show_current_frame_image"):
+                        window._handle_stretch_changed("Asinh")
+                        window._handle_interval_changed("99%")
+
+            self.assertEqual(window._render_generation, 12)
+            window._latest_render_request_by_index[0] = 41
+            window._frame_images[0] = "fresh-image"
+            window._frame_dirty[0] = True
+
+            with patch.object(window, "_qimage_from_u8", return_value="stale-preview") as qimage_mock:
+                with patch.object(window, "_show_current_frame_image") as show_mock:
+                    window._handle_frame_preview_rendered(40, 10, 0, "preview-u8")
+
+            qimage_mock.assert_not_called()
+            show_mock.assert_not_called()
+            self.assertEqual(window._frame_images[0], "fresh-image")
+
+            with patch.object(window, "_qimage_from_u8", return_value="stale-full") as qimage_mock:
+                with patch.object(window, "_show_current_frame_image") as show_mock:
+                    window._handle_frame_rendered(40, 10, 0, "full-u8")
+
+            qimage_mock.assert_not_called()
+            show_mock.assert_not_called()
+            self.assertEqual(window._frame_images[0], "fresh-image")
+            self.assertTrue(window._frame_dirty[0])
+        finally:
+            window.deleteLater()
+
+    def test_persist_marker_preferences_writes_current_values(self) -> None:
+        window = MainWindow()
+        window.create_actions()
+        window.build_ui()
+        window._settings = Mock()
+        window.marker_dock.set_radius(33.0)
+        window.marker_dock.set_line_width(9)
+        window.marker_dock.set_color("#112233")
+        try:
+            window._persist_marker_preferences()
+
+            self._assert_settings_write(window._settings, "markers/radius", 33.0)
+            self._assert_settings_write(window._settings, "markers/line_width", 9)
+            self._assert_settings_write(window._settings, "markers/color", "#112233")
+        finally:
+            window.deleteLater()
+
+    def test_close_event_persists_window_state(self) -> None:
+        window = MainWindow()
+        window._settings = Mock()
+        event = Mock()
+        try:
+            with patch.object(window, "_stop_active_frame_load") as stop_load_mock:
+                with patch.object(window, "_cancel_active_frame_renders") as cancel_renders_mock:
+                    with patch.object(window, "saveGeometry", return_value=QByteArray(b"g")):
+                        with patch.object(window, "saveState", return_value=QByteArray(b"s")):
+                            with patch("PySide6.QtWidgets.QMainWindow.closeEvent") as super_close_mock:
+                                window.closeEvent(event)
+
+            stop_load_mock.assert_called_once_with(wait=True)
+            cancel_renders_mock.assert_called_once_with(wait=True)
+            self._assert_settings_write(window._settings, "window/geometry", QByteArray(b"g"))
+            self._assert_settings_write(window._settings, "window/state", QByteArray(b"s"))
+            super_close_mock.assert_called_once_with(event)
         finally:
             window.deleteLater()
 
@@ -131,6 +412,53 @@ class TestMainWindowLoading(unittest.TestCase):
         finally:
             window.deleteLater()
 
+    def test_start_frame_load_uses_preview_profile_dimension(self) -> None:
+        window = MainWindow()
+        window._preview_profile_name = "Detailed"
+        try:
+            with patch.object(window, "_stop_active_frame_load"):
+                with patch.object(window, "close_current_file") as close_mock:
+                    with patch.object(window, "_set_loading_state"):
+                        with patch("astroview.app.main_window.QThread", _FakeThread):
+                            with patch("astroview.app.main_window.FITSLoadWorker") as worker_cls:
+                                worker_cls.return_value = Mock(
+                                    moveToThread=Mock(),
+                                    file_loaded=_FakeSignal(),
+                                    file_error=_FakeSignal(),
+                                    progress=_FakeSignal(),
+                                    finished=_FakeSignal(),
+                                    deleteLater=Mock(),
+                                )
+                                window._start_frame_load(["frame.fits"], append=False)
+
+            close_mock.assert_called_once_with()
+            self.assertEqual(worker_cls.call_args.kwargs["preview_max_dimension"], 3072)
+        finally:
+            window.deleteLater()
+
+    def test_start_frame_load_in_append_mode_keeps_current_file_open(self) -> None:
+        window = MainWindow()
+        try:
+            with patch.object(window, "_stop_active_frame_load"):
+                with patch.object(window, "close_current_file") as close_mock:
+                    with patch.object(window, "_set_loading_state"):
+                        with patch("astroview.app.main_window.QThread", _FakeThread):
+                            with patch("astroview.app.main_window.FITSLoadWorker") as worker_cls:
+                                worker_cls.return_value = Mock(
+                                    moveToThread=Mock(),
+                                    file_loaded=_FakeSignal(),
+                                    file_error=_FakeSignal(),
+                                    progress=_FakeSignal(),
+                                    finished=_FakeSignal(),
+                                    deleteLater=Mock(),
+                                )
+                                window._start_frame_load(["frame.fits"], append=True)
+
+            close_mock.assert_not_called()
+            self.assertEqual(worker_cls.call_args.kwargs["preview_max_dimension"], 2048)
+        finally:
+            window.deleteLater()
+
     def test_handle_frame_preview_rendered_updates_current_image(self) -> None:
         window = MainWindow()
         window._frames = [FITSData(path="frame.fits")]
@@ -139,6 +467,7 @@ class TestMainWindowLoading(unittest.TestCase):
         window._current_frame_index = 0
         window._render_generation = 3
         window._latest_render_request_by_index[0] = 11
+        window.canvas = Mock()
         try:
             with patch.object(window, "_qimage_from_u8", return_value="preview-image") as qimage_mock:
                 with patch.object(window, "_show_current_frame_image") as show_mock:
@@ -148,6 +477,7 @@ class TestMainWindowLoading(unittest.TestCase):
             self.assertEqual(window._frame_dirty, [True])
             qimage_mock.assert_called_once_with("preview-u8")
             show_mock.assert_called_once_with()
+            window.canvas.set_image_state.assert_called_once()
         finally:
             window.deleteLater()
 
@@ -159,6 +489,7 @@ class TestMainWindowLoading(unittest.TestCase):
         window._current_frame_index = 0
         window._render_generation = 3
         window._latest_render_request_by_index[0] = 12
+        window.canvas = Mock()
         try:
             with patch.object(window, "_qimage_from_u8", return_value="final-image") as qimage_mock:
                 with patch.object(window, "_show_current_frame_image") as show_mock:
@@ -168,34 +499,269 @@ class TestMainWindowLoading(unittest.TestCase):
             self.assertEqual(window._frame_dirty, [False])
             qimage_mock.assert_called_once_with("full-u8")
             show_mock.assert_called_once_with()
+            window.canvas.set_image_state.assert_called_once()
         finally:
             window.deleteLater()
 
-    def test_schedule_frame_render_does_not_cancel_other_active_render_requests(self) -> None:
+    def test_handle_frame_rendered_prewarms_adjacent_frame_for_current_frame(self) -> None:
         window = MainWindow()
         window._frames = [FITSData(path="frame-0.fits"), FITSData(path="frame-1.fits")]
         window._frame_images = [None, None]
         window._frame_dirty = [True, True]
+        window._current_frame_index = 0
+        window._render_generation = 3
+        window._latest_render_request_by_index[0] = 12
+        window.canvas = Mock()
+        try:
+            with patch.object(window, "_qimage_from_u8", return_value="final-image"):
+                with patch.object(window, "_show_current_frame_image"):
+                    with patch.object(window, "_prewarm_adjacent_frame") as prewarm_mock:
+                        window._handle_frame_rendered(12, 3, 0, "full-u8")
+
+            prewarm_mock.assert_called_once_with()
+        finally:
+            window.deleteLater()
+
+    def test_show_current_frame_image_restores_canvas_view_state_after_image_replace(self) -> None:
+        window = MainWindow()
+        window.canvas = Mock()
+        window.canvas.capture_view_state.return_value = {"scale_factor": 2.0}
+        window._frame_images = ["rendered-image"]
+        window._current_frame_index = 0
+        try:
+            window._show_current_frame_image()
+
+            window.canvas.capture_view_state.assert_called_once_with()
+            window.canvas.set_image.assert_called_once_with("rendered-image")
+            window.canvas.restore_view_state.assert_called_once_with({"scale_factor": 2.0})
+        finally:
+            window.deleteLater()
+
+    def test_sync_current_canvas_image_state_updates_frame_player_render_state(self) -> None:
+        window = MainWindow()
+        window.canvas = Mock()
+        window.frame_player_dock = Mock()
+        window._frames = [FITSData(path="frame.fits")]
+        window._frame_images = [None]
+        window._frame_dirty = [True]
+        window._current_frame_index = 0
+        window.fits_service.current_data = FITSData(path="frame.fits", data=np.zeros((2, 2)))
+        try:
+            window._sync_current_canvas_image_state()
+
+            window.canvas.set_image_state.assert_called_once()
+            window.frame_player_dock.set_render_state.assert_called_once_with(True, has_preview=False)
+        finally:
+            window.deleteLater()
+
+    def test_schedule_frame_render_skips_non_current_frame_when_current_render_is_active(self) -> None:
+        window = MainWindow()
+        window._frames = [FITSData(path="frame-0.fits"), FITSData(path="frame-1.fits")]
+        window._frame_images = [None, None]
+        window._frame_dirty = [True, True]
+        window._current_frame_index = 0
         running_thread = Mock()
         running_thread.isRunning.return_value = True
         window._render_threads[8] = running_thread
+        window._render_request_index_by_id[8] = 0
         window._latest_render_request_by_index[0] = 8
         try:
-            with patch.object(window, "_cancel_active_frame_renders") as cancel_mock:
-                with patch("astroview.app.main_window.QThread", _FakeThread):
-                    with patch("astroview.app.main_window.FrameRenderWorker") as worker_cls:
-                        worker_cls.return_value = Mock(
-                            moveToThread=Mock(),
-                            preview_ready=_FakeSignal(),
-                            render_ready=_FakeSignal(),
-                            render_error=_FakeSignal(),
-                            finished=_FakeSignal(),
-                        )
-                        window._schedule_frame_render(1)
+            with patch("astroview.app.main_window.FrameRenderWorker") as worker_cls:
+                window._schedule_frame_render(1)
 
-            cancel_mock.assert_not_called()
+            worker_cls.assert_not_called()
             self.assertIn(8, window._render_threads)
+            self.assertNotIn(1, window._latest_render_request_by_index)
+        finally:
+            window.deleteLater()
+
+    def test_schedule_frame_render_uses_configured_preview_dimensions(self) -> None:
+        window = MainWindow()
+        window._preview_profile_name = "Fast"
+        window._frames = [FITSData(path="frame-0.fits")]
+        window._frame_images = [None]
+        window._frame_dirty = [True]
+        window._current_frame_index = 0
+        try:
+            with patch("astroview.app.main_window.QThread", _FakeThread):
+                with patch("astroview.app.main_window.FrameRenderWorker") as worker_cls:
+                    worker_cls.return_value = Mock(
+                        moveToThread=Mock(),
+                        preview_ready=_FakeSignal(),
+                        render_ready=_FakeSignal(),
+                        render_error=_FakeSignal(),
+                        finished=_FakeSignal(),
+                        deleteLater=Mock(),
+                    )
+                    window._schedule_frame_render(0)
+
+            self.assertEqual(worker_cls.call_args.kwargs["preview_dimensions"], (1024,))
+        finally:
+            window.deleteLater()
+
+    def test_schedule_frame_render_runs_worker_on_real_qthread_and_cleans_up(self) -> None:
+        frame = FITSData(path="frame-0.fits", data=np.zeros((2, 2)))
+        window = MainWindow()
+        window.canvas = Mock()
+        window.fits_service.current_data = frame
+        window._frames = [frame]
+        window._frame_images = [None]
+        window._frame_dirty = [True]
+        window._current_frame_index = 0
+        converted: list[object] = []
+
+        def convert(image_u8: object) -> object:
+            converted.append(image_u8)
+            return image_u8
+
+        try:
+            with patch("astroview.app.frame_render_worker.render_preview_u8", side_effect=["preview-1024", "preview-2048"]):
+                with patch("astroview.app.frame_render_worker.render_image_u8", return_value="full-render"):
+                    with patch.object(window, "_qimage_from_u8", side_effect=convert):
+                        with patch.object(window, "_prewarm_adjacent_frame") as prewarm_mock:
+                            window._schedule_frame_render(0)
+                            request_id = window._latest_render_request_by_index[0]
+                            self._wait_until(
+                                lambda: request_id not in window._render_threads and window._frame_dirty == [False]
+                            )
+
+            self.assertEqual(converted, ["preview-1024", "preview-2048", "full-render"])
+            self.assertEqual(window._frame_images, ["full-render"])
+            self.assertEqual(window._frame_dirty, [False])
+            self.assertNotIn(request_id, window._render_threads)
+            self.assertNotIn(request_id, window._render_request_index_by_id)
+            prewarm_mock.assert_called_once_with()
+        finally:
+            window._cancel_active_frame_renders(wait=True)
+            window.deleteLater()
+
+    def test_close_current_file_cancels_active_loading_and_rendering(self) -> None:
+        window = MainWindow()
+        window.canvas = Mock()
+        window.source_table_dock = Mock()
+        window.header_dialog = Mock()
+        window.app_status_bar = Mock()
+        window.frame_player_dock = Mock()
+        window.sep_panel = Mock()
+        window._frames = [FITSData(path="frame-0.fits")]
+        window._frame_images = ["preview-image"]
+        window._frame_dirty = [True]
+        window._render_request_index_by_id = {4: 0}
+        window._latest_render_request_by_index = {0: 4}
+        window._render_workers = {4: Mock()}
+        generation_before = window._render_generation
+        try:
+            with patch.object(window, "_stop_active_frame_load") as stop_load_mock:
+                with patch.object(window, "_cancel_active_frame_renders") as cancel_renders_mock:
+                    with patch.object(window, "sync_sep_panel_state") as sync_sep_mock:
+                        with patch.object(window, "sync_render_controls") as sync_render_mock:
+                            window.close_current_file()
+
+            stop_load_mock.assert_called_once_with(wait=True)
+            cancel_renders_mock.assert_called_once_with(wait=True)
+            self.assertEqual(window._render_generation, generation_before + 1)
+            self.assertEqual(window._render_request_index_by_id, {})
+            self.assertEqual(window._latest_render_request_by_index, {})
+            self.assertEqual(window._render_workers, {})
+            self.assertEqual(window._frames, [])
+            self.assertEqual(window._frame_images, [])
+            self.assertEqual(window._frame_dirty, [])
+            self.assertEqual(window._current_frame_index, 0)
+            sync_sep_mock.assert_called_once_with()
+            sync_render_mock.assert_called_once_with()
+        finally:
+            window.deleteLater()
+
+    def test_schedule_frame_render_cancels_stale_other_frame_requests_for_current_frame(self) -> None:
+        window = MainWindow()
+        window._frames = [FITSData(path="frame-0.fits"), FITSData(path="frame-1.fits")]
+        window._frame_images = [None, None]
+        window._frame_dirty = [True, True]
+        window._current_frame_index = 1
+        stale_thread = Mock()
+        stale_thread.isRunning.return_value = True
+        window._render_threads[8] = stale_thread
+        window._render_request_index_by_id[8] = 0
+        window._latest_render_request_by_index[0] = 8
+        try:
+            with patch("astroview.app.main_window.QThread", _FakeThread):
+                with patch("astroview.app.main_window.FrameRenderWorker") as worker_cls:
+                    worker_cls.return_value = Mock(
+                        moveToThread=Mock(),
+                        preview_ready=_FakeSignal(),
+                        render_ready=_FakeSignal(),
+                        render_error=_FakeSignal(),
+                        finished=_FakeSignal(),
+                    )
+                    window._schedule_frame_render(1)
+
+            stale_thread.requestInterruption.assert_called_once_with()
+            stale_thread.quit.assert_called_once_with()
             self.assertIn(1, window._latest_render_request_by_index)
+        finally:
+            window.deleteLater()
+
+    def test_preferred_adjacent_frame_index_uses_recent_forward_direction(self) -> None:
+        window = MainWindow()
+        window._frames = [FITSData(path="0.fits"), FITSData(path="1.fits"), FITSData(path="2.fits")]
+        window._current_frame_index = 1
+        window._frame_step_direction = 1
+        try:
+            self.assertEqual(window._preferred_adjacent_frame_index(), 2)
+        finally:
+            window.deleteLater()
+
+    def test_preferred_adjacent_frame_index_wraps_in_loop_mode(self) -> None:
+        window = MainWindow()
+        window._frames = [FITSData(path="0.fits"), FITSData(path="1.fits"), FITSData(path="2.fits")]
+        window._current_frame_index = 2
+        window._frame_step_direction = 1
+        window.frame_player_dock = Mock()
+        window.frame_player_dock.bounce_btn.isChecked.return_value = False
+        window.frame_player_dock.loop_btn.isChecked.return_value = True
+        try:
+            self.assertEqual(window._preferred_adjacent_frame_index(), 0)
+        finally:
+            window.deleteLater()
+
+    def test_preferred_adjacent_frame_index_reflects_bounce_direction(self) -> None:
+        window = MainWindow()
+        window._frames = [FITSData(path="0.fits"), FITSData(path="1.fits"), FITSData(path="2.fits")]
+        window._current_frame_index = 2
+        window._frame_step_direction = 1
+        window.frame_player_dock = Mock()
+        window.frame_player_dock.bounce_btn.isChecked.return_value = True
+        window.frame_player_dock.loop_btn.isChecked.return_value = False
+        try:
+            self.assertEqual(window._preferred_adjacent_frame_index(), 1)
+        finally:
+            window.deleteLater()
+
+    def test_prewarm_adjacent_frame_schedules_likely_next_dirty_frame(self) -> None:
+        window = MainWindow()
+        window._frames = [FITSData(path="0.fits"), FITSData(path="1.fits"), FITSData(path="2.fits")]
+        window._frame_dirty = [False, False, True]
+        window._current_frame_index = 1
+        window._frame_step_direction = 1
+        try:
+            with patch.object(window, "_schedule_frame_render") as schedule_mock:
+                window._prewarm_adjacent_frame()
+
+            schedule_mock.assert_called_once_with(2)
+        finally:
+            window.deleteLater()
+
+    def test_switch_frame_updates_recent_step_direction_on_loop_wrap(self) -> None:
+        window = MainWindow()
+        window._frames = [FITSData(path="0.fits"), FITSData(path="1.fits"), FITSData(path="2.fits")]
+        window._current_frame_index = 2
+        window.frame_player_dock = Mock()
+        try:
+            with patch.object(window, "_activate_frame") as activate_mock:
+                window._switch_frame(0)
+
+            self.assertEqual(window._frame_step_direction, 1)
+            activate_mock.assert_called_once_with(0)
         finally:
             window.deleteLater()
 
@@ -259,11 +825,151 @@ class TestMainWindowLoading(unittest.TestCase):
     def test_handle_marker_color_changed_updates_canvas_roi_color(self) -> None:
         window = MainWindow()
         window.canvas = Mock()
+        window.marker_dock = Mock()
+        window.marker_dock.color.return_value = QColor("#00ff00")
+        window.marker_dock.line_width.return_value = 5
+        window.marker_dock.parse_coordinates.return_value = []
         try:
             window._handle_marker_color_changed(QColor("#00ff00"))
 
             window.canvas.set_roi_color.assert_called_once()
             self.assertEqual(window.canvas.set_roi_color.call_args.args[0].name(), "#00ff00")
+            window.canvas.set_source_overlay_style.assert_called_once()
+        finally:
+            window.deleteLater()
+
+    def test_build_canvas_image_state_reports_loading_before_preview_is_ready(self) -> None:
+        window = MainWindow()
+        window.fits_service.current_data = FITSData(path="frame.fits", data=np.zeros((2, 2)))
+        window._frames = [window.fits_service.current_data]
+        window._frame_images = [None]
+        window._frame_dirty = [True]
+        window._current_frame_index = 0
+        try:
+            state = window.build_canvas_image_state()
+
+            self.assertTrue(state.has_image)
+            self.assertEqual(state.feedback.status, "loading")
+            self.assertEqual(state.feedback.title, "Rendering Preview")
+            self.assertTrue(state.feedback.visible)
+        finally:
+            window.deleteLater()
+
+    def test_build_canvas_image_state_reports_loading_after_preview_is_ready(self) -> None:
+        window = MainWindow()
+        window.fits_service.current_data = FITSData(path="frame.fits", data=np.zeros((2, 2)))
+        window._frames = [window.fits_service.current_data]
+        window._frame_images = ["preview-image"]
+        window._frame_dirty = [True]
+        window._current_frame_index = 0
+        try:
+            state = window.build_canvas_image_state()
+
+            self.assertEqual(state.feedback.status, "loading")
+            self.assertEqual(state.feedback.title, "Rendering Full Frame")
+            self.assertTrue(state.feedback.visible)
+        finally:
+            window.deleteLater()
+
+    def test_build_canvas_image_state_reports_ready_after_render_finishes(self) -> None:
+        window = MainWindow()
+        window.fits_service.current_data = FITSData(path="frame.fits", data=np.zeros((2, 2)))
+        window._frames = [window.fits_service.current_data]
+        window._frame_images = ["final-image"]
+        window._frame_dirty = [False]
+        window._current_frame_index = 0
+        try:
+            state = window.build_canvas_image_state()
+
+            self.assertEqual(state.feedback.status, "ready")
+            self.assertFalse(state.feedback.visible)
+        finally:
+            window.deleteLater()
+
+    def test_rerender_all_frames_updates_current_canvas_feedback_to_loading(self) -> None:
+        window = MainWindow()
+        window.canvas = Mock()
+        window._frames = [FITSData(path="frame.fits")]
+        window._frame_images = ["old-image"]
+        window._frame_dirty = [False]
+        window._current_frame_index = 0
+        window.fits_service.current_data = FITSData(path="frame.fits", data=np.zeros((2, 2)))
+        try:
+            with patch.object(window, "_cancel_active_frame_renders") as cancel_mock:
+                with patch.object(window, "_ensure_frame_rendered") as ensure_mock:
+                    window._rerender_all_frames()
+
+            cancel_mock.assert_called_once_with(wait=False)
+            ensure_mock.assert_called_once_with(0)
+            self.assertEqual(window._frame_dirty, [True])
+            window.canvas.set_image_state.assert_called_once()
+            state = window.canvas.set_image_state.call_args.args[0]
+            self.assertEqual(state.feedback.status, "loading")
+            self.assertEqual(state.feedback.title, "Rendering Full Frame")
+        finally:
+            window.deleteLater()
+
+    def test_handle_marker_color_changed_reapplies_existing_markers(self) -> None:
+        window = MainWindow()
+        window.canvas = Mock()
+        window.marker_dock = Mock()
+        window.marker_dock.color.return_value = QColor("#00ff00")
+        window.marker_dock.line_width.return_value = 5
+        window.marker_dock.parse_coordinates.return_value = [("pixel", 12.0, 34.0)]
+        try:
+            with patch.object(window, "_apply_markers") as apply_mock:
+                window._handle_marker_color_changed(QColor("#00ff00"))
+
+            apply_mock.assert_called_once_with([("pixel", 12.0, 34.0)])
+        finally:
+            window.deleteLater()
+
+    def test_handle_marker_line_width_changed_updates_canvas_roi_width(self) -> None:
+        window = MainWindow()
+        window.canvas = Mock()
+        window.marker_dock = Mock()
+        window.marker_dock.color.return_value = QColor("#ff0000")
+        window.marker_dock.line_width.return_value = 25
+        window.marker_dock.parse_coordinates.return_value = []
+        try:
+            window._handle_marker_line_width_changed(25)
+
+            window.canvas.set_roi_line_width.assert_called_once_with(25)
+            window.canvas.set_source_overlay_style.assert_called_once()
+        finally:
+            window.deleteLater()
+
+    def test_handle_marker_line_width_changed_reapplies_existing_markers(self) -> None:
+        window = MainWindow()
+        window.canvas = Mock()
+        window.marker_dock = Mock()
+        window.marker_dock.color.return_value = QColor("#ff0000")
+        window.marker_dock.line_width.return_value = 25
+        window.marker_dock.parse_coordinates.return_value = [("pixel", 12.0, 34.0)]
+        try:
+            with patch.object(window, "_apply_markers") as apply_mock:
+                window._handle_marker_line_width_changed(25)
+
+            apply_mock.assert_called_once_with([("pixel", 12.0, 34.0)])
+        finally:
+            window.deleteLater()
+
+    def test_sync_marker_visual_style_applies_marker_defaults_to_canvas(self) -> None:
+        window = MainWindow()
+        window.canvas = Mock()
+        window.marker_dock = Mock()
+        window.marker_dock.color.return_value = QColor("#123456")
+        window.marker_dock.line_width.return_value = 5
+        try:
+            window._sync_marker_visual_style()
+
+            window.canvas.set_roi_color.assert_called_once()
+            self.assertEqual(window.canvas.set_roi_color.call_args.args[0].name(), "#123456")
+            window.canvas.set_roi_line_width.assert_called_once_with(5)
+            window.canvas.set_source_overlay_style.assert_called_once()
+            kwargs = window.canvas.set_source_overlay_style.call_args.kwargs
+            self.assertEqual(kwargs["color"].name(), "#123456")
+            self.assertEqual(kwargs["line_width"], 5)
         finally:
             window.deleteLater()
 

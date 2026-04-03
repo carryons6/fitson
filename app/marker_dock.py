@@ -31,6 +31,7 @@ class MarkerDock(QDockWidget):
 
     markers_updated = Signal(list)  # list[MarkerSpec]
     color_changed = Signal(QColor)
+    line_width_changed = Signal(int)
 
     def __init__(self, parent: Any | None = None) -> None:
         super().__init__("Markers", parent)
@@ -53,8 +54,9 @@ class MarkerDock(QDockWidget):
         param_form.addRow("Radius:", self.radius_spin)
 
         self.line_width_spin = QSpinBox(param_group)
-        self.line_width_spin.setRange(1, 10)
-        self.line_width_spin.setValue(2)
+        self.line_width_spin.setRange(1, 25)
+        self.line_width_spin.setValue(5)
+        self.line_width_spin.valueChanged.connect(self.line_width_changed.emit)
         param_form.addRow("Line width:", self.line_width_spin)
 
         color_row = QWidget(param_group)
@@ -142,11 +144,21 @@ class MarkerDock(QDockWidget):
     def color(self) -> QColor:
         return QColor(self._color)
 
+    def set_color(self, color: QColor | str) -> None:
+        self._color = QColor(color)
+        self._update_color_preview()
+
     def radius(self) -> float:
         return self.radius_spin.value()
 
+    def set_radius(self, radius: float) -> None:
+        self.radius_spin.setValue(radius)
+
     def line_width(self) -> int:
         return self.line_width_spin.value()
+
+    def set_line_width(self, line_width: int) -> None:
+        self.line_width_spin.setValue(line_width)
 
     def parse_coordinates(self) -> list[tuple[str, float, float]]:
         """Parse text input into (type, v1, v2) tuples.

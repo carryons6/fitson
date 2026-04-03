@@ -7,13 +7,14 @@
 ;      or open in Inno Setup GUI and click Build -> Compile
 
 #define MyAppName "AstroView"
-#define MyAppVersion "1.1.0"
+#define MyAppVersion "1.2.0"
 #define MyAppPublisher "Fitson"
 #define MyAppExeName "AstroView.exe"
 
 [Setup]
 AppId={{A3B7C9E1-5F2D-4A8B-9C6E-7D1F0E2B3A4C}
 AppName={#MyAppName}
+AppVerName={#MyAppName} {#MyAppVersion}
 AppVersion={#MyAppVersion}
 AppPublisher={#MyAppPublisher}
 DefaultDirName={autopf}\{#MyAppName}
@@ -28,6 +29,12 @@ SolidCompression=yes
 WizardStyle=modern
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
+VersionInfoVersion={#MyAppVersion}
+UsePreviousAppDir=yes
+UsePreviousTasks=yes
+ChangesAssociations=yes
+CloseApplications=yes
+RestartApplications=no
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"

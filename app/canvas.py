@@ -40,11 +40,12 @@ class ImageCanvas(QGraphicsView):
         self._marker_items: list[QGraphicsEllipseItem] = []
         self._source_items: list[QGraphicsEllipseItem] = []
         self._roi_color = QColor(255, 0, 0)
+        self._roi_line_width = 5
         self._source_pen = QPen(QColor(255, 0, 0))
-        self._source_pen.setWidth(1)
+        self._source_pen.setWidth(5)
         self._source_pen.setCosmetic(True)
         self._highlight_pen = QPen(QColor(255, 255, 0))
-        self._highlight_pen.setWidth(2)
+        self._highlight_pen.setWidth(6)
         self._highlight_pen.setCosmetic(True)
 
         self.setObjectName("image_canvas")
@@ -70,6 +71,80 @@ class ImageCanvas(QGraphicsView):
             return
         self._pixmap_item.setPixmap(QPixmap.fromImage(image))
         self._update_scene_rect()
+
+    def capture_view_state(self) -> dict[str, float | str] | None:
+        """Snapshot the current view so image replacements can restore it."""
+
+        pixmap = self._pixmap_item.pixmap()
+        image_rect = self._pixmap_item.boundingRect()
+        if pixmap.isNull() or image_rect.isNull():
+            return None
+
+        center = self.mapToScene(self.viewport().rect().center())
+        width = image_rect.width()
+        height = image_rect.height()
+        center_x = 0.5 if width <= 0 else (center.x() - image_rect.left()) / width
+        center_y = 0.5 if height <= 0 else (center.y() - image_rect.top()) / height
+
+        return {
+            "mode": self.zoom_state.mode,
+            "scale_factor": self.transform().m11(),
+            "center_x": min(max(center_x, 0.0), 1.0),
+            "center_y": min(max(center_y, 0.0), 1.0),
+            "image_width": width,
+            "image_height": height,
+        }
+
+    def restore_view_state(self, state: dict[str, float | str] | None) -> None:
+        """Reapply a captured view state after the pixmap changes."""
+
+        if not state:
+            return
+
+        pixmap = self._pixmap_item.pixmap()
+        image_rect = self._pixmap_item.boundingRect()
+        if pixmap.isNull() or image_rect.isNull():
+            return
+
+        mode = str(state.get("mode", "custom"))
+        previous_width = float(state.get("image_width", image_rect.width()))
+        previous_height = float(state.get("image_height", image_rect.height()))
+        width = image_rect.width()
+        height = image_rect.height()
+
+        width_ratio = previous_width / width if previous_width > 0 and width > 0 else 1.0
+        height_ratio = previous_height / height if previous_height > 0 and height > 0 else 1.0
+        image_scale_ratio = min(width_ratio, height_ratio)
+        target_scale = float(state.get("scale_factor", self.transform().m11()))
+
+        previous_anchor = self.transformationAnchor()
+        previous_resize_anchor = self.resizeAnchor()
+        self.setTransformationAnchor(QGraphicsView.ViewportAnchor.NoAnchor)
+        self.setResizeAnchor(QGraphicsView.ViewportAnchor.NoAnchor)
+        try:
+            if mode == "fit":
+                self.fitInView(self._pixmap_item, Qt.AspectRatioMode.KeepAspectRatio)
+                target_scale = self.transform().m11()
+            elif mode == "custom":
+                target_scale = max(0.01, target_scale * image_scale_ratio)
+                self.resetTransform()
+                self.scale(target_scale, target_scale)
+            else:
+                target_scale = 1.0
+                self.resetTransform()
+
+            center_x = min(max(float(state.get("center_x", 0.5)), 0.0), 1.0)
+            center_y = min(max(float(state.get("center_y", 0.5)), 0.0), 1.0)
+            self.centerOn(
+                image_rect.left() + center_x * width,
+                image_rect.top() + center_y * height,
+            )
+        finally:
+            self.setTransformationAnchor(previous_anchor)
+            self.setResizeAnchor(previous_resize_anchor)
+
+        self.set_zoom_state(ZoomState(scale_factor=target_scale, mode=mode))
+        self.zoom_changed.emit(target_scale)
 
     def clear_image(self) -> None:
         """Clear the currently displayed image."""
@@ -150,6 +225,8 @@ class ImageCanvas(QGraphicsView):
             self._scene.addItem(item)
             self._source_items.append(item)
 
+        self._refresh_source_pens()
+
     def set_overlay_state(self, state: CanvasOverlayState) -> None:
         """Apply structured overlay presentation state to the canvas."""
 
@@ -175,8 +252,29 @@ class ImageCanvas(QGraphicsView):
         """
 
         self.overlay_state.highlighted_index = index
+        self._refresh_source_pens()
+
+    def set_source_overlay_style(
+        self,
+        color: QColor | None = None,
+        line_width: int | None = None,
+    ) -> None:
+        """Update source-overlay color and width, then repaint existing items."""
+
+        if color is not None:
+            self._source_pen.setColor(QColor(color))
+        if line_width is not None:
+            width = max(1, int(line_width))
+            self._source_pen.setWidth(width)
+            self._highlight_pen.setWidth(width + 1)
+        self._refresh_source_pens()
+
+    def _refresh_source_pens(self) -> None:
+        """Reapply source pens so style changes appear immediately."""
+
+        highlighted_index = self.overlay_state.highlighted_index
         for i, item in enumerate(self._source_items):
-            if i == index:
+            if highlighted_index is not None and i == highlighted_index:
                 item.setPen(self._highlight_pen)
             else:
                 item.setPen(self._source_pen)
@@ -186,7 +284,7 @@ class ImageCanvas(QGraphicsView):
         coords: list[tuple[float, float]],
         radius: float = 20.0,
         color: QColor | None = None,
-        line_width: int = 2,
+        line_width: int = 5,
     ) -> None:
         """Draw circle markers at the given pixel coordinates."""
 
@@ -213,9 +311,20 @@ class ImageCanvas(QGraphicsView):
         """Update the right-drag ROI rubber-band color."""
 
         self._roi_color = QColor(color or QColor(255, 0, 0))
+        self._apply_roi_style()
+
+    def set_roi_line_width(self, line_width: int) -> None:
+        """Update the right-drag ROI rubber-band border width."""
+
+        self._roi_line_width = max(1, int(line_width))
+        self._apply_roi_style()
+
+    def _apply_roi_style(self) -> None:
+        """Refresh the rubber-band stylesheet from the stored ROI settings."""
+
         self._rubber_band.setStyleSheet(
             "QRubberBand {"
-            f"border: 2px solid {self._roi_color.name()};"
+            f"border: {self._roi_line_width}px solid {self._roi_color.name()};"
             f"background-color: rgba({self._roi_color.red()}, {self._roi_color.green()}, {self._roi_color.blue()}, 32);"
             "}"
         )

@@ -37,6 +37,26 @@ class TestMarkerDock(unittest.TestCase):
         finally:
             dock.deleteLater()
 
+    def test_line_width_defaults_to_5(self) -> None:
+        dock = MarkerDock()
+        try:
+            self.assertEqual(dock.line_width(), 5)
+        finally:
+            dock.deleteLater()
+
+    def test_line_width_spin_supports_up_to_25_and_emits_changes(self) -> None:
+        dock = MarkerDock()
+        widths: list[int] = []
+        dock.line_width_changed.connect(widths.append)
+        try:
+            dock.line_width_spin.setValue(25)
+
+            self.assertEqual(dock.line_width_spin.maximum(), 25)
+            self.assertEqual(dock.line_width(), 25)
+            self.assertEqual(widths, [25])
+        finally:
+            dock.deleteLater()
+
 
 if __name__ == "__main__":
     unittest.main()

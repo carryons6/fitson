@@ -39,6 +39,38 @@ class TestFramePlayerDock(unittest.TestCase):
         finally:
             dock.deleteLater()
 
+    def test_set_render_state_updates_info_label_for_preview_and_full_render(self) -> None:
+        dock = FramePlayerDock()
+        try:
+            dock.set_frame_count(3)
+
+            dock.set_render_state(True, has_preview=False)
+            self.assertEqual(dock.info_label.text(), "3 frame(s) loaded. Waiting for preview...")
+
+            dock.set_render_state(True, has_preview=True)
+            self.assertEqual(dock.info_label.text(), "3 frame(s) loaded. Rendering full frame...")
+
+            dock.set_render_state(False, has_preview=True)
+            self.assertEqual(dock.info_label.text(), "3 frame(s) loaded.")
+        finally:
+            dock.deleteLater()
+
+    def test_advance_frame_waits_until_preview_is_available(self) -> None:
+        dock = FramePlayerDock()
+        try:
+            dock.set_frame_count(4)
+            dock.set_current_frame(0)
+            dock.set_render_state(True, has_preview=False)
+
+            dock._advance_frame()
+            self.assertEqual(dock.current_frame(), 0)
+
+            dock.set_render_state(True, has_preview=True)
+            dock._advance_frame()
+            self.assertEqual(dock.current_frame(), 1)
+        finally:
+            dock.deleteLater()
+
 
 if __name__ == "__main__":
     unittest.main()

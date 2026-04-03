@@ -23,7 +23,7 @@ class FrameRenderWorker(QObject):
         data: FITSData,
         stretch_name: str,
         interval_name: str,
-        preview_max_dimension: int = 2048,
+        preview_dimensions: tuple[int, ...] = (1024, 2048),
     ) -> None:
         super().__init__()
         self.request_id = request_id
@@ -32,24 +32,24 @@ class FrameRenderWorker(QObject):
         self.data = data
         self.stretch_name = stretch_name
         self.interval_name = interval_name
-        self.preview_max_dimension = preview_max_dimension
+        self.preview_dimensions = tuple(sorted(set(preview_dimensions)))
 
     @Slot()
     def run(self) -> None:
         thread = QThread.currentThread()
 
         try:
-            preview = render_preview_u8(
-                self.data,
-                self.stretch_name,
-                self.interval_name,
-                max_dimension=self.preview_max_dimension,
-            )
-            if preview is not None:
-                self.preview_ready.emit(self.request_id, self.generation, self.frame_index, preview)
-
-            if thread.isInterruptionRequested():
-                return
+            for max_dimension in self.preview_dimensions:
+                preview = render_preview_u8(
+                    self.data,
+                    self.stretch_name,
+                    self.interval_name,
+                    max_dimension=max_dimension,
+                )
+                if preview is not None:
+                    self.preview_ready.emit(self.request_id, self.generation, self.frame_index, preview)
+                if thread.isInterruptionRequested():
+                    return
 
             image_u8 = render_image_u8(self.data, self.stretch_name, self.interval_name)
             if thread.isInterruptionRequested():

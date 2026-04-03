@@ -20,8 +20,38 @@ function Write-Section {
     Write-Host ("=" * 78) -ForegroundColor DarkCyan
 }
 
+function Get-ConfiguredPythonPath {
+    param([string]$RepoRoot)
+
+    $configPath = Join-Path $RepoRoot ".python-env.local"
+    if (-not (Test-Path -LiteralPath $configPath)) {
+        return $null
+    }
+
+    $configuredPath = Get-Content -LiteralPath $configPath |
+        Where-Object { $_.Trim() -and -not $_.Trim().StartsWith("#") } |
+        Select-Object -First 1
+
+    if (-not $configuredPath) {
+        return $null
+    }
+
+    if (Test-Path -LiteralPath $configuredPath) {
+        return (Resolve-Path -LiteralPath $configuredPath).Path
+    }
+
+    return $configuredPath
+}
+
 function Resolve-AstroPython {
+    param([string]$RepoRoot)
+
     $candidates = @()
+    $configuredPython = Get-ConfiguredPythonPath -RepoRoot $RepoRoot
+
+    if ($configuredPython) {
+        $candidates += $configuredPython
+    }
 
     if ($env:CONDA_PREFIX) {
         $activePython = Join-Path $env:CONDA_PREFIX "python.exe"
@@ -47,7 +77,7 @@ function Resolve-AstroPython {
 
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = Split-Path -Parent $scriptDir
-$astroPython = Resolve-AstroPython
+$astroPython = Resolve-AstroPython -RepoRoot $repoRoot
 $envCheckScript = @(
     "import importlib",
     "import platform",
@@ -77,7 +107,7 @@ Write-Host ("Fail Fast       : {0}" -f $FailFast.IsPresent)
 if (-not $astroPython) {
     Write-Section "Environment Error"
     Write-Host "Could not locate python.exe for the conda astro environment." -ForegroundColor Red
-    Write-Host "Checked the active CONDA_PREFIX (if it is astro) and common Miniforge locations." -ForegroundColor Yellow
+    Write-Host "Checked .python-env.local, the active CONDA_PREFIX (if it is astro), and common Miniforge locations." -ForegroundColor Yellow
     Wait-ForExit
     exit 1
 }

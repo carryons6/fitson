@@ -118,8 +118,10 @@ class RenderControlState:
 
     available_stretches: tuple[str, ...] = ()
     available_intervals: tuple[str, ...] = ()
+    available_preview_profiles: tuple[str, ...] = ()
     current_stretch: str = ""
     current_interval: str = ""
+    current_preview_profile: str = ""
     enabled: bool = False
     disabled_reason: str = ""
 

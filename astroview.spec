@@ -8,6 +8,9 @@ package_dir = spec_dir
 workspace_dir = package_dir.parent
 site_packages = Path(r"D:\Miniforge\envs\astro\Lib\site-packages")
 python3_dll = Path(r"D:\Miniforge\envs\astro\python3.dll")
+pyside_package_dir = site_packages / "PySide6"
+shiboken_package_dir = site_packages / "shiboken6"
+numpy_libs_dir = site_packages / "numpy.libs"
 
 # The astro environment contains a broken pygame PyInstaller entry point that
 # crashes hook auto-discovery. We bypass the entry-point scan and provide the
@@ -19,10 +22,10 @@ build_main.discover_hook_directories = lambda: []
 # that late scan and add the needed runtime DLLs explicitly below.
 build_main.find_binary_dependencies = lambda *args, **kwargs: []
 
-hookspath = [
-    str(spec_dir / "hooks"),
-    str(site_packages / "numpy" / "_pyinstaller"),
-]
+hookspath = [str(spec_dir / "hooks")]
+numpy_hook_dir = site_packages / "numpy" / "_pyinstaller"
+if numpy_hook_dir.is_dir():
+    hookspath.append(str(numpy_hook_dir))
 
 qt_bin = Path(r"D:\Miniforge\envs\astro\Library\bin")
 icu_bin = qt_bin  # ICU DLLs are in the same directory
@@ -31,20 +34,52 @@ binaries = []
 if python3_dll.is_file():
     binaries.append((str(python3_dll), '.'))
 
-# PySide6 Qt runtime DLLs (needed because find_binary_dependencies is bypassed)
+def _append_binary_if_exists(source_dir: Path, dll_name: str, dest: str = '.') -> None:
+    dll_path = source_dir / dll_name
+    if dll_path.is_file():
+        binaries.append((str(dll_path), dest))
+
+
+# PySide6 / Shiboken runtime DLLs. Prefer package-local DLLs because the exact
+# filenames vary across conda/PyPI builds (for example abi3 vs cp311 suffixes).
 for dll_name in [
-    # Qt6
     'Qt6Core.dll', 'Qt6Gui.dll', 'Qt6Widgets.dll', 'Qt6Network.dll',
-    # PySide6 / Shiboken runtime
-    'shiboken6.cp311-win_amd64.dll', 'pyside6.cp311-win_amd64.dll',
-    # ICU (required by Qt6Core)
-    'icudt78.dll', 'icuin78.dll', 'icuuc78.dll',
-    # Qt6 transitive dependencies
+    'pyside6.abi3.dll', 'pyside6qml.abi3.dll',
+]:
+    _append_binary_if_exists(pyside_package_dir, dll_name)
+    _append_binary_if_exists(qt_bin, dll_name)
+
+for dll_name in [
+    'shiboken6.abi3.dll',
+    'concrt140.dll',
+    'msvcp140.dll',
+    'msvcp140_1.dll',
+    'msvcp140_2.dll',
+    'msvcp140_codecvt_ids.dll',
+    'vccorlib140.dll',
+    'vcomp140.dll',
+    'vcruntime140.dll',
+    'vcruntime140_1.dll',
+]:
+    _append_binary_if_exists(shiboken_package_dir, dll_name)
+    _append_binary_if_exists(qt_bin, dll_name)
+
+# ICU and Qt6 transitive dependencies usually live under Library/bin.
+for dll_name in [
+    'icudt.dll', 'icudt78.dll',
+    'icuin.dll', 'icuin78.dll',
+    'icuuc.dll', 'icuuc78.dll',
     'freetype.dll', 'libpng16.dll', 'pcre2-16.dll',
     'double-conversion.dll', 'zstd.dll',
+    'libgomp-1.dll', 'libquadmath-0.dll', 'libgcc_s_seh-1.dll',
 ]:
-    dll_path = qt_bin / dll_name
-    if dll_path.is_file():
+    _append_binary_if_exists(qt_bin, dll_name)
+
+# Conda/PyPI numpy wheels often depend on hashed OpenBLAS runtime DLLs under
+# numpy.libs; collect them explicitly because binary dependency discovery is
+# bypassed above.
+if numpy_libs_dir.is_dir():
+    for dll_path in numpy_libs_dir.glob("*.dll"):
         binaries.append((str(dll_path), '.'))
 
 seen_binaries = set()
@@ -65,6 +100,7 @@ if runtime_icon.is_file():
 
 hiddenimports = [
     "sep",
+    "numpy.core._multiarray_tests",
 ]
 
 
