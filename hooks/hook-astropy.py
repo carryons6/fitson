@@ -1,6 +1,4 @@
-from pathlib import Path
-
-from PyInstaller.utils.hooks import collect_data_files, copy_metadata, get_package_paths, is_module_satisfies
+from PyInstaller.utils.hooks import collect_data_files, copy_metadata, is_module_satisfies
 
 
 # Astropy needs bundled data files at runtime. The stock contrib hook uses
@@ -19,30 +17,38 @@ if is_module_satisfies('astropy >= 5.0'):
     datas += copy_metadata('astropy')
     datas += copy_metadata('numpy')
 
-_pkg_base, pkg_dir_str = get_package_paths('astropy')
-pkg_dir = Path(pkg_dir_str)
-
-hiddenimports = []
-for file_path in pkg_dir.rglob('*'):
-    if '__pycache__' in file_path.parts:
-        continue
-    if file_path.suffix not in {'.py', '.pyd'}:
-        continue
-
-    relative = file_path.relative_to(pkg_dir)
-    if file_path.name == '__init__.py':
-        module_name = '.'.join(('astropy',) + relative.parent.parts)
-    elif file_path.suffix == '.py':
-        module_name = '.'.join(('astropy',) + relative.with_suffix('').parts)
-    else:
-        module_name = '.'.join(('astropy',) + tuple(relative.stem.split('.')))
-
-    if module_name and module_name not in hiddenimports:
-        hiddenimports.append(module_name)
-
-if 'numpy.lib.recfunctions' not in hiddenimports:
-    hiddenimports.append('numpy.lib.recfunctions')
-if 'astropy_iers_data' not in hiddenimports:
-    hiddenimports.append('astropy_iers_data')
-if 'yaml' not in hiddenimports:
-    hiddenimports.append('yaml')
+# The app uses only a narrow astropy surface: FITS I/O, compressed image HDUs,
+# WCS, visualization stretches/intervals, and coordinate/unit conversion.
+# Keeping the hook on that subset avoids pulling in most of astropy's optional
+# subpackages, tests, and their transitive baggage.
+hiddenimports = [
+    'astropy.constants',
+    'astropy.constants.cgs',
+    'astropy.constants.codata2018',
+    'astropy.constants.config',
+    'astropy.constants.constant',
+    'astropy.constants.iau2015',
+    'astropy.constants.si',
+    'astropy.constants.utils',
+    'astropy.coordinates',
+    'astropy.io.fits',
+    'astropy.io.fits.hdu.compressed',
+    'astropy.io.fits.hdu.compressed._codecs',
+    'astropy.io.fits.hdu.compressed._compression',
+    'astropy.io.fits.hdu.compressed._quantization',
+    'astropy.io.fits.hdu.compressed._tiled_compression',
+    'astropy.io.fits.hdu.compressed.compbintable',
+    'astropy.io.fits.hdu.compressed.compressed',
+    'astropy.io.fits.hdu.compressed.header',
+    'astropy.io.fits.hdu.compressed.section',
+    'astropy.io.fits.hdu.compressed.settings',
+    'astropy.io.fits.hdu.compressed.utils',
+    'astropy.units',
+    'astropy.utils.xml._iterparser',
+    'astropy.visualization',
+    'astropy.wcs',
+    'astropy.wcs.wcs',
+    'astropy_iers_data',
+    'numpy.lib.recfunctions',
+    'yaml',
+]
