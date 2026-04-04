@@ -11,7 +11,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import numpy as np
 from PySide6.QtCore import QByteArray
 from PySide6.QtGui import QColor
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QMessageBox
 
 import sys
 from pathlib import Path
@@ -23,6 +23,7 @@ if str(REPO_PARENT) not in sys.path:
 from astroview import __version__
 from astroview.app.contracts import TableColumnSpec
 from astroview.app.main_window import MainWindow
+from astroview.app.update_check_worker import UpdateCheckResult
 from astroview.core.sep_service import SEPParameters
 from astroview.core.fits_data import FITSData
 from astroview.core.source_catalog import SourceCatalog, SourceRecord
@@ -902,6 +903,36 @@ class TestMainWindowLoading(unittest.TestCase):
 
             shortcuts = [shortcut.toString() for shortcut in window.action_export_catalog.shortcuts()]
             self.assertEqual(shortcuts, ["Ctrl+E", "Ctrl+Shift+E"])
+        finally:
+            window.deleteLater()
+
+    def test_create_help_actions_defines_check_updates_action(self) -> None:
+        window = MainWindow()
+        try:
+            window.create_help_actions()
+
+            self.assertEqual(window.action_check_updates.text(), "Check for Updates...")
+        finally:
+            window.deleteLater()
+
+    def test_handle_update_check_result_opens_release_page_when_confirmed(self) -> None:
+        window = MainWindow()
+        try:
+            result = UpdateCheckResult(
+                status="update_available",
+                current_version=__version__,
+                latest_version="9.9.9",
+                release_url="https://example.com/releases/tag/v9.9.9",
+                detail="A newer version is available.",
+            )
+            with patch(
+                "astroview.app.main_window.QMessageBox.question",
+                return_value=QMessageBox.StandardButton.Yes,
+            ):
+                with patch("astroview.app.main_window.QDesktopServices.openUrl") as open_mock:
+                    window._handle_update_check_result(result)
+
+            open_mock.assert_called_once()
         finally:
             window.deleteLater()
 

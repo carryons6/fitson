@@ -8,6 +8,7 @@
 - Added `app/frame_render_worker.py` for background frame rendering with progressive preview/full-resolution updates.
 - Added `app/histogram_dock.py` to expose image histograms and manual display-range controls in the UI.
 - Added `app/sep_extract_worker.py` so SEP source extraction runs off the UI thread.
+- Added a `Check for Updates...` action in the Help menu with a background GitHub release/tag check worker.
 - Added targeted tests for background file loading, background frame rendering, and main-window loading/render scheduling.
 - Added a repository-root compatibility launcher so `python -m astroview` works from both the package parent directory and the repository root.
 - Added shared render helpers in `core/fits_service.py` for full-resolution and low-resolution preview rendering.

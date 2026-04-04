@@ -4,11 +4,11 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from PySide6.QtCore import QByteArray, Qt, QThread, QSettings, QTimer
-from PySide6.QtGui import QAction, QImage, QKeySequence
-from PySide6.QtWidgets import QComboBox, QDockWidget, QFileDialog, QLabel, QMainWindow, QToolBar
+from PySide6.QtCore import QByteArray, Qt, QThread, QSettings, QTimer, QUrl
+from PySide6.QtGui import QAction, QDesktopServices, QImage, QKeySequence
+from PySide6.QtWidgets import QComboBox, QDockWidget, QFileDialog, QLabel, QMainWindow, QMessageBox, QToolBar
 
-from .. import APP_NAME, __version__
+from .. import APP_NAME, APP_RELEASES_URL, __version__
 from ..core import FITSService, OpenFileRequest, PixelSample, ROISelection, SEPService, SourceCatalog
 from .contracts import (
     CanvasImageState,
@@ -34,6 +34,7 @@ from .sep_extract_worker import SEPExtractWorker
 from .sep_panel import SEPParamsPanel
 from .source_table import SourceTableDock
 from .status_bar import AppStatusBar
+from .update_check_worker import UpdateCheckResult, UpdateCheckWorker
 
 
 class MainWindow(QMainWindow):
@@ -97,6 +98,7 @@ class MainWindow(QMainWindow):
         self.action_show_markers: QAction | None = None
         self.action_append_frames: QAction | None = None
         self.action_target_info_fields: QAction | None = None
+        self.action_check_updates: QAction | None = None
 
         self.fits_service = fits_service or FITSService()
         self.sep_service = sep_service or SEPService()
@@ -129,6 +131,8 @@ class MainWindow(QMainWindow):
         self._sep_worker: SEPExtractWorker | None = None
         self._sep_request_id: int = 0
         self._active_sep_request_id: int | None = None
+        self._update_check_thread: QThread | None = None
+        self._update_check_worker: UpdateCheckWorker | None = None
         self._startup_request_applied = False
 
     def initialize(self, *, apply_startup_request: bool = True) -> None:
@@ -191,6 +195,7 @@ class MainWindow(QMainWindow):
         self.create_file_actions()
         self.create_view_actions()
         self.create_tool_actions()
+        self.create_help_actions()
 
     def connect_signals(self) -> None:
         """Connect UI signals to the window controller methods.
@@ -315,6 +320,8 @@ class MainWindow(QMainWindow):
             self.menu_tools.addAction(self.action_show_markers)
         if self.action_target_info_fields is not None:
             self.menu_tools.addAction(self.action_target_info_fields)
+        if self.action_check_updates is not None:
+            self.menu_help.addAction(self.action_check_updates)
 
         self.menu_view.addSeparator()
         if self.source_table_dock is not None:
@@ -428,6 +435,11 @@ class MainWindow(QMainWindow):
         self.preview_profile_selector = QComboBox(self)
         self.preview_profile_selector.setObjectName("preview_profile_selector")
 
+    def create_help_actions(self) -> None:
+        """Define help-oriented actions."""
+
+        self.action_check_updates = QAction("Check for Updates...", self)
+
     def bind_canvas_signals(self) -> None:
         """Bind `ImageCanvas` signals to window controller methods."""
 
@@ -502,6 +514,8 @@ class MainWindow(QMainWindow):
             self.action_target_info_fields.triggered.connect(self._show_target_info_fields_dialog)
         if self.action_append_frames is not None:
             self.action_append_frames.triggered.connect(self._append_frames)
+        if self.action_check_updates is not None:
+            self.action_check_updates.triggered.connect(self.check_for_updates)
         if self.marker_dock is not None:
             self.marker_dock.markers_updated.connect(self._apply_markers)
             self.marker_dock.color_changed.connect(self._handle_marker_color_changed)
@@ -727,6 +741,67 @@ class MainWindow(QMainWindow):
         if detail:
             title = f"{title} - {detail}"
         self.setWindowTitle(title)
+
+    def check_for_updates(self) -> None:
+        """Start a background check against the configured release source."""
+
+        thread = self._update_check_thread
+        if thread is not None and thread.isRunning():
+            return
+
+        if self.action_check_updates is not None:
+            self.action_check_updates.setEnabled(False)
+        if self.app_status_bar is not None:
+            self.app_status_bar.showMessage("Checking for updates...")
+
+        self._update_check_thread = QThread(self)
+        self._update_check_worker = UpdateCheckWorker(__version__)
+        self._update_check_worker.moveToThread(self._update_check_thread)
+
+        self._update_check_thread.started.connect(self._update_check_worker.run)
+        self._update_check_worker.result_ready.connect(self._handle_update_check_result)
+        self._update_check_worker.finished.connect(self._update_check_thread.quit)
+        self._update_check_worker.finished.connect(self._update_check_worker.deleteLater)
+        self._update_check_thread.finished.connect(self._clear_update_check_refs)
+        self._update_check_thread.finished.connect(self._update_check_thread.deleteLater)
+        self._update_check_thread.start()
+
+    def _clear_update_check_refs(self) -> None:
+        """Drop references after an update-check worker finishes."""
+
+        self._update_check_thread = None
+        self._update_check_worker = None
+        if self.action_check_updates is not None:
+            self.action_check_updates.setEnabled(True)
+
+    def _handle_update_check_result(self, result: UpdateCheckResult) -> None:
+        """Show the outcome of a completed update check."""
+
+        if self.app_status_bar is not None:
+            self.app_status_bar.clearMessage()
+
+        if result.status == "update_available":
+            latest = result.latest_version or "unknown"
+            answer = QMessageBox.question(
+                self,
+                "Update Available",
+                f"A newer version ({latest}) is available.\nCurrent version: {result.current_version}\n\nOpen the releases page now?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes,
+            )
+            if answer == QMessageBox.StandardButton.Yes:
+                QDesktopServices.openUrl(QUrl(result.release_url or APP_RELEASES_URL))
+            return
+
+        if result.status == "up_to_date":
+            QMessageBox.information(self, "Check for Updates", result.detail)
+            return
+
+        if result.status == "unavailable":
+            QMessageBox.information(self, "Check for Updates", result.detail)
+            return
+
+        QMessageBox.warning(self, "Update Check Failed", result.detail or "Unable to check for updates.")
 
 
     def _start_frame_load(
