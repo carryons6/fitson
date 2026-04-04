@@ -24,6 +24,7 @@ class FITSLoadWorker(QObject):
         stretch_name: str = "Linear",
         interval_name: str = "ZScale",
         preview_max_dimension: int = 2048,
+        manual_limits: tuple[float, float] | None = None,
     ) -> None:
         super().__init__()
         self.paths = list(paths)
@@ -33,6 +34,7 @@ class FITSLoadWorker(QObject):
         self.stretch_name = stretch_name
         self.interval_name = interval_name
         self.preview_max_dimension = preview_max_dimension
+        self.manual_limits = manual_limits
 
     @Slot()
     def run(self) -> None:
@@ -67,4 +69,5 @@ class FITSLoadWorker(QObject):
             self.stretch_name,
             self.interval_name,
             max_dimension=self.preview_max_dimension,
+            manual_limits=self.manual_limits,
         )

@@ -17,6 +17,8 @@ class SourceRecord:
     flux: float = 0.0
     peak: float = 0.0
     snr: float = 0.0
+    npix: int = 0
+    background_rms: float = 0.0
     a: float = 0.0
     b: float = 0.0
     theta: float = 0.0
@@ -44,6 +46,8 @@ class SourceCatalog:
         "Flux",
         "Peak",
         "SNR",
+        "NPix",
+        "BkgRMS",
         "A",
         "B",
         "Theta",
@@ -92,6 +96,8 @@ class SourceCatalog:
                 flux=flux,
                 peak=round(float(objects["peak"][i]), 2),
                 snr=round(snr, 2),
+                npix=int(_object_value(objects, "npix", i, default=0)),
+                background_rms=round(float(background_rms or 0.0), 4),
                 a=round(float(objects["a"][i]), 3),
                 b=round(float(objects["b"][i]), 3),
                 theta=round(float(objects["theta"][i]), 4),
@@ -170,6 +176,8 @@ class SourceCatalog:
                     "Flux": r.flux,
                     "Peak": r.peak,
                     "SNR": round(r.snr, 2),
+                    "NPix": r.npix,
+                    "BkgRMS": r.background_rms,
                     "A": r.a,
                     "B": r.b,
                     "Theta": r.theta,
@@ -196,3 +204,31 @@ class SourceCatalog:
             writer = csv.DictWriter(f, fieldnames=field_names)
             writer.writeheader()
             writer.writerows(rows)
+
+    def to_ds9_regions(self, path: str, *, color: str = "green", radius_scale: float = 3.0) -> None:
+        """Export the catalog as a DS9 image-coordinate region file."""
+
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write("# Region file format: DS9 version 4.1\n")
+            handle.write(f'global color={color} dashlist=8 3 width=1 font="helvetica 10 normal"\n')
+            handle.write("image\n")
+            for record in self.records:
+                major = max(1.0, float(record.a) * radius_scale)
+                minor = max(1.0, float(record.b) * radius_scale)
+                angle_deg = float(record.theta) * 180.0 / 3.141592653589793
+                handle.write(
+                    f"ellipse({record.x:.3f},{record.y:.3f},{major:.3f},{minor:.3f},{angle_deg:.3f}) "
+                    f"# text={{ID {record.source_id}}}\n"
+                )
+
+
+def _object_value(objects: Any, key: str, index: int, *, default: Any = None) -> Any:
+    """Return one field value from SEP objects or a fallback default."""
+
+    dtype = getattr(objects, "dtype", None)
+    dtype_names = getattr(dtype, "names", ()) or ()
+    if key in dtype_names:
+        return objects[key][index]
+    if isinstance(objects, dict) and key in objects:
+        return objects[key][index]
+    return default

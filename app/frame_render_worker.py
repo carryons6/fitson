@@ -24,6 +24,7 @@ class FrameRenderWorker(QObject):
         stretch_name: str,
         interval_name: str,
         preview_dimensions: tuple[int, ...] = (1024, 2048),
+        manual_limits: tuple[float, float] | None = None,
     ) -> None:
         super().__init__()
         self.request_id = request_id
@@ -33,6 +34,7 @@ class FrameRenderWorker(QObject):
         self.stretch_name = stretch_name
         self.interval_name = interval_name
         self.preview_dimensions = tuple(sorted(set(preview_dimensions)))
+        self.manual_limits = manual_limits
 
     @Slot()
     def run(self) -> None:
@@ -45,13 +47,19 @@ class FrameRenderWorker(QObject):
                     self.stretch_name,
                     self.interval_name,
                     max_dimension=max_dimension,
+                    manual_limits=self.manual_limits,
                 )
                 if preview is not None:
                     self.preview_ready.emit(self.request_id, self.generation, self.frame_index, preview)
                 if thread.isInterruptionRequested():
                     return
 
-            image_u8 = render_image_u8(self.data, self.stretch_name, self.interval_name)
+            image_u8 = render_image_u8(
+                self.data,
+                self.stretch_name,
+                self.interval_name,
+                manual_limits=self.manual_limits,
+            )
             if thread.isInterruptionRequested():
                 return
             self.render_ready.emit(self.request_id, self.generation, self.frame_index, image_u8)

@@ -63,6 +63,8 @@ class TestSourceCatalog(unittest.TestCase):
         self.assertEqual(record.flux, 12.35)
         self.assertEqual(record.peak, 6.79)
         self.assertEqual(record.snr, 2.06)
+        self.assertEqual(record.npix, 9)
+        self.assertEqual(record.background_rms, 2.0)
         self.assertEqual(record.a, 1.235)
         self.assertEqual(record.b, 0.988)
         self.assertEqual(record.theta, 0.1235)
@@ -107,6 +109,8 @@ class TestSourceCatalog(unittest.TestCase):
                 "Flux": 9.0,
                 "Peak": 5.0,
                 "SNR": 3.46,
+                "NPix": 0,
+                "BkgRMS": 0.0,
                 "A": 0.0,
                 "B": 0.0,
                 "Theta": 0.0,
@@ -157,6 +161,21 @@ class TestSourceCatalog(unittest.TestCase):
                 rows = list(csv.DictReader(handle))
 
         self.assertEqual(rows, [{"ID": "1", "Flux": "3.0", "SNR": "5.0"}])
+
+    def test_to_ds9_regions_writes_image_coordinate_ellipses(self) -> None:
+        catalog = SourceCatalog(
+            records=[SourceRecord(source_id=3, x=10.0, y=20.0, a=1.5, b=2.0, theta=0.5)]
+        )
+
+        with TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "catalog.reg"
+            catalog.to_ds9_regions(str(path), color="cyan")
+            contents = path.read_text(encoding="utf-8")
+
+        self.assertIn("# Region file format: DS9 version 4.1", contents)
+        self.assertIn("global color=cyan", contents)
+        self.assertIn("image", contents)
+        self.assertIn("ellipse(10.000,20.000,4.500,6.000", contents)
 
 
 if __name__ == "__main__":

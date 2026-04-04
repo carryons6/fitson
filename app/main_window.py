@@ -26,7 +26,9 @@ from .file_load_worker import FITSLoadWorker
 from .frame_player_dock import FramePlayerDock
 from .frame_render_worker import FrameRenderWorker
 from .header_dialog import HeaderDialog
+from .histogram_dock import HistogramDock
 from .marker_dock import MarkerDock
+from .sep_extract_worker import SEPExtractWorker
 from .sep_panel import SEPParamsPanel
 from .source_table import SourceTableDock
 from .status_bar import AppStatusBar
@@ -66,6 +68,7 @@ class MainWindow(QMainWindow):
         self.sep_panel_dock: QDockWidget | None = None
         self.marker_dock: MarkerDock | None = None
         self.frame_player_dock: FramePlayerDock | None = None
+        self.histogram_dock: HistogramDock | None = None
         self.header_dialog: HeaderDialog | None = None
         self.app_status_bar: AppStatusBar | None = None
 
@@ -81,6 +84,7 @@ class MainWindow(QMainWindow):
 
         self.action_open_file: QAction | None = None
         self.action_export_catalog: QAction | None = None
+        self.action_export_regions: QAction | None = None
         self.action_show_header: QAction | None = None
         self.action_close_file: QAction | None = None
         self.action_quit: QAction | None = None
@@ -98,6 +102,7 @@ class MainWindow(QMainWindow):
         self.current_catalog: SourceCatalog | None = None
         self._settings = QSettings("AstroView", "AstroView")
         self._preview_profile_name = self.DEFAULT_PREVIEW_PROFILE
+        self._last_auto_interval_name = self.fits_service.current_interval
 
         from ..core.fits_data import FITSData
         self._frames: list[FITSData] = []
@@ -119,6 +124,10 @@ class MainWindow(QMainWindow):
         self._render_workers: dict[int, FrameRenderWorker] = {}
         self._render_request_index_by_id: dict[int, int] = {}
         self._latest_render_request_by_index: dict[int, int] = {}
+        self._sep_thread: QThread | None = None
+        self._sep_worker: SEPExtractWorker | None = None
+        self._sep_request_id: int = 0
+        self._active_sep_request_id: int | None = None
         self._startup_request_applied = False
 
     def initialize(self, *, apply_startup_request: bool = True) -> None:
@@ -215,7 +224,7 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(self.canvas)
 
     def build_docks(self) -> None:
-        """Create dock widgets for the source table and SEP parameters panel."""
+        """Create dock widgets for the source table, histogram, and SEP panels."""
 
         self.source_table_dock = SourceTableDock(self)
         self.source_table_dock.setAllowedAreas(
@@ -244,6 +253,13 @@ class MainWindow(QMainWindow):
         )
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.marker_dock)
         self.marker_dock.hide()
+
+        self.histogram_dock = HistogramDock(self)
+        self.histogram_dock.setAllowedAreas(
+            Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea
+        )
+        self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.histogram_dock)
+        self.histogram_dock.hide()
 
         self.frame_player_dock = FramePlayerDock(self)
         self.frame_player_dock.setAllowedAreas(
@@ -274,6 +290,8 @@ class MainWindow(QMainWindow):
             self.menu_file.addAction(self.action_open_file)
         if self.action_export_catalog is not None:
             self.menu_file.addAction(self.action_export_catalog)
+        if self.action_export_regions is not None:
+            self.menu_file.addAction(self.action_export_regions)
         if self.action_show_header is not None:
             self.menu_file.addAction(self.action_show_header)
         if self.action_close_file is not None:
@@ -308,6 +326,8 @@ class MainWindow(QMainWindow):
             self.menu_view.addAction(self.marker_dock.toggleViewAction())
         if self.frame_player_dock is not None:
             self.menu_view.addAction(self.frame_player_dock.toggleViewAction())
+        if self.histogram_dock is not None:
+            self.menu_view.addAction(self.histogram_dock.toggleViewAction())
 
     def build_tool_bar(self) -> None:
         """Create the main toolbar and attach view/render controls."""
@@ -354,6 +374,8 @@ class MainWindow(QMainWindow):
         self.action_open_file.setShortcut(QKeySequence.StandardKey.Open)
         self.action_export_catalog = QAction("Export CSV", self)
         self.action_export_catalog.setShortcut("Ctrl+E")
+        self.action_export_regions = QAction("Export Regions", self)
+        self.action_export_regions.setShortcut("Ctrl+Shift+E")
         self.action_show_header = QAction("Show Header", self)
         self.action_show_header.setShortcut("Ctrl+H")
         self.action_append_frames = QAction("Append Frames...", self)
@@ -424,6 +446,7 @@ class MainWindow(QMainWindow):
         if self.source_table_dock is None:
             return
         self.source_table_dock.source_clicked.connect(self.handle_source_clicked)
+        self.source_table_dock.filter_changed.connect(self._persist_catalog_preferences)
 
     def bind_sep_panel_signals(self) -> None:
         """Bind SEP-parameter panel signals to window controller methods."""
@@ -445,6 +468,9 @@ class MainWindow(QMainWindow):
             self.marker_dock.radius_spin.valueChanged.connect(self._persist_marker_preferences)
             self.marker_dock.line_width_spin.valueChanged.connect(self._persist_marker_preferences)
             self.marker_dock.color_changed.connect(self._persist_marker_preferences)
+        if self.histogram_dock is not None:
+            self.histogram_dock.manual_range_applied.connect(self._handle_histogram_manual_range)
+            self.histogram_dock.auto_range_requested.connect(self._handle_histogram_auto_range)
 
     def bind_action_triggers(self) -> None:
         """Bind QAction triggers to their command handlers."""
@@ -453,6 +479,8 @@ class MainWindow(QMainWindow):
             self.action_open_file.triggered.connect(self.open_file)
         if self.action_export_catalog is not None:
             self.action_export_catalog.triggered.connect(self.export_catalog)
+        if self.action_export_regions is not None:
+            self.action_export_regions.triggered.connect(self.export_regions)
         if self.action_show_header is not None:
             self.action_show_header.triggered.connect(self.show_header_dialog)
         if self.action_close_file is not None:
@@ -523,6 +551,7 @@ class MainWindow(QMainWindow):
             paths = [path]
 
         self._remember_open_directory(paths)
+        self._reset_render_controls_for_new_file()
         self._start_frame_load(paths, hdu_index=hdu_index, append=False)
 
     def open_file_from_request(self, request: OpenFileRequest) -> None:
@@ -540,6 +569,22 @@ class MainWindow(QMainWindow):
         interval = self._settings.value("render/interval", self.fits_service.current_interval, type=str)
         if interval in self.fits_service.AVAILABLE_INTERVALS:
             self.fits_service.set_interval(interval)
+            if interval != "Manual":
+                self._last_auto_interval_name = interval
+
+        self._last_auto_interval_name = self._settings.value(
+            "render/auto_interval",
+            self._last_auto_interval_name,
+            type=str,
+        )
+
+        manual_low = self._settings.value("render/manual_low", None)
+        manual_high = self._settings.value("render/manual_high", None)
+        try:
+            if manual_low is not None and manual_high is not None:
+                self.fits_service.set_manual_interval_limits(float(manual_low), float(manual_high))
+        except (TypeError, ValueError):
+            self.fits_service.clear_manual_interval_limits()
 
         preview_profile = self._settings.value(
             "render/preview_profile",
@@ -549,7 +594,7 @@ class MainWindow(QMainWindow):
         self._preview_profile_name = self._normalize_preview_profile_name(preview_profile)
 
     def _restore_workspace_state(self) -> None:
-        """Restore persisted marker preferences and window layout."""
+        """Restore persisted marker preferences, catalog config, and window layout."""
 
         if self.marker_dock is not None:
             self.marker_dock.set_radius(self._settings.value("markers/radius", self.marker_dock.radius(), type=float))
@@ -558,6 +603,26 @@ class MainWindow(QMainWindow):
             )
             self.marker_dock.set_color(
                 self._settings.value("markers/color", self.marker_dock.color().name(), type=str)
+            )
+        if self.source_table_dock is not None:
+            visible_columns = self._settings.value("catalog/visible_columns", [])
+            visible_keys = self._normalize_settings_string_list(visible_columns)
+            if visible_keys:
+                configured = []
+                visible_set = set(visible_keys) | set(self.source_table_dock.MANDATORY_COLUMN_KEYS)
+                for column in self.source_table_dock.default_columns():
+                    configured.append(
+                        column.__class__(
+                            key=column.key,
+                            title=column.title,
+                            width_hint=column.width_hint,
+                            visible=column.key in visible_set,
+                            alignment=column.alignment,
+                        )
+                    )
+                self.source_table_dock.configure_columns(configured)
+            self.source_table_dock.set_filter_text(
+                self._settings.value("catalog/filter_text", "", type=str)
             )
 
         geometry = self._settings.value("window/geometry", QByteArray(), type=QByteArray)
@@ -570,12 +635,17 @@ class MainWindow(QMainWindow):
 
         self.sync_render_controls()
         self._sync_marker_visual_style()
+        self._refresh_histogram_view()
 
     def _persist_render_preferences(self) -> None:
         """Store the current render-control selections."""
 
         self._settings.setValue("render/stretch", self.fits_service.current_stretch)
         self._settings.setValue("render/interval", self.fits_service.current_interval)
+        self._settings.setValue("render/auto_interval", self._last_auto_interval_name)
+        manual_limits = self.fits_service.manual_interval_limits
+        self._settings.setValue("render/manual_low", None if manual_limits is None else manual_limits[0])
+        self._settings.setValue("render/manual_high", None if manual_limits is None else manual_limits[1])
         self._settings.setValue("render/preview_profile", self._preview_profile_name)
 
     def _normalize_preview_profile_name(self, name: str | None) -> str:
@@ -584,6 +654,16 @@ class MainWindow(QMainWindow):
         if name in self.PREVIEW_PROFILE_CONFIGS:
             return str(name)
         return self.DEFAULT_PREVIEW_PROFILE
+
+    def _reset_render_controls_for_new_file(self) -> None:
+        """Reset display controls to the default Stretch/Interval for newly opened data."""
+
+        self.fits_service.set_stretch(self.fits_service.AVAILABLE_STRETCHES[0])
+        self.fits_service.set_interval("ZScale")
+        self.fits_service.clear_manual_interval_limits()
+        self._last_auto_interval_name = "ZScale"
+        self._persist_render_preferences()
+        self.sync_render_controls()
 
     def _preview_profile_config(self) -> dict[str, int | tuple[int, ...]]:
         """Return the active preview pipeline configuration."""
@@ -616,6 +696,29 @@ class MainWindow(QMainWindow):
 
         self._settings.setValue("window/geometry", self.saveGeometry())
         self._settings.setValue("window/state", self.saveState())
+
+    def _persist_catalog_preferences(self, *_args: Any) -> None:
+        """Store catalog column visibility and free-text filter state."""
+
+        if self.source_table_dock is None:
+            return
+
+        filter_text = ""
+        if hasattr(self.source_table_dock, "filter_text"):
+            candidate = self.source_table_dock.filter_text()
+            if isinstance(candidate, str):
+                filter_text = candidate
+        self._settings.setValue("catalog/visible_columns", self._visible_source_table_columns())
+        self._settings.setValue("catalog/filter_text", filter_text)
+
+    def _normalize_settings_string_list(self, value: Any) -> list[str]:
+        """Normalize QSettings list payloads into plain Python strings."""
+
+        if value is None:
+            return []
+        if isinstance(value, str):
+            return [value]
+        return [str(item) for item in value]
 
 
     def _start_frame_load(
@@ -650,6 +753,7 @@ class MainWindow(QMainWindow):
             stretch_name=self.fits_service.current_stretch,
             interval_name=self.fits_service.current_interval,
             preview_max_dimension=self._preview_load_dimension(),
+            manual_limits=self.fits_service.manual_interval_limits,
         )
         self._load_worker.moveToThread(self._load_thread)
 
@@ -763,6 +867,7 @@ class MainWindow(QMainWindow):
             stretch_name=self.fits_service.current_stretch,
             interval_name=self.fits_service.current_interval,
             preview_dimensions=self._preview_render_dimensions(),
+            manual_limits=self.fits_service.manual_interval_limits,
         )
         worker.moveToThread(thread)
         self._render_workers[request_id] = worker
@@ -940,6 +1045,7 @@ class MainWindow(QMainWindow):
 
         self._stop_active_frame_load(wait=True)
         self._cancel_active_frame_renders(wait=True)
+        self._cancel_active_sep_extract(wait=True)
         self._render_generation += 1
         self._render_request_index_by_id.clear()
         self._latest_render_request_by_index.clear()
@@ -968,6 +1074,8 @@ class MainWindow(QMainWindow):
         if self.frame_player_dock is not None:
             self.frame_player_dock.set_frame_count(0)
             self.frame_player_dock.hide()
+        if self.histogram_dock is not None:
+            self.histogram_dock.clear_histogram()
         self.sync_sep_panel_state()
         self.sync_render_controls()
 
@@ -997,6 +1105,7 @@ class MainWindow(QMainWindow):
             self.header_dialog.clear()
             self.header_dialog.set_view_state(self.build_header_view_state())
         self.sync_sep_panel_state()
+        self._refresh_histogram_view()
         if self.app_status_bar is not None:
             self.app_status_bar.clear_data()
         self.sync_render_controls()
@@ -1006,6 +1115,10 @@ class MainWindow(QMainWindow):
 
         if self.sep_panel is not None:
             self.sep_panel.set_panel_state(self.build_sep_panel_state())
+        if self.action_run_sep is not None:
+            enablement = self.build_sep_enablement_state()
+            self.action_run_sep.setEnabled(enablement.enabled)
+            self.action_run_sep.setToolTip(enablement.reason)
 
     def sync_render_controls(self) -> None:
         """Push service-side render configuration into toolbar controls."""
@@ -1037,6 +1150,10 @@ class MainWindow(QMainWindow):
                 "Controls how aggressively AstroView renders preview stages before the full frame."
             )
             self.preview_profile_selector.blockSignals(False)
+        if self.action_export_catalog is not None:
+            self.action_export_catalog.setEnabled(self.current_catalog is not None and len(self.current_catalog) > 0)
+        if self.action_export_regions is not None:
+            self.action_export_regions.setEnabled(self.current_catalog is not None and len(self.current_catalog) > 0)
 
     def build_render_control_state(self) -> RenderControlState:
         """Construct the toolbar render-control state from the FITS service."""
@@ -1058,11 +1175,16 @@ class MainWindow(QMainWindow):
 
         rows = self.build_table_rows(self.current_catalog)
         if self.source_table_dock is not None:
+            if self.current_catalog is not None:
+                self.source_table_dock.populate(self.current_catalog)
             self.source_table_dock.set_row_view_models(rows)
             self.source_table_dock.set_view_state(self.build_table_view_state())
+            if self.current_catalog is not None and len(self.current_catalog) > 0:
+                self.source_table_dock.show()
         if self.canvas is not None:
             self.canvas.draw_sources(self.current_catalog)
             self.canvas.set_overlay_state(self.build_canvas_overlay_state())
+        self.sync_render_controls()
 
     def build_table_rows(self, catalog: SourceCatalog | None) -> list[TableRowViewModel]:
         """Transform a domain catalog into source-table row view models."""
@@ -1086,6 +1208,8 @@ class MainWindow(QMainWindow):
 
         has_catalog = self.current_catalog is not None and len(self.current_catalog) > 0
         feedback = self.build_empty_catalog_feedback()
+        if self._is_sep_extract_running():
+            feedback = self.build_loading_catalog_feedback()
         if has_catalog:
             feedback = ViewFeedbackState(status="ready")
         return TableViewState(
@@ -1119,6 +1243,8 @@ class MainWindow(QMainWindow):
 
         source_count = 0 if self.current_catalog is None else len(self.current_catalog)
         feedback = self.build_empty_catalog_feedback()
+        if self._is_sep_extract_running():
+            feedback = self.build_loading_catalog_feedback()
         if source_count:
             feedback = ViewFeedbackState(status="ready")
         return CanvasOverlayState(
@@ -1156,6 +1282,11 @@ class MainWindow(QMainWindow):
         """Construct the SEP panel enablement state."""
 
         has_image = self.fits_service.current_data is not None
+        if self._is_sep_extract_running():
+            return ControlEnablementState(
+                enabled=False,
+                reason="SEP extraction is running in the background.",
+            )
         return ControlEnablementState(
             enabled=has_image,
             reason="" if has_image else "SEP extraction is unavailable until a FITS image is loaded.",
@@ -1197,6 +1328,16 @@ class MainWindow(QMainWindow):
             visible=True,
         )
 
+    def build_loading_catalog_feedback(self) -> ViewFeedbackState:
+        """Feedback shown while SEP extraction is still in flight."""
+
+        return ViewFeedbackState(
+            status="loading",
+            title="Extracting Sources",
+            detail="SEP is running in the background for the selected region.",
+            visible=True,
+        )
+
     def build_no_header_feedback(self) -> ViewFeedbackState:
         """Feedback shown when no header content is available."""
 
@@ -1234,9 +1375,11 @@ class MainWindow(QMainWindow):
             self.source_table_dock.show()
         if self.sep_panel_dock is not None:
             self.sep_panel_dock.show()
+        if self.histogram_dock is not None:
+            self.histogram_dock.show()
 
         h, w = data.data.shape[:2]
-        self.handle_roi_selected(0, 0, w, h)
+        self._start_sep_extract(ROISelection(x0=0, y0=0, width=w, height=h))
 
     def _show_marker_dock(self) -> None:
         """Show the marker dock panel."""
@@ -1256,6 +1399,7 @@ class MainWindow(QMainWindow):
             return
 
         self.source_table_dock.configure_columns(dialog.selected_columns())
+        self._persist_catalog_preferences()
         self.sync_catalog_views()
 
     def _visible_source_table_columns(self) -> list[str]:
@@ -1263,7 +1407,188 @@ class MainWindow(QMainWindow):
 
         if self.source_table_dock is None:
             return list(SourceCatalog.COLUMN_NAMES)
-        return [column.key for column in self.source_table_dock.columns if column.visible]
+        mandatory_value = getattr(self.source_table_dock, "MANDATORY_COLUMN_KEYS", ("ID", "X", "Y"))
+        if not isinstance(mandatory_value, (list, tuple)):
+            mandatory_value = ("ID", "X", "Y")
+        mandatory = set(mandatory_value)
+        return [
+            column.key
+            for column in self.source_table_dock.columns
+            if column.visible or column.key in mandatory
+        ]
+
+    def _refresh_histogram_view(self) -> None:
+        """Push the current image histogram and manual limits into the histogram dock."""
+
+        if self.histogram_dock is None:
+            return
+
+        counts, min_value, max_value = self.fits_service.histogram()
+        if counts.size == 0 or (counts.sum() == 0 and min_value == 0.0 and max_value == 0.0):
+            self.histogram_dock.clear_histogram()
+            return
+
+        manual_limits = None
+        if self.fits_service.current_interval == "Manual":
+            manual_limits = self.fits_service.manual_interval_limits
+
+        self.histogram_dock.set_histogram(
+            counts,
+            min_value,
+            max_value,
+            manual_limits=manual_limits,
+        )
+
+    def _handle_histogram_manual_range(self, low: float, high: float) -> None:
+        """Switch the renderer into Manual mode using histogram-selected limits."""
+
+        self.fits_service.set_manual_interval_limits(low, high)
+        self.fits_service.set_interval("Manual")
+        self._persist_render_preferences()
+        self.sync_render_controls()
+        if self.fits_service.current_data is not None:
+            self._rerender_all_frames()
+            self._show_current_frame_image()
+        self._refresh_histogram_view()
+
+    def _handle_histogram_auto_range(self) -> None:
+        """Return from Manual interval mode to the most recent automatic interval."""
+
+        self.fits_service.set_interval(self._last_auto_interval_name or "ZScale")
+        self._persist_render_preferences()
+        self.sync_render_controls()
+        if self.fits_service.current_data is not None:
+            self._rerender_all_frames()
+            self._show_current_frame_image()
+        self._refresh_histogram_view()
+
+    def _is_sep_extract_running(self) -> bool:
+        """Return whether a background SEP extraction is currently active."""
+
+        return self._active_sep_request_id is not None
+
+    def _cancel_active_sep_extract(self, *, wait: bool = False) -> None:
+        """Request shutdown for any active SEP worker thread."""
+
+        thread = self._sep_thread
+        if thread is None or not thread.isRunning():
+            self._active_sep_request_id = None
+            return
+
+        thread.requestInterruption()
+        thread.quit()
+        if wait:
+            thread.wait()
+            self._clear_sep_worker_refs()
+
+    def _clear_sep_worker_refs(self) -> None:
+        """Drop references to the current SEP worker/thread pair after shutdown."""
+
+        self._sep_thread = None
+        self._sep_worker = None
+        self._active_sep_request_id = None
+
+    def _start_sep_extract(self, roi: ROISelection) -> None:
+        """Start asynchronous SEP extraction for the given image-space ROI."""
+
+        if self._is_sep_extract_running():
+            if self.app_status_bar is not None:
+                self.app_status_bar.showMessage("SEP extraction is already running.", 3000)
+            return
+
+        data = self.fits_service.current_data
+        if data is None or data.data is None:
+            self.show_error("SEP", "No FITS image loaded.")
+            return
+
+        h, w = data.data.shape[:2]
+        x0 = max(0, min(roi.x0, w))
+        y0 = max(0, min(roi.y0, h))
+        x1 = max(x0, min(roi.x0 + roi.width, w))
+        y1 = max(y0, min(roi.y0 + roi.height, h))
+        if x1 <= x0 or y1 <= y0:
+            self.show_error("SEP", "Selected ROI is empty.")
+            return
+
+        normalized_roi = ROISelection(x0=x0, y0=y0, width=x1 - x0, height=y1 - y0)
+        subarray = data.data[y0:y1, x0:x1]
+        params = self.sep_panel.params_from_form_state() if self.sep_panel else self.sep_service.params
+
+        self._sep_request_id += 1
+        request_id = self._sep_request_id
+        self._active_sep_request_id = request_id
+        self.current_catalog = None
+
+        self._sep_thread = QThread(self)
+        self._sep_worker = SEPExtractWorker(
+            request_id=request_id,
+            data_subarray=subarray,
+            roi=normalized_roi,
+            params=params,
+            wcs=data.wcs if data.has_wcs else None,
+        )
+        self._sep_worker.moveToThread(self._sep_thread)
+
+        self._sep_thread.started.connect(self._sep_worker.run)
+        self._sep_worker.extraction_ready.connect(self._handle_sep_extraction_ready)
+        self._sep_worker.extraction_error.connect(self._handle_sep_extraction_error)
+        self._sep_worker.finished.connect(self._handle_sep_extraction_finished)
+        self._sep_worker.finished.connect(self._sep_thread.quit)
+        self._sep_worker.finished.connect(self._sep_worker.deleteLater)
+        self._sep_thread.finished.connect(self._sep_thread.deleteLater)
+        self._sep_thread.finished.connect(self._clear_sep_worker_refs)
+
+        if self.source_table_dock is not None:
+            self.source_table_dock.show()
+            self.source_table_dock.set_row_view_models([])
+            self.source_table_dock.set_view_state(self.build_table_view_state())
+        if self.sep_panel_dock is not None:
+            self.sep_panel_dock.show()
+        if self.canvas is not None:
+            self.canvas.clear_sources()
+            self.canvas.set_overlay_state(self.build_canvas_overlay_state())
+        if self.app_status_bar is not None:
+            self.app_status_bar.showMessage("Running SEP extraction...", 0)
+        self.sync_sep_panel_state()
+        self.sync_render_controls()
+        self._sep_thread.start()
+
+    def _handle_sep_extraction_ready(self, request_id: int, roi: ROISelection, catalog: SourceCatalog) -> None:
+        """Accept a SEP extraction result if it still matches the latest request."""
+
+        if request_id != self._active_sep_request_id:
+            return
+
+        self.set_current_catalog(catalog)
+        self.sync_catalog_views()
+        if self.app_status_bar is not None:
+            self.app_status_bar.showMessage(
+                f"Extracted {len(catalog)} source{'s' if len(catalog) != 1 else ''} from ROI "
+                f"{roi.width}x{roi.height}.",
+                4000,
+            )
+
+    def _handle_sep_extraction_error(self, request_id: int, detail: str) -> None:
+        """Report a SEP extraction failure if it still matches the latest request."""
+
+        if request_id != self._active_sep_request_id:
+            return
+
+        self.show_error("SEP extraction failed", detail)
+        if self.source_table_dock is not None:
+            self.source_table_dock.set_view_state(self.build_table_view_state())
+
+    def _handle_sep_extraction_finished(self, request_id: int) -> None:
+        """Finalize SEP-extraction UI state when a worker exits."""
+
+        if request_id == self._active_sep_request_id:
+            self._active_sep_request_id = None
+            self.sync_sep_panel_state()
+            if self.source_table_dock is not None:
+                self.source_table_dock.set_view_state(self.build_table_view_state())
+            if self.canvas is not None:
+                self.canvas.set_overlay_state(self.build_canvas_overlay_state())
+            self.sync_render_controls()
 
     def _apply_markers(self, entries: list) -> None:
         """Draw markers on the canvas. Converts WCS entries to pixel coords."""
@@ -1337,7 +1662,24 @@ class MainWindow(QMainWindow):
     def reset_view_state(self) -> None:
         """Clear image, overlays, table state, dialog state, and status labels."""
 
-        pass
+        if self.canvas is not None:
+            self.canvas.clear_image()
+            self.canvas.clear_sources()
+            self.canvas.clear_markers()
+            self.canvas.set_image_state(self.build_canvas_image_state())
+            self.canvas.set_overlay_state(self.build_canvas_overlay_state())
+        if self.source_table_dock is not None:
+            self.source_table_dock.clear_catalog()
+            self.source_table_dock.set_view_state(self.build_table_view_state())
+        if self.header_dialog is not None:
+            self.header_dialog.clear()
+            self.header_dialog.set_view_state(self.build_header_view_state())
+        if self.app_status_bar is not None:
+            self.app_status_bar.clear_data()
+        if self.histogram_dock is not None:
+            self.histogram_dock.clear_histogram()
+        self.sync_sep_panel_state()
+        self.sync_render_controls()
 
     def set_current_catalog(self, catalog: SourceCatalog | None) -> None:
         """Update the active catalog reference held by the window."""
@@ -1366,6 +1708,27 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self.show_error("Export failed", str(e))
 
+    def export_regions(self) -> None:
+        """Export the current source catalog to a DS9 region file."""
+
+        if self.current_catalog is None or len(self.current_catalog) == 0:
+            self.show_error("Export", "No source catalog to export.")
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export Regions",
+            "catalog.reg",
+            "DS9 Region Files (*.reg);;All Files (*)",
+        )
+        if not path:
+            return
+        try:
+            self.current_catalog.to_ds9_regions(path)
+            if self.app_status_bar is not None:
+                self.app_status_bar.showMessage(f"Exported {len(self.current_catalog)} regions to {path}", 3000)
+        except Exception as e:
+            self.show_error("Region export failed", str(e))
+
     def show_header_dialog(self) -> None:
         """Open the FITS header viewer.
 
@@ -1391,30 +1754,7 @@ class MainWindow(QMainWindow):
         -> `ImageCanvas.draw_sources()` + `SourceTableDock.populate()`.
         """
 
-        data = self.fits_service.current_data
-        if data is None or data.data is None:
-            return
-
-        h, w = data.data.shape[:2]
-        x1 = min(x0 + width, w)
-        y1 = min(y0 + height, h)
-        x0 = max(x0, 0)
-        y0 = max(y0, 0)
-        subarray = data.data[y0:y1, x0:x1]
-
-        roi = ROISelection(x0=x0, y0=y0, width=x1 - x0, height=y1 - y0)
-        params = self.sep_panel.params_from_form_state() if self.sep_panel else None
-
-        try:
-            catalog = self.sep_service.extract_from_roi(
-                subarray, roi, params=params, wcs=data.wcs if data.has_wcs else None,
-            )
-        except Exception as e:
-            self.show_error("SEP extraction failed", str(e))
-            return
-
-        self.set_current_catalog(catalog)
-        self.sync_catalog_views()
+        self._start_sep_extract(ROISelection(x0=x0, y0=y0, width=width, height=height))
 
     def handle_roi_selection(self, selection: ROISelection) -> None:
         """Structured wrapper around the primitive ROI signal contract."""
@@ -1432,6 +1772,8 @@ class MainWindow(QMainWindow):
         if self.canvas is not None:
             self.canvas.highlight_source(index)
             self.canvas.set_overlay_state(self.build_canvas_overlay_state(highlighted_index=index))
+        if self.source_table_dock is not None and self.source_table_dock.current_selection_state().selected_row != index:
+            self.source_table_dock.select_source(index)
 
     def handle_sep_params_changed(self, params: Any) -> None:
         """Receive updated SEP parameters from the parameter panel.
@@ -1506,16 +1848,26 @@ class MainWindow(QMainWindow):
             if self.fits_service.current_data is not None:
                 self._rerender_all_frames()
                 self._show_current_frame_image()
+                self._refresh_histogram_view()
 
     def _handle_interval_changed(self, name: str) -> None:
         """Update the selected interval mode from the toolbar and re-render."""
 
         if name:
-            self.fits_service.set_interval(name)
+            if name == "Manual":
+                if self.fits_service.manual_interval_limits is None:
+                    data_range = self.fits_service.finite_data_range()
+                    if data_range is not None:
+                        self.fits_service.set_manual_interval_limits(*data_range)
+                self.fits_service.set_interval("Manual")
+            else:
+                self.fits_service.set_interval(name)
+                self._last_auto_interval_name = name
             self._persist_render_preferences()
             if self.fits_service.current_data is not None:
                 self._rerender_all_frames()
                 self._show_current_frame_image()
+                self._refresh_histogram_view()
 
     def _handle_preview_profile_changed(self, name: str) -> None:
         """Update preview aggressiveness for future loads and current rerenders."""
@@ -1529,6 +1881,7 @@ class MainWindow(QMainWindow):
         if self.fits_service.current_data is not None:
             self._rerender_all_frames()
             self._show_current_frame_image()
+            self._refresh_histogram_view()
 
     # --- Frame management ---
 
@@ -1575,6 +1928,7 @@ class MainWindow(QMainWindow):
         if index < 0 or index >= len(self._frames):
             return
 
+        self._cancel_active_sep_extract(wait=True)
         self._current_frame_index = index
         data = self._frames[index]
         self.fits_service.current_data = data
@@ -1600,6 +1954,10 @@ class MainWindow(QMainWindow):
             self.app_status_bar.set_frame_info(index, len(self._frames))
 
         self.sync_sep_panel_state()
+        if self.source_table_dock is not None:
+            self.source_table_dock.set_row_view_models([])
+            self.source_table_dock.set_view_state(self.build_table_view_state())
+        self._refresh_histogram_view()
         self._ensure_frame_rendered(index)
         self._prewarm_adjacent_frame()
 
@@ -1759,6 +2117,7 @@ class MainWindow(QMainWindow):
 
         self._stop_active_frame_load(wait=True)
         self._cancel_active_frame_renders(wait=True)
+        self._cancel_active_sep_extract(wait=True)
         self._persist_window_state()
         super().closeEvent(event)
 

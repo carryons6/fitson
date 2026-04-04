@@ -45,10 +45,22 @@ class TestFITSService(unittest.TestCase):
         self.assertEqual(request.stretch_name, "Asinh")
         self.assertEqual(request.interval_name, "99%")
 
+    def test_build_render_request_includes_manual_limits(self) -> None:
+        service = FITSService()
+
+        service.set_interval("Manual")
+        service.set_manual_interval_limits(1.25, 9.75)
+        request = service.build_render_request()
+
+        self.assertEqual(request.interval_name, "Manual")
+        self.assertEqual(request.manual_vmin, 1.25)
+        self.assertEqual(request.manual_vmax, 9.75)
+
     def test_available_intervals_include_original(self) -> None:
         service = FITSService()
 
         self.assertIn("Original", service.AVAILABLE_INTERVALS)
+        self.assertIn("Manual", service.AVAILABLE_INTERVALS)
 
     def test_render_returns_empty_result_when_no_image_is_loaded(self) -> None:
         service = FITSService()
@@ -124,6 +136,26 @@ class TestFITSService(unittest.TestCase):
         vmin, vmax = interval.get_limits(data)
 
         self.assertEqual((vmin, vmax), (-3.0, 100.0))
+
+    def test_histogram_returns_counts_and_data_range(self) -> None:
+        service = FITSService()
+        service.current_data = FITSData(
+            data=np.array([[1.0, 2.0], [3.0, np.nan]], dtype=np.float32)
+        )
+
+        counts, min_value, max_value = service.histogram(bins=4)
+
+        self.assertEqual(counts.sum(), 3)
+        self.assertEqual(min_value, 1.0)
+        self.assertEqual(max_value, 3.0)
+
+    def test_finite_data_range_ignores_nan_values(self) -> None:
+        service = FITSService()
+        service.current_data = FITSData(
+            data=np.array([[np.nan, 5.0], [10.0, np.nan]], dtype=np.float32)
+        )
+
+        self.assertEqual(service.finite_data_range(), (5.0, 10.0))
 
 
 if __name__ == "__main__":

@@ -81,6 +81,24 @@ class TestMainWindowLoading(unittest.TestCase):
         finally:
             window.deleteLater()
 
+    def test_open_file_resets_render_controls_to_linear_and_zscale(self) -> None:
+        window = MainWindow()
+        window._settings = Mock()
+        window.fits_service.set_stretch("Asinh")
+        window.fits_service.set_interval("99%")
+        window.fits_service.set_manual_interval_limits(1.0, 2.0)
+        try:
+            with patch.object(window, "_start_frame_load"):
+                window.open_file(path="tests/data/1.FITS")
+
+            self.assertEqual(window.fits_service.current_stretch, "Linear")
+            self.assertEqual(window.fits_service.current_interval, "ZScale")
+            self.assertIsNone(window.fits_service.manual_interval_limits)
+            self._assert_settings_write(window._settings, "render/stretch", "Linear")
+            self._assert_settings_write(window._settings, "render/interval", "ZScale")
+        finally:
+            window.deleteLater()
+
     def test_apply_startup_request_opens_initial_file_only_once(self) -> None:
         window = MainWindow(initial_path="tests/data/1.FITS", initial_hdu=2)
         try:
@@ -112,7 +130,7 @@ class TestMainWindowLoading(unittest.TestCase):
             with patch.object(window, "_start_frame_load"):
                 window.open_file(path="tests/data/1.FITS")
 
-            window._settings.setValue.assert_called_once_with("paths/last_open_dir", "tests\\data")
+            self._assert_settings_write(window._settings, "paths/last_open_dir", "tests\\data")
         finally:
             window.deleteLater()
 
@@ -134,7 +152,7 @@ class TestMainWindowLoading(unittest.TestCase):
                 "D:\\fits",
                 "FITS Files (*.fits *.fit *.fts);;All Files (*)",
             )
-            window._settings.setValue.assert_called_once_with("paths/last_open_dir", "D:\\fits\\new")
+            self._assert_settings_write(window._settings, "paths/last_open_dir", "D:\\fits\\new")
             start_mock.assert_called_once_with(["D:\\fits\\new\\image.fits"], hdu_index=None, append=False)
         finally:
             window.deleteLater()
@@ -859,6 +877,22 @@ class TestMainWindowLoading(unittest.TestCase):
             window.canvas.set_roi_color.assert_called_once()
             self.assertEqual(window.canvas.set_roi_color.call_args.args[0].name(), "#00ff00")
             window.canvas.set_source_overlay_style.assert_called_once()
+        finally:
+            window.deleteLater()
+
+    def test_visible_source_table_columns_always_include_id_x_y(self) -> None:
+        window = MainWindow()
+        window.source_table_dock = Mock(
+            columns=[
+                TableColumnSpec(key="ID", title="ID", visible=False),
+                TableColumnSpec(key="X", title="X", visible=False),
+                TableColumnSpec(key="Y", title="Y", visible=False),
+                TableColumnSpec(key="Flux", title="Flux", visible=True),
+            ]
+        )
+        window.source_table_dock.MANDATORY_COLUMN_KEYS = ("ID", "X", "Y")
+        try:
+            self.assertEqual(window._visible_source_table_columns(), ["ID", "X", "Y", "Flux"])
         finally:
             window.deleteLater()
 

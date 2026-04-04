@@ -1,0 +1,116 @@
+from __future__ import annotations
+
+import os
+import unittest
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QApplication
+
+import sys
+from pathlib import Path
+
+REPO_PARENT = Path(__file__).resolve().parents[2]
+if str(REPO_PARENT) not in sys.path:
+    sys.path.insert(0, str(REPO_PARENT))
+
+from astroview.app.contracts import TableRowViewModel, TableViewState
+from astroview.app.source_table import SourceTableDock
+from astroview.core.source_catalog import SourceCatalog, SourceRecord
+
+
+class TestSourceTableDock(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls._app = QApplication.instance() or QApplication([])
+
+    def test_filter_text_reduces_visible_rows_and_preserves_source_indices(self) -> None:
+        dock = SourceTableDock()
+        clicked: list[int] = []
+        dock.source_clicked.connect(clicked.append)
+        try:
+            rows = [
+                TableRowViewModel(row_index=0, values={"ID": 1, "Flux": 10.0}),
+                TableRowViewModel(row_index=1, values={"ID": 2, "Flux": 20.0}),
+            ]
+            dock.set_view_state(TableViewState(has_catalog=True, row_count=2))
+            dock.set_row_view_models(rows)
+            dock.set_filter_text("20.0")
+            self._app.processEvents()
+
+            self.assertEqual(len(dock.filtered_rows), 1)
+            self.assertEqual(dock.table_widget.rowCount(), 1)
+            dock.table_widget.selectRow(0)
+            self._app.processEvents()
+
+            self.assertEqual(clicked, [1])
+            self.assertEqual(dock.summary_label.text(), "Showing 1 / 2 sources")
+        finally:
+            dock.deleteLater()
+
+    def test_sorting_keeps_selection_signal_mapped_to_original_row_index(self) -> None:
+        dock = SourceTableDock()
+        clicked: list[int] = []
+        dock.source_clicked.connect(clicked.append)
+        try:
+            rows = [
+                TableRowViewModel(row_index=0, values={"ID": 1, "Flux": 10.0}),
+                TableRowViewModel(row_index=1, values={"ID": 2, "Flux": 50.0}),
+            ]
+            dock.set_view_state(TableViewState(has_catalog=True, row_count=2))
+            dock.set_row_view_models(rows)
+            flux_column = next(i for i, column in enumerate(dock.columns) if column.key == "Flux")
+            dock.table_widget.sortItems(flux_column, Qt.SortOrder.DescendingOrder)
+            self._app.processEvents()
+
+            dock.table_widget.selectRow(0)
+            self._app.processEvents()
+
+            self.assertEqual(clicked, [1])
+        finally:
+            dock.deleteLater()
+
+    def test_selected_source_shows_detail_fields_from_catalog(self) -> None:
+        dock = SourceTableDock()
+        try:
+            dock.populate(
+                SourceCatalog(
+                    records=[
+                        SourceRecord(
+                            source_id=7,
+                            x=12.5,
+                            y=34.5,
+                            ra="123.456",
+                            dec="-45.678",
+                            flux=99.1,
+                            peak=12.3,
+                            snr=8.7,
+                            npix=15,
+                            background_rms=0.23,
+                            a=2.1,
+                            b=1.8,
+                            theta=0.5,
+                            flag=4,
+                        )
+                    ]
+                )
+            )
+            dock.set_view_state(TableViewState(has_catalog=True, row_count=1))
+            dock.set_row_view_models([TableRowViewModel(row_index=0, values={"ID": 7, "Flux": 99.1})])
+            dock.select_source(0)
+            self._app.processEvents()
+
+            detail_text = dock.detail_view.toPlainText()
+            self.assertIn("ID: 7", detail_text)
+            self.assertIn("X: 12.5", detail_text)
+            self.assertIn("Y: 34.5", detail_text)
+            self.assertIn("RA: 123.456", detail_text)
+            self.assertIn("SNR: 8.7", detail_text)
+            self.assertIn("NPix: 15", detail_text)
+        finally:
+            dock.deleteLater()
+
+
+if __name__ == "__main__":
+    unittest.main()

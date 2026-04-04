@@ -19,6 +19,8 @@ class RenderRequest:
 
     stretch_name: str
     interval_name: str
+    manual_vmin: float | None = None
+    manual_vmax: float | None = None
 
 
 @dataclass(slots=True)
