@@ -6,6 +6,7 @@ import unittest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QImage
 from PySide6.QtWidgets import QApplication
 
 import sys
@@ -108,6 +109,19 @@ class TestSourceTableDock(unittest.TestCase):
             self.assertIn("RA: 123.456", detail_text)
             self.assertIn("SNR: 8.7", detail_text)
             self.assertIn("NPix: 15", detail_text)
+        finally:
+            dock.deleteLater()
+
+    def test_set_cutout_image_updates_preview_pixmap(self) -> None:
+        dock = SourceTableDock()
+        try:
+            image = QImage(12, 10, QImage.Format.Format_Grayscale8)
+            image.fill(128)
+
+            dock.set_cutout_image(image)
+
+            self.assertIsNotNone(dock.cutout_view.pixmap())
+            self.assertEqual(dock.cutout_view.text(), "")
         finally:
             dock.deleteLater()
 

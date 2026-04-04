@@ -880,6 +880,26 @@ class TestMainWindowLoading(unittest.TestCase):
         finally:
             window.deleteLater()
 
+    def test_update_source_cutout_renders_selected_source_preview(self) -> None:
+        window = MainWindow()
+        window.source_table_dock = Mock()
+        window.source_table_dock.current_selection_state.return_value = SimpleNamespace(selected_row=0)
+        window.current_catalog = SourceCatalog(
+            records=[SourceRecord(source_id=1, x=25.0, y=25.0)]
+        )
+        window.fits_service.current_data = FITSData(path="frame.fits", data=np.zeros((50, 60), dtype=np.float32))
+        try:
+            with patch("astroview.core.fits_service.render_image_u8", return_value="cutout-u8") as render_mock:
+                with patch.object(window, "_qimage_from_u8", return_value="cutout-qimage") as qimage_mock:
+                    window._update_source_cutout()
+
+            render_data = render_mock.call_args.args[0]
+            self.assertEqual(render_data.data.shape, (33, 33))
+            qimage_mock.assert_called_once_with("cutout-u8")
+            window.source_table_dock.set_cutout_image.assert_called_once_with("cutout-qimage")
+        finally:
+            window.deleteLater()
+
     def test_visible_source_table_columns_always_include_id_x_y(self) -> None:
         window = MainWindow()
         window.source_table_dock = Mock(

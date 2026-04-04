@@ -1181,6 +1181,8 @@ class MainWindow(QMainWindow):
             self.source_table_dock.set_view_state(self.build_table_view_state())
             if self.current_catalog is not None and len(self.current_catalog) > 0:
                 self.source_table_dock.show()
+            else:
+                self.source_table_dock.clear_cutout_image()
         if self.canvas is not None:
             self.canvas.draw_sources(self.current_catalog)
             self.canvas.set_overlay_state(self.build_canvas_overlay_state())
@@ -1774,6 +1776,7 @@ class MainWindow(QMainWindow):
             self.canvas.set_overlay_state(self.build_canvas_overlay_state(highlighted_index=index))
         if self.source_table_dock is not None and self.source_table_dock.current_selection_state().selected_row != index:
             self.source_table_dock.select_source(index)
+        self._update_source_cutout(index)
 
     def handle_sep_params_changed(self, params: Any) -> None:
         """Receive updated SEP parameters from the parameter panel.
@@ -1900,6 +1903,47 @@ class MainWindow(QMainWindow):
         self.fits_service.current_data = data
         result = self.fits_service.render()
         return self._qimage_from_u8(result.image_u8)
+
+    def _update_source_cutout(self, index: int | None = None) -> None:
+        """Refresh the selected-source cutout preview in the source-table dock."""
+
+        if self.source_table_dock is None:
+            return
+        if index is None:
+            index = self.source_table_dock.current_selection_state().selected_row
+        if index is None or self.current_catalog is None:
+            self.source_table_dock.clear_cutout_image()
+            return
+
+        record = self.current_catalog.get(index)
+        data = self.fits_service.current_data
+        if record is None or data is None or data.data is None:
+            self.source_table_dock.clear_cutout_image()
+            return
+
+        center_x = int(round(record.x))
+        center_y = int(round(record.y))
+        radius = 16
+        height, width = data.data.shape[:2]
+        x0 = max(0, center_x - radius)
+        y0 = max(0, center_y - radius)
+        x1 = min(width, center_x + radius + 1)
+        y1 = min(height, center_y + radius + 1)
+        if x1 <= x0 or y1 <= y0:
+            self.source_table_dock.clear_cutout_image()
+            return
+
+        from ..core.fits_data import FITSData
+        from ..core.fits_service import render_image_u8
+
+        cutout = data.data[y0:y1, x0:x1]
+        image_u8 = render_image_u8(
+            FITSData(data=cutout),
+            self.fits_service.current_stretch,
+            self.fits_service.current_interval,
+            manual_limits=self.fits_service.manual_interval_limits,
+        )
+        self.source_table_dock.set_cutout_image(self._qimage_from_u8(image_u8))
 
     def _rerender_all_frames(self) -> None:
         """Mark all frames dirty and re-render only the current frame."""

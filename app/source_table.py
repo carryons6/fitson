@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any, Sequence
 
 from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QDockWidget,
@@ -47,6 +48,8 @@ class SourceTableDock(QDockWidget):
         self.table_widget = QTableWidget(self.content_widget)
         self.detail_label = QLabel("Target Details", self.content_widget)
         self.detail_view = QPlainTextEdit(self.content_widget)
+        self.cutout_label = QLabel("Cutout Preview", self.content_widget)
+        self.cutout_view = QLabel(self.content_widget)
 
         self.setObjectName("source_table_dock")
         self.setWindowTitle("Source Table")
@@ -59,12 +62,18 @@ class SourceTableDock(QDockWidget):
         self.detail_view.setReadOnly(True)
         self.detail_view.setPlaceholderText("Select a source to inspect its detailed fields.")
         self.detail_view.setMaximumBlockCount(256)
+        self.cutout_view.setMinimumSize(160, 160)
+        self.cutout_view.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.cutout_view.setStyleSheet("background: #101419; border: 1px solid #2e3b4a;")
+        self.cutout_view.setText("Select a source\nto preview its cutout.")
         self.layout.addWidget(self.feedback_label)
         self.layout.addWidget(self.filter_input)
         self.layout.addWidget(self.summary_label)
         self.layout.addWidget(self.table_widget)
         self.layout.addWidget(self.detail_label)
         self.layout.addWidget(self.detail_view)
+        self.layout.addWidget(self.cutout_label)
+        self.layout.addWidget(self.cutout_view)
         self.setWidget(self.content_widget)
         self.configure_columns(self.default_columns())
         self.table_widget.itemSelectionChanged.connect(self._emit_selection_changed)
@@ -160,6 +169,7 @@ class SourceTableDock(QDockWidget):
         self.table_widget.setRowCount(0)
         self.table_widget.clearSelection()
         self.detail_view.clear()
+        self.clear_cutout_image()
         self._apply_view_state()
 
     def select_source(self, index: int) -> None:
@@ -231,6 +241,8 @@ class SourceTableDock(QDockWidget):
             self.summary_label.clear()
         self.detail_label.setVisible(self.view_state.has_catalog)
         self.detail_view.setVisible(self.view_state.has_catalog)
+        self.cutout_label.setVisible(self.view_state.has_catalog)
+        self.cutout_view.setVisible(self.view_state.has_catalog)
 
     def _emit_selection_changed(self) -> None:
         """Bridge table selection into the public source-clicked signal."""
@@ -327,3 +339,25 @@ class SourceTableDock(QDockWidget):
             f"Flag: {record.flag}",
         ]
         self.detail_view.setPlainText("\n".join(lines))
+
+    def set_cutout_image(self, image: QImage | None) -> None:
+        """Show a source-centered cutout preview below the detail fields."""
+
+        if image is None or image.isNull():
+            self.clear_cutout_image()
+            return
+
+        pixmap = QPixmap.fromImage(image)
+        scaled = pixmap.scaled(
+            self.cutout_view.size(),
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.FastTransformation,
+        )
+        self.cutout_view.setPixmap(scaled)
+        self.cutout_view.setText("")
+
+    def clear_cutout_image(self) -> None:
+        """Reset the cutout preview to its empty placeholder state."""
+
+        self.cutout_view.clear()
+        self.cutout_view.setText("Select a source\nto preview its cutout.")
