@@ -972,6 +972,23 @@ class TestMainWindowLoading(unittest.TestCase):
         finally:
             window.deleteLater()
 
+    def test_canvas_source_double_click_selects_matching_source_table_row(self) -> None:
+        window = MainWindow()
+        try:
+            window.initialize(apply_startup_request=False)
+            window.current_catalog = SourceCatalog(records=[
+                SourceRecord(source_id=1, x=10.0, y=12.0),
+                SourceRecord(source_id=2, x=30.0, y=32.0),
+            ])
+            window.sync_catalog_views()
+
+            window.canvas.source_double_clicked.emit(1)
+
+            self.assertEqual(window.source_table_dock.current_selection_state().selected_row, 1)
+            self.assertEqual(window.canvas.overlay_state.highlighted_index, 1)
+        finally:
+            window.deleteLater()
+
     def test_visible_source_table_columns_always_include_id_x_y(self) -> None:
         window = MainWindow()
         window.source_table_dock = Mock(

@@ -11,6 +11,7 @@ REPO_PARENT = Path(__file__).resolve().parents[2]
 if str(REPO_PARENT) not in sys.path:
     sys.path.insert(0, str(REPO_PARENT))
 
+from astroview import __version__
 from astroview.app.update_check_worker import (
     APP_RELEASES_API_URL,
     APP_TAGS_API_URL,
@@ -56,8 +57,8 @@ class TestUpdateCheckWorker(unittest.TestCase):
 
     def test_build_release_url_points_to_github_release_tag(self) -> None:
         self.assertEqual(
-            build_release_url("v1.2.4"),
-            f"{APP_RELEASES_URL}/tag/v1.2.4",
+            build_release_url(f"v{__version__}"),
+            f"{APP_RELEASES_URL}/tag/v{__version__}",
         )
 
     def test_fetch_json_uses_proxyless_opener(self) -> None:
@@ -65,7 +66,7 @@ class TestUpdateCheckWorker(unittest.TestCase):
         response.status = 200
         response.reason = "OK"
         response.headers = {}
-        response.read.return_value = b'{"tag_name":"v1.2.4"}'
+        response.read.return_value = f'{{"tag_name":"v{__version__}"}}'.encode("utf-8")
         response.__enter__ = Mock(return_value=response)
         response.__exit__ = Mock(return_value=False)
 
@@ -77,11 +78,11 @@ class TestUpdateCheckWorker(unittest.TestCase):
 
         opener_factory.assert_called_once()
         opener.open.assert_called_once()
-        self.assertEqual(payload["tag_name"], "v1.2.4")
+        self.assertEqual(payload["tag_name"], f"v{__version__}")
 
     def test_worker_reports_update_available(self) -> None:
         results = []
-        worker = UpdateCheckWorker("1.2.4")
+        worker = UpdateCheckWorker(__version__)
         worker.result_ready.connect(results.append)
 
         with patch("astroview.app.update_check_worker.fetch_latest_version_info", return_value=("1.3.0", "https://example.com/release")):

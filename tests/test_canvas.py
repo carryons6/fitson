@@ -5,7 +5,9 @@ import unittest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PySide6.QtCore import QPoint, Qt
 from PySide6.QtGui import QImage
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
 import sys
@@ -17,6 +19,7 @@ if str(REPO_PARENT) not in sys.path:
 
 from astroview.app.canvas import ImageCanvas
 from astroview.core.contracts import ZoomState
+from astroview.core.source_catalog import SourceCatalog, SourceRecord
 
 
 class TestImageCanvas(unittest.TestCase):
@@ -87,6 +90,33 @@ class TestImageCanvas(unittest.TestCase):
             self.assertAlmostEqual(canvas.zoom_state.scale_factor, 1.6, places=2)
             self.assertAlmostEqual(center.x(), expected_x, delta=1.0)
             self.assertAlmostEqual(center.y(), expected_y, delta=1.0)
+        finally:
+            canvas.close()
+            canvas.deleteLater()
+
+    def test_double_clicking_source_overlay_emits_source_index(self) -> None:
+        canvas = ImageCanvas()
+        captured_indices: list[int] = []
+        try:
+            canvas.resize(300, 300)
+            canvas.show()
+            canvas.set_image(self._image(100, 100))
+            canvas.draw_sources(SourceCatalog(records=[
+                SourceRecord(source_id=1, x=40.0, y=55.0, a=4.0, b=3.0),
+            ]))
+            canvas.source_double_clicked.connect(captured_indices.append)
+            self._app.processEvents()
+
+            view_pos = canvas.mapFromScene(40.0, 55.0)
+            QTest.mouseDClick(
+                canvas.viewport(),
+                Qt.MouseButton.LeftButton,
+                Qt.KeyboardModifier.NoModifier,
+                QPoint(view_pos.x(), view_pos.y()),
+            )
+            self._app.processEvents()
+
+            self.assertEqual(captured_indices, [0])
         finally:
             canvas.close()
             canvas.deleteLater()

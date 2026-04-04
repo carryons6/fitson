@@ -7,7 +7,7 @@
 ;      or open in Inno Setup GUI and click Build -> Compile
 
 #define MyAppName "AstroView"
-#define MyAppVersion "1.2.4"
+#define MyAppVersion "1.2.5"
 #define MyAppPublisher "Fitson"
 #define MyAppExeName "AstroView.exe"
 

@@ -447,6 +447,7 @@ class MainWindow(QMainWindow):
             return
         self.canvas.mouse_moved.connect(self.update_status_from_cursor)
         self.canvas.roi_selected.connect(self.handle_roi_selected)
+        self.canvas.source_double_clicked.connect(self.handle_source_clicked)
         self.canvas.zoom_changed.connect(self.handle_zoom_changed)
 
     def bind_source_table_signals(self) -> None:

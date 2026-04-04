@@ -22,7 +22,9 @@ class ImageCanvas(QGraphicsView):
 
     mouse_moved = Signal(float, float)
     roi_selected = Signal(int, int, int, int)
+    source_double_clicked = Signal(int)
     zoom_changed = Signal(float)
+    _SOURCE_INDEX_DATA_KEY = 1
 
     def __init__(self, parent: Any | None = None) -> None:
         super().__init__(parent)
@@ -215,13 +217,14 @@ class ImageCanvas(QGraphicsView):
         self.current_catalog = catalog
         if catalog is None:
             return
-        for record in catalog:
+        for index, record in enumerate(catalog):
             a = max(record.a, 1.0) * 3
             b = max(record.b, 1.0) * 3
             item = QGraphicsEllipseItem(-a, -b, a * 2, b * 2)
             item.setPen(self._source_pen)
             item.setPos(record.x, record.y)
             item.setRotation(math.degrees(record.theta))
+            item.setData(self._SOURCE_INDEX_DATA_KEY, index)
             self._scene.addItem(item)
             self._source_items.append(item)
 
@@ -350,6 +353,15 @@ class ImageCanvas(QGraphicsView):
         margin = max(img_rect.width(), img_rect.height())
         self.setSceneRect(img_rect.adjusted(-margin, -margin, margin, margin))
 
+    def _source_index_at_view_pos(self, view_pos: QPoint) -> int | None:
+        """Return the source index under the given viewport position."""
+
+        for item in self.items(view_pos):
+            source_index = item.data(self._SOURCE_INDEX_DATA_KEY)
+            if source_index is not None:
+                return int(source_index)
+        return None
+
     def mousePressEvent(self, event: QMouseEvent) -> None:
         """Start rubber-band ROI selection on right-click."""
 
@@ -359,6 +371,17 @@ class ImageCanvas(QGraphicsView):
             self._rubber_band.show()
         else:
             super().mousePressEvent(event)
+
+    def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:
+        """Emit the clicked source index when a source overlay is double-clicked."""
+
+        if event.button() == Qt.MouseButton.LeftButton:
+            source_index = self._source_index_at_view_pos(event.position().toPoint())
+            if source_index is not None:
+                self.source_double_clicked.emit(source_index)
+                event.accept()
+                return
+        super().mouseDoubleClickEvent(event)
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
         """Update rubber band during drag; emit cursor coordinates always."""

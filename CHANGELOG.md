@@ -13,6 +13,7 @@
 - Added a repository-root compatibility launcher so `python -m astroview` works from both the package parent directory and the repository root.
 - Added shared render helpers in `core/fits_service.py` for full-resolution and low-resolution preview rendering.
 - Added a source-detail panel with per-target field inspection and cutout preview in the `Source Table` dock.
+- Added canvas-to-table source selection sync so double-clicking a source overlay selects the matching row in `Source Table`.
 
 ### Changed
 - Expanded the test baseline from a handful of partial tests to a broader executable suite covering FITS loading, rendering, SEP, source catalogs, file loading, and frame rendering.
