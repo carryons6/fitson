@@ -205,23 +205,6 @@ class SourceCatalog:
             writer.writeheader()
             writer.writerows(rows)
 
-    def to_ds9_regions(self, path: str, *, color: str = "green", radius_scale: float = 3.0) -> None:
-        """Export the catalog as a DS9 image-coordinate region file."""
-
-        with open(path, "w", encoding="utf-8") as handle:
-            handle.write("# Region file format: DS9 version 4.1\n")
-            handle.write(f'global color={color} dashlist=8 3 width=1 font="helvetica 10 normal"\n')
-            handle.write("image\n")
-            for record in self.records:
-                major = max(1.0, float(record.a) * radius_scale)
-                minor = max(1.0, float(record.b) * radius_scale)
-                angle_deg = float(record.theta) * 180.0 / 3.141592653589793
-                handle.write(
-                    f"ellipse({record.x:.3f},{record.y:.3f},{major:.3f},{minor:.3f},{angle_deg:.3f}) "
-                    f"# text={{ID {record.source_id}}}\n"
-                )
-
-
 def _object_value(objects: Any, key: str, index: int, *, default: Any = None) -> Any:
     """Return one field value from SEP objects or a fallback default."""
 

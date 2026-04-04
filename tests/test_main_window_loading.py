@@ -864,6 +864,16 @@ class TestMainWindowLoading(unittest.TestCase):
         finally:
             window.deleteLater()
 
+    def test_create_file_actions_assigns_legacy_region_shortcut_to_csv_export(self) -> None:
+        window = MainWindow()
+        try:
+            window.create_file_actions()
+
+            shortcuts = [shortcut.toString() for shortcut in window.action_export_catalog.shortcuts()]
+            self.assertEqual(shortcuts, ["Ctrl+E", "Ctrl+Shift+E"])
+        finally:
+            window.deleteLater()
+
     def test_handle_marker_color_changed_updates_canvas_roi_color(self) -> None:
         window = MainWindow()
         window.canvas = Mock()

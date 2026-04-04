@@ -162,21 +162,5 @@ class TestSourceCatalog(unittest.TestCase):
 
         self.assertEqual(rows, [{"ID": "1", "Flux": "3.0", "SNR": "5.0"}])
 
-    def test_to_ds9_regions_writes_image_coordinate_ellipses(self) -> None:
-        catalog = SourceCatalog(
-            records=[SourceRecord(source_id=3, x=10.0, y=20.0, a=1.5, b=2.0, theta=0.5)]
-        )
-
-        with TemporaryDirectory() as tmpdir:
-            path = Path(tmpdir) / "catalog.reg"
-            catalog.to_ds9_regions(str(path), color="cyan")
-            contents = path.read_text(encoding="utf-8")
-
-        self.assertIn("# Region file format: DS9 version 4.1", contents)
-        self.assertIn("global color=cyan", contents)
-        self.assertIn("image", contents)
-        self.assertIn("ellipse(10.000,20.000,4.500,6.000", contents)
-
-
 if __name__ == "__main__":
     unittest.main()

@@ -84,7 +84,6 @@ class MainWindow(QMainWindow):
 
         self.action_open_file: QAction | None = None
         self.action_export_catalog: QAction | None = None
-        self.action_export_regions: QAction | None = None
         self.action_show_header: QAction | None = None
         self.action_close_file: QAction | None = None
         self.action_quit: QAction | None = None
@@ -290,8 +289,6 @@ class MainWindow(QMainWindow):
             self.menu_file.addAction(self.action_open_file)
         if self.action_export_catalog is not None:
             self.menu_file.addAction(self.action_export_catalog)
-        if self.action_export_regions is not None:
-            self.menu_file.addAction(self.action_export_regions)
         if self.action_show_header is not None:
             self.menu_file.addAction(self.action_show_header)
         if self.action_close_file is not None:
@@ -373,9 +370,7 @@ class MainWindow(QMainWindow):
         self.action_open_file = QAction("Open", self)
         self.action_open_file.setShortcut(QKeySequence.StandardKey.Open)
         self.action_export_catalog = QAction("Export CSV", self)
-        self.action_export_catalog.setShortcut("Ctrl+E")
-        self.action_export_regions = QAction("Export Regions", self)
-        self.action_export_regions.setShortcut("Ctrl+Shift+E")
+        self.action_export_catalog.setShortcuts(["Ctrl+E", "Ctrl+Shift+E"])
         self.action_show_header = QAction("Show Header", self)
         self.action_show_header.setShortcut("Ctrl+H")
         self.action_append_frames = QAction("Append Frames...", self)
@@ -479,8 +474,6 @@ class MainWindow(QMainWindow):
             self.action_open_file.triggered.connect(self.open_file)
         if self.action_export_catalog is not None:
             self.action_export_catalog.triggered.connect(self.export_catalog)
-        if self.action_export_regions is not None:
-            self.action_export_regions.triggered.connect(self.export_regions)
         if self.action_show_header is not None:
             self.action_show_header.triggered.connect(self.show_header_dialog)
         if self.action_close_file is not None:
@@ -1152,8 +1145,6 @@ class MainWindow(QMainWindow):
             self.preview_profile_selector.blockSignals(False)
         if self.action_export_catalog is not None:
             self.action_export_catalog.setEnabled(self.current_catalog is not None and len(self.current_catalog) > 0)
-        if self.action_export_regions is not None:
-            self.action_export_regions.setEnabled(self.current_catalog is not None and len(self.current_catalog) > 0)
 
     def build_render_control_state(self) -> RenderControlState:
         """Construct the toolbar render-control state from the FITS service."""
@@ -1709,27 +1700,6 @@ class MainWindow(QMainWindow):
                 self.app_status_bar.showMessage(f"Exported {len(self.current_catalog)} sources to {path}", 3000)
         except Exception as e:
             self.show_error("Export failed", str(e))
-
-    def export_regions(self) -> None:
-        """Export the current source catalog to a DS9 region file."""
-
-        if self.current_catalog is None or len(self.current_catalog) == 0:
-            self.show_error("Export", "No source catalog to export.")
-            return
-        path, _ = QFileDialog.getSaveFileName(
-            self,
-            "Export Regions",
-            "catalog.reg",
-            "DS9 Region Files (*.reg);;All Files (*)",
-        )
-        if not path:
-            return
-        try:
-            self.current_catalog.to_ds9_regions(path)
-            if self.app_status_bar is not None:
-                self.app_status_bar.showMessage(f"Exported {len(self.current_catalog)} regions to {path}", 3000)
-        except Exception as e:
-            self.show_error("Region export failed", str(e))
 
     def show_header_dialog(self) -> None:
         """Open the FITS header viewer.
