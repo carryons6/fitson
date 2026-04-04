@@ -3,10 +3,12 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 from PySide6.QtCore import QByteArray, Qt, QThread, QSettings, QTimer
 from PySide6.QtGui import QAction, QImage, QKeySequence
 from PySide6.QtWidgets import QComboBox, QDockWidget, QFileDialog, QLabel, QMainWindow, QToolBar
 
+from .. import APP_NAME, __version__
 from ..core import FITSService, OpenFileRequest, PixelSample, ROISelection, SEPService, SourceCatalog
 from .contracts import (
     CanvasImageState,
@@ -210,7 +212,7 @@ class MainWindow(QMainWindow):
         """Set window title, default size, dock policy, and startup flags."""
 
         self.setObjectName("main_window")
-        self.setWindowTitle("AstroView")
+        self._set_window_title()
         self.resize(1440, 900)
         self.setDockOptions(
             QMainWindow.DockOption.AllowNestedDocks | QMainWindow.DockOption.AllowTabbedDocks
@@ -713,6 +715,19 @@ class MainWindow(QMainWindow):
             return [value]
         return [str(item) for item in value]
 
+    def _base_window_title(self) -> str:
+        """Return the versioned application title shown in the main window."""
+
+        return f"{APP_NAME} v{__version__}"
+
+    def _set_window_title(self, detail: str | None = None) -> None:
+        """Apply the versioned main-window title, optionally with file context."""
+
+        title = self._base_window_title()
+        if detail:
+            title = f"{title} - {detail}"
+        self.setWindowTitle(title)
+
 
     def _start_frame_load(
         self,
@@ -1049,7 +1064,7 @@ class MainWindow(QMainWindow):
         self._frame_images.clear()
         self._frame_dirty.clear()
         self._current_frame_index = 0
-        self.setWindowTitle("AstroView")
+        self._set_window_title()
 
         if self.canvas is not None:
             self.canvas.clear_image()
@@ -1863,8 +1878,10 @@ class MainWindow(QMainWindow):
 
         if image_u8 is None:
             return None
+        image_u8 = np.ascontiguousarray(image_u8)
         h, w = image_u8.shape[:2]
-        qimage = QImage(image_u8.data, w, h, w, QImage.Format.Format_Grayscale8)
+        bytes_per_line = int(image_u8.strides[0])
+        qimage = QImage(image_u8.data, w, h, bytes_per_line, QImage.Format.Format_Grayscale8)
         return qimage.copy()
 
     def _render_frame(self, data: Any) -> QImage | None:
@@ -1950,9 +1967,9 @@ class MainWindow(QMainWindow):
 
         label = data.path or f"Frame {index}"
         if len(self._frames) > 1:
-            self.setWindowTitle(f"AstroView — {label} [{index + 1}/{len(self._frames)}]")
+            self._set_window_title(f"{label} [{index + 1}/{len(self._frames)}]")
         else:
-            self.setWindowTitle(f"AstroView — {label}")
+            self._set_window_title(label)
 
         self._show_current_frame_image()
         self.sync_render_controls()

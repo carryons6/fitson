@@ -20,6 +20,7 @@ REPO_PARENT = Path(__file__).resolve().parents[2]
 if str(REPO_PARENT) not in sys.path:
     sys.path.insert(0, str(REPO_PARENT))
 
+from astroview import __version__
 from astroview.app.contracts import TableColumnSpec
 from astroview.app.main_window import MainWindow
 from astroview.core.sep_service import SEPParameters
@@ -545,6 +546,19 @@ class TestMainWindowLoading(unittest.TestCase):
         finally:
             window.deleteLater()
 
+    def test_qimage_from_u8_accepts_non_contiguous_arrays(self) -> None:
+        window = MainWindow()
+        try:
+            image_u8 = np.arange(100, dtype=np.uint8).reshape(10, 10)[:, ::2]
+
+            qimage = window._qimage_from_u8(image_u8)
+
+            self.assertIsNotNone(qimage)
+            self.assertEqual(qimage.width(), 5)
+            self.assertEqual(qimage.height(), 10)
+        finally:
+            window.deleteLater()
+
     def test_handle_frame_rendered_prewarms_adjacent_frame_for_current_frame(self) -> None:
         window = MainWindow()
         window._frames = [FITSData(path="frame-0.fits"), FITSData(path="frame-1.fits")]
@@ -709,8 +723,25 @@ class TestMainWindowLoading(unittest.TestCase):
             self.assertEqual(window._frame_images, [])
             self.assertEqual(window._frame_dirty, [])
             self.assertEqual(window._current_frame_index, 0)
+            self.assertEqual(window.windowTitle(), f"AstroView v{__version__}")
             sync_sep_mock.assert_called_once_with()
             sync_render_mock.assert_called_once_with()
+        finally:
+            window.deleteLater()
+
+    def test_activate_frame_includes_version_in_window_title(self) -> None:
+        window = MainWindow()
+        window._frames = [FITSData(path="frame-0.fits")]
+        window._frame_images = [None]
+        window._frame_dirty = [False]
+        window.canvas = Mock()
+        window.app_status_bar = Mock()
+        try:
+            with patch.object(window, "_show_current_frame_image"):
+                with patch.object(window, "sync_render_controls"):
+                    window._activate_frame(0)
+
+            self.assertEqual(window.windowTitle(), f"AstroView v{__version__} - frame-0.fits")
         finally:
             window.deleteLater()
 

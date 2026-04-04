@@ -22,6 +22,7 @@
 - Changed the rendering pipeline to support manual interval limits alongside the existing stretch/interval presets.
 - Changed extracted source tables to always expose `ID`, `X`, and `Y`, with persistent sorting/filtering state and richer source metrics such as `NPix` and `BkgRMS`.
 - Changed source export workflow to standardize on CSV, with the former `Ctrl+Shift+E` region-export shortcut now routed to the same CSV export action.
+- Changed the main window title to show the current application version and fixed packaged FITS loading for non-contiguous preview buffers that previously left the window blank after `Open`.
 - Updated the README to document the current startup behavior, test workflow, architecture additions, and recent GPT-5.4 contributions.
 
 ### Validated
