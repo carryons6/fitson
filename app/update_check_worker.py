@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 from typing import Any
 import json
 import re
@@ -10,6 +11,10 @@ from urllib.request import ProxyHandler, Request, build_opener
 from PySide6.QtCore import QObject, Signal, Slot
 
 from .. import APP_RELEASES_API_URL, APP_RELEASES_URL, APP_TAGS_API_URL
+from ..diagnostics import log_current_exception
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -139,6 +144,8 @@ class UpdateCheckWorker(QObject):
                     detail=f"You are running the latest version ({self.current_version}).",
                 )
         except Exception as exc:
+            logger.warning("Update check failed: %s", exc)
+            log_current_exception(__name__, "Update check failed")
             result = UpdateCheckResult(
                 status="error",
                 current_version=self.current_version,

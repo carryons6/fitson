@@ -7,7 +7,9 @@
 ;      or open in Inno Setup GUI and click Build -> Compile
 
 #define MyAppName "AstroView"
-#define MyAppVersion "1.2.5"
+#define VersionFileHandle FileOpen("VERSION")
+#define MyAppVersion Trim(FileRead(VersionFileHandle))
+#expr FileClose(VersionFileHandle)
 #define MyAppPublisher "Fitson"
 #define MyAppExeName "AstroView.exe"
 
@@ -24,6 +26,7 @@ OutputDir=installer_output
 OutputBaseFilename=AstroView_Setup_{#MyAppVersion}
 SetupIconFile=resources\icons\main_icon.ico
 UninstallDisplayIcon={app}\{#MyAppExeName}
+LicenseFile=LICENSE
 Compression=lzma2/ultra64
 SolidCompression=yes
 WizardStyle=modern

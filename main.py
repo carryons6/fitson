@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 from pathlib import Path
 
@@ -8,8 +9,10 @@ from PySide6.QtGui import QIcon
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication
 
+from . import APP_NAME, __version__
 from .app import MainWindow
 from .core import OpenFileRequest
+from .diagnostics import install_exception_hooks, log_shutdown, log_startup
 
 
 def _resource_path() -> Path:
@@ -56,6 +59,9 @@ def main() -> int:
     parser = build_arg_parser()
     args = parser.parse_args()
 
+    log_path = install_exception_hooks(APP_NAME)
+    log_startup(__name__, __version__, sys.argv)
+
     app = QApplication(sys.argv)
 
     icon_path = _resource_path() / "icons" / "main_icon.png"
@@ -63,10 +69,13 @@ def main() -> int:
         app.setWindowIcon(QIcon(str(icon_path)))
 
     window = build_main_window(args)
+    logging.getLogger(__name__).info("Runtime log file: %s", log_path)
     window.initialize(apply_startup_request=False)
     window.show()
     QTimer.singleShot(0, window.schedule_startup_request)
-    return app.exec()
+    exit_code = app.exec()
+    log_shutdown(__name__, exit_code)
+    return exit_code
 
 
 if __name__ == "__main__":

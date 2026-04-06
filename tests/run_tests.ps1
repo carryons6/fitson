@@ -55,16 +55,15 @@ function Resolve-AstroPython {
 
     if ($env:CONDA_PREFIX) {
         $activePython = Join-Path $env:CONDA_PREFIX "python.exe"
-        if ((Split-Path $env:CONDA_PREFIX -Leaf) -ieq "astro") {
+        if (Test-Path -LiteralPath $activePython) {
             $candidates += $activePython
         }
     }
 
-    $candidates += @(
-        "D:\Miniforge\envs\astro\python.exe",
-        "C:\Miniforge3\envs\astro\python.exe",
-        "C:\Users\Public\miniforge3\envs\astro\python.exe"
-    )
+    $pathPython = Get-Command python -ErrorAction SilentlyContinue
+    if ($pathPython -and $pathPython.Source) {
+        $candidates += $pathPython.Source
+    }
 
     foreach ($candidate in $candidates | Select-Object -Unique) {
         if ($candidate -and (Test-Path -LiteralPath $candidate)) {
@@ -106,8 +105,8 @@ Write-Host ("Fail Fast       : {0}" -f $FailFast.IsPresent)
 
 if (-not $astroPython) {
     Write-Section "Environment Error"
-    Write-Host "Could not locate python.exe for the conda astro environment." -ForegroundColor Red
-    Write-Host "Checked .python-env.local, the active CONDA_PREFIX (if it is astro), and common Miniforge locations." -ForegroundColor Yellow
+    Write-Host "Could not locate a usable python.exe." -ForegroundColor Red
+    Write-Host "Checked .python-env.local, the active CONDA_PREFIX, and python on PATH." -ForegroundColor Yellow
     Wait-ForExit
     exit 1
 }

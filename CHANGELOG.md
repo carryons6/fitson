@@ -2,7 +2,12 @@
 
 ## Unreleased
 
+## 1.2.6 - 2026-04-06
+
 ### Added
+- Added `VERSION`, `setup.py`, `pyproject.toml`, `MANIFEST.in`, and `environment.yml` so the project has explicit metadata, a reproducible environment definition, and a single version source.
+- Added `scripts/build_windows.ps1` and GitHub Actions workflows for automated tests and Windows release builds.
+- Added runtime file logging and unhandled-exception hooks so unexpected GUI failures leave a diagnostic trail for support.
 - Added `tests/run_tests.ps1` and `tests/run_tests.bat` for one-click test execution in the conda `astro` environment.
 - Added `app/file_load_worker.py` for background multi-file FITS loading.
 - Added `app/frame_render_worker.py` for background frame rendering with progressive preview/full-resolution updates.
@@ -16,6 +21,8 @@
 - Added canvas-to-table source selection sync so double-clicking a source overlay selects the matching row in `Source Table`.
 
 ### Changed
+- Changed package metadata and installer versioning to read from the repository `VERSION` file instead of repeating literal version strings.
+- Changed test and build workflows to prefer the active Python environment rather than hard-coded local Miniforge paths.
 - Expanded the test baseline from a handful of partial tests to a broader executable suite covering FITS loading, rendering, SEP, source catalogs, file loading, and frame rendering.
 - Moved multi-file FITS loading off the UI thread to keep the main window responsive while importing large datasets.
 - Changed first-image presentation to use a fast preview-first strategy before full-resolution rendering completes.

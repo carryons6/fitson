@@ -30,7 +30,10 @@ class TestMainEntry(unittest.TestCase):
                 with patch.object(main_module, "build_main_window", return_value=window):
                     with patch("astroview.main.QTimer.singleShot") as single_shot_mock:
                         with patch.object(main_module, "_resource_path", return_value=Path(".")):
-                            result = main_module.main()
+                            with patch.object(main_module, "install_exception_hooks", return_value=Path("astroview.log")):
+                                with patch.object(main_module, "log_startup"):
+                                    with patch.object(main_module, "log_shutdown"):
+                                        result = main_module.main()
 
         self.assertEqual(result, 0)
         window.initialize.assert_called_once_with(apply_startup_request=False)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -10,6 +11,7 @@ from PySide6.QtWidgets import QComboBox, QDockWidget, QFileDialog, QLabel, QMain
 
 from .. import APP_NAME, APP_RELEASES_URL, __version__
 from ..core import FITSService, OpenFileRequest, PixelSample, ROISelection, SEPService, SourceCatalog
+from ..diagnostics import log_current_exception
 from .contracts import (
     CanvasImageState,
     CanvasOverlayState,
@@ -35,6 +37,9 @@ from .sep_panel import SEPParamsPanel
 from .source_table import SourceTableDock
 from .status_bar import AppStatusBar
 from .update_check_worker import UpdateCheckResult, UpdateCheckWorker
+
+
+logger = logging.getLogger(__name__)
 
 
 class MainWindow(QMainWindow):
@@ -1900,6 +1905,7 @@ class MainWindow(QMainWindow):
     def show_error(self, title: str, detail: str) -> None:
         """Show an error message to the user."""
 
+        logger.error("%s: %s", title, detail)
         if self.app_status_bar is not None:
             self.app_status_bar.showMessage(f"{title}: {detail}", 5000)
 

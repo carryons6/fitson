@@ -8,16 +8,15 @@ if is_pure_conda:
     datas = conda_support.collect_dynamic_libs("numpy", dependencies=True)
 
 hiddenimports = [
-    'numpy._core._dtype_ctypes',
-    'numpy._core._multiarray_tests',
-    'numpy._core._exceptions',
+    "numpy._core._dtype_ctypes",
+    "numpy.core._multiarray_tests",
 ]
 
 excludedimports = [
-    'scipy',
-    'pytest',
-    'f2py',
-    'setuptools',
-    'distutils',
-    'numpy.distutils',
+    "scipy",
+    "pytest",
+    "f2py",
+    "setuptools",
+    "distutils",
+    "numpy.distutils",
 ]

@@ -60,7 +60,8 @@ A desktop FITS astronomical image viewer built with PySide6.
 
 Recommended install via conda-forge:
 ```bash
-conda install pyside6 astropy numpy sep
+conda env create -f environment.yml
+conda activate astroview
 ```
 
 ## Usage
@@ -75,7 +76,7 @@ python -m astroview image.fits --hdu 1  # open a specific HDU
 
 ## Testing
 
-The project test baseline is expected to run in the conda `astro` environment.
+The project test baseline is expected to run in an activated environment created from `environment.yml`.
 
 One-click runners:
 ```powershell
@@ -85,7 +86,15 @@ One-click runners:
 
 Direct unittest run:
 ```powershell
-& 'D:\Miniforge\envs\astro\python.exe' -m unittest discover -s tests -v
+python -m unittest discover -s tests -v
+```
+
+## Build
+
+Windows bundle and installer:
+```powershell
+python -m pip install pyinstaller
+.\scripts\build_windows.ps1
 ```
 
 ## Architecture

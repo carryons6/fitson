@@ -1,24 +1,30 @@
-﻿from pathlib import Path
+from pathlib import Path
+import sys
+import sysconfig
 
 import PyInstaller.building.build_main as build_main
+import numpy
+import PySide6
+import shiboken6
 
 
 spec_dir = Path(SPECPATH).resolve()
 package_dir = spec_dir
 workspace_dir = package_dir.parent
-site_packages = Path(r"D:\Miniforge\envs\astro\Lib\site-packages")
-python3_dll = Path(r"D:\Miniforge\envs\astro\python3.dll")
-python_dlls_dir = Path(r"D:\Miniforge\envs\astro\DLLs")
-pyside_package_dir = site_packages / "PySide6"
-shiboken_package_dir = site_packages / "shiboken6"
-numpy_libs_dir = site_packages / "numpy.libs"
+env_dir = Path(sys.executable).resolve().parent
+site_packages = Path(sysconfig.get_paths()["purelib"]).resolve()
+python3_dll = env_dir / "python3.dll"
+python_dlls_dir = env_dir / "DLLs"
+pyside_package_dir = Path(PySide6.__file__).resolve().parent
+shiboken_package_dir = Path(shiboken6.__file__).resolve().parent
+numpy_libs_dir = Path(numpy.__file__).resolve().parent.parent / "numpy.libs"
 
-# The astro environment contains a broken pygame PyInstaller entry point that
-# crashes hook auto-discovery. We bypass the entry-point scan and provide the
-# needed hook directories explicitly.
+# The active environment may contain broken entry points that crash hook
+# auto-discovery. We bypass the entry-point scan and provide the needed hook
+# directories explicitly.
 build_main.discover_hook_directories = lambda: []
 
-# In the same environment, PyInstaller's isolated package import used during
+# In some environments, PyInstaller's isolated package import used during
 # find_binary_dependencies() crashes when importing astroview.core. We bypass
 # that late scan and add the needed runtime DLLs explicitly below.
 build_main.find_binary_dependencies = lambda *args, **kwargs: []
@@ -28,55 +34,63 @@ numpy_hook_dir = site_packages / "numpy" / "_pyinstaller"
 if numpy_hook_dir.is_dir():
     hookspath.append(str(numpy_hook_dir))
 
-qt_bin = Path(r"D:\Miniforge\envs\astro\Library\bin")
-icu_bin = qt_bin  # ICU DLLs are in the same directory
+qt_bin = env_dir / "Library" / "bin"
 
 binaries = []
 if python3_dll.is_file():
-    binaries.append((str(python3_dll), '.'))
+    binaries.append((str(python3_dll), "."))
 
-def _append_binary_if_exists(source_dir: Path, dll_name: str, dest: str = '.') -> None:
+
+def _append_binary_if_exists(source_dir: Path, dll_name: str, dest: str = ".") -> None:
     dll_path = source_dir / dll_name
     if dll_path.is_file():
         binaries.append((str(dll_path), dest))
 
 
-_append_binary_if_exists(python_dlls_dir, '_ssl.pyd')
+_append_binary_if_exists(python_dlls_dir, "_ssl.pyd")
 
 
 # PySide6 / Shiboken runtime DLLs. Prefer package-local DLLs because the exact
 # filenames vary across conda/PyPI builds (for example abi3 vs cp311 suffixes).
 for dll_name in [
-    'Qt6Core.dll', 'Qt6Gui.dll', 'Qt6Widgets.dll',
-    'pyside6.abi3.dll',
+    "Qt6Core.dll",
+    "Qt6Gui.dll",
+    "Qt6Widgets.dll",
+    "pyside6.abi3.dll",
 ]:
     _append_binary_if_exists(pyside_package_dir, dll_name)
     _append_binary_if_exists(qt_bin, dll_name)
 
 for dll_name in [
-    'shiboken6.abi3.dll',
-    'concrt140.dll',
-    'msvcp140.dll',
-    'msvcp140_1.dll',
-    'msvcp140_2.dll',
-    'msvcp140_codecvt_ids.dll',
-    'vccorlib140.dll',
-    'vcomp140.dll',
-    'vcruntime140.dll',
-    'vcruntime140_1.dll',
+    "shiboken6.abi3.dll",
+    "concrt140.dll",
+    "msvcp140.dll",
+    "msvcp140_1.dll",
+    "msvcp140_2.dll",
+    "msvcp140_codecvt_ids.dll",
+    "vccorlib140.dll",
+    "vcomp140.dll",
+    "vcruntime140.dll",
+    "vcruntime140_1.dll",
 ]:
     _append_binary_if_exists(shiboken_package_dir, dll_name)
     _append_binary_if_exists(qt_bin, dll_name)
 
 # ICU and Qt6 transitive dependencies usually live under Library/bin.
 for dll_name in [
-    'icudt78.dll',
-    'icuin78.dll',
-    'icuuc78.dll',
-    'freetype.dll', 'libpng16.dll', 'pcre2-16.dll',
-    'double-conversion.dll', 'zstd.dll',
-    'libssl-3-x64.dll', 'libcrypto-3-x64.dll',
-    'libgomp-1.dll', 'libquadmath-0.dll', 'libgcc_s_seh-1.dll',
+    "icudt78.dll",
+    "icuin78.dll",
+    "icuuc78.dll",
+    "freetype.dll",
+    "libpng16.dll",
+    "pcre2-16.dll",
+    "double-conversion.dll",
+    "zstd.dll",
+    "libssl-3-x64.dll",
+    "libcrypto-3-x64.dll",
+    "libgomp-1.dll",
+    "libquadmath-0.dll",
+    "libgcc_s_seh-1.dll",
 ]:
     _append_binary_if_exists(qt_bin, dll_name)
 
@@ -85,7 +99,7 @@ for dll_name in [
 # bypassed above.
 if numpy_libs_dir.is_dir():
     for dll_path in numpy_libs_dir.glob("*.dll"):
-        binaries.append((str(dll_path), '.'))
+        binaries.append((str(dll_path), "."))
 
 seen_binaries = set()
 unique_binaries = []
@@ -102,6 +116,9 @@ datas = []
 runtime_icon = spec_dir / "resources" / "icons" / "main_icon.png"
 if runtime_icon.is_file():
     datas.append((str(runtime_icon), "astroview/resources/icons"))
+version_file = spec_dir / "VERSION"
+if version_file.is_file():
+    datas.append((str(version_file), "astroview"))
 
 hiddenimports = [
     "sep",
@@ -154,7 +171,6 @@ a = Analysis(
         "xmlrpc",
         "doctest",
         "lib2to3",
-        "pydoc",
     ],
     noarchive=False,
     optimize=0,
@@ -168,53 +184,69 @@ import re
 # MKL is not needed — numpy uses OpenBLAS in this environment.
 # Strip ALL MKL DLLs unconditionally (saves ~130 MB).
 _strip_patterns = [
-    re.compile(r'^mkl_', re.I),
+    re.compile(r"^mkl_", re.I),
+    re.compile(r"^icudt\.dll$", re.I),
     # Duplicate unversioned ICU DLLs (keep only versioned icuXX78.dll variants)
-    re.compile(r'^icu(in|uc)\.dll$', re.I),
+    re.compile(r"^icu(in|uc)\.dll$", re.I),
     # ICU DLLs not needed by PySide6
-    re.compile(r'^icu(io|test|tu)', re.I),
+    re.compile(r"^icu(io|test|tu)", re.I),
     # Tcl/Tk because tkinter is excluded
-    re.compile(r'^(tcl|tk)\d', re.I),
+    re.compile(r"^(tcl|tk)\d", re.I),
     # Software OpenGL fallback — not needed for desktop app (saves ~20 MB)
-    re.compile(r'^opengl32sw\.dll$', re.I),
+    re.compile(r"^opengl32sw\.dll$", re.I),
     # SQLite — module excluded above (saves ~3 MB)
-    re.compile(r'^sqlite3\.dll$', re.I),
+    re.compile(r"^sqlite3\.dll$", re.I),
     # Qt6Network — app has no network I/O (saves ~1.4 MB)
-    re.compile(r'^Qt6Network\.dll$', re.I),
+    re.compile(r"^Qt6Network\.dll$", re.I),
 ]
 
 _strip_exact_binaries = {
-    'qcertonlybackend.dll',
-    'qdirect2d.dll',
-    'qgif.dll',
-    'qicns.dll',
-    'qico.dll',
-    'qjpeg.dll',
-    'qminimal.dll',
-    'qmodernwindowsstyle.dll',
-    'qnetworklistmanager.dll',
-    'qoffscreen.dll',
-    'qopensslbackend.dll',
-    'qschannelbackend.dll',
-    'qsvg.dll',
-    'qsvgicon.dll',
-    'qtga.dll',
-    'qtiff.dll',
-    'qtuiotouchplugin.dll',
-    'qwbmp.dll',
-    'qwebp.dll',
+    "qcertonlybackend.dll",
+    "qdirect2d.dll",
+    "qgif.dll",
+    "qicns.dll",
+    "qico.dll",
+    "qjpeg.dll",
+    "qminimal.dll",
+    "qmodernwindowsstyle.dll",
+    "qnetworklistmanager.dll",
+    "qoffscreen.dll",
+    "qopensslbackend.dll",
+    "qpdf.dll",
+    "qschannelbackend.dll",
+    "qsvg.dll",
+    "qsvgicon.dll",
+    "qtga.dll",
+    "qtiff.dll",
+    "qtvirtualkeyboardplugin.dll",
+    "qtuiotouchplugin.dll",
+    "qwbmp.dll",
+    "qwebp.dll",
     # PySide6 network binding — unused
-    'QtNetwork.pyd',
+    "QtNetwork.pyd",
 }
 
 _strip_path_fragments = (
-    'pyside6/translations/',
-    'astropy/io/votable/validator/data/',
-    'astropy/wcs/src/',
+    "pyside6/translations/",
+    "astropy/extern/jquery/",
+    "astropy/io/votable/",
+    "astropy/cosmology/data/",
+    "astropy/samp/",
+    "astropy/table/",
+    "astropy/timeseries/",
+    "astropy/wcs/include/",
+    "astropy/io/votable/validator/data/",
+    "astropy/wcs/src/",
+    "astropy/io/ascii/src/",
+    "astropy/convolution/src/",
+    "astropy/stats/src/",
+    "astropy/utils/xml/src/",
 )
 
 _strip_exact_data = {
-    'record',
+    "record",
+    "installer",
+    "requested",
 }
 
 
@@ -230,14 +262,16 @@ def _should_strip(name):
 
 def _should_strip_data(path):
     parts = [
-        part.replace('\\', '/').lower()
+        part.replace("\\", "/").lower()
         for part in path
         if isinstance(part, str)
-    ] if isinstance(path, tuple) else [str(path).replace('\\', '/').lower()]
+    ] if isinstance(path, tuple) else [str(path).replace("\\", "/").lower()]
 
     for normalized in parts:
         basename = Path(normalized).name
-        if basename in _strip_exact_data and '.dist-info/' in normalized:
+        if basename in _strip_exact_data and ".dist-info/" in normalized:
+            return True
+        if normalized.startswith("astropy/") and normalized.endswith((".pyx", ".c", ".h")):
             return True
         if any(fragment in normalized for fragment in _strip_path_fragments):
             return True
@@ -249,8 +283,8 @@ a.binaries = [b for b in a.binaries if not _should_strip(b[0])]
 # Remove astropy test directories from collected data
 a.datas = [
     d for d in a.datas
-    if '/tests/' not in d[0].replace('\\', '/')
-    and '/test/' not in d[0].replace('\\', '/')
+    if "/tests/" not in d[0].replace("\\", "/")
+    and "/test/" not in d[0].replace("\\", "/")
     and not _should_strip_data(d)
 ]
 
