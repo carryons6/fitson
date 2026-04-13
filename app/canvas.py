@@ -26,6 +26,7 @@ class ImageCanvas(QGraphicsView):
     roi_selected = Signal(int, int, int, int)
     source_double_clicked = Signal(int)
     zoom_changed = Signal(float)
+    files_dropped = Signal(list)
     _SOURCE_INDEX_DATA_KEY = 1
 
     def __init__(self, parent: Any | None = None) -> None:
@@ -55,6 +56,8 @@ class ImageCanvas(QGraphicsView):
         self.setObjectName("image_canvas")
         self.setFrameShape(QFrame.Shape.NoFrame)
         self.setMouseTracking(True)
+        self.setAcceptDrops(True)
+        self.viewport().setAcceptDrops(True)
         self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
         self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
         self.setScene(self._scene)
@@ -75,6 +78,11 @@ class ImageCanvas(QGraphicsView):
     def resizeEvent(self, event) -> None:  # noqa: ANN001
         super().resizeEvent(event)
         self.compass.move(self.width() - self.compass.width() - 12, 12)
+        self._layout_feedback_item()
+
+    def scrollContentsBy(self, dx: int, dy: int) -> None:
+        super().scrollContentsBy(dx, dy)
+        self._layout_feedback_item()
 
     def set_magnifier_visible(self, visible: bool) -> None:
         self.magnifier.setVisible(visible)
@@ -103,9 +111,11 @@ class ImageCanvas(QGraphicsView):
         self.current_image = image
         if image is None:
             self._pixmap_item.setPixmap(QPixmap())
+            self._layout_feedback_item()
             return
         self._pixmap_item.setPixmap(QPixmap.fromImage(image))
         self._update_scene_rect()
+        self._layout_feedback_item()
 
     def capture_view_state(self) -> dict[str, float | str] | None:
         """Snapshot the current view so image replacements can restore it."""
@@ -186,6 +196,7 @@ class ImageCanvas(QGraphicsView):
 
         self.current_image = None
         self._pixmap_item.setPixmap(QPixmap())
+        self._layout_feedback_item()
 
     def set_image_state(self, state: CanvasImageState) -> None:
         """Apply structured image presentation state to the canvas."""
@@ -202,9 +213,11 @@ class ImageCanvas(QGraphicsView):
         """Apply a generic feedback state to the canvas."""
 
         self.image_state.feedback = state
-        message = state.title or state.detail or ""
+        parts = [part for part in (state.title.strip(), state.detail.strip()) if part]
+        message = "\n\n".join(parts)
         self._feedback_item.setPlainText(message)
         self._feedback_item.setVisible(state.visible)
+        self._layout_feedback_item()
 
     def fit_to_window(self) -> None:
         """Scale the image to fit the current viewport.
@@ -292,6 +305,13 @@ class ImageCanvas(QGraphicsView):
 
         self.overlay_state.highlighted_index = index
         self._refresh_source_pens()
+
+    def center_on_source(self, index: int) -> None:
+        """Center the viewport on the selected source overlay when available."""
+
+        if not (0 <= index < len(self._source_items)):
+            return
+        self.centerOn(self._source_items[index].scenePos())
 
     def set_source_overlay_style(
         self,
@@ -384,10 +404,22 @@ class ImageCanvas(QGraphicsView):
 
         pixmap = self._pixmap_item.pixmap()
         if pixmap.isNull():
+            self._layout_feedback_item()
             return
         img_rect = self._pixmap_item.boundingRect()
         margin = max(img_rect.width(), img_rect.height())
         self.setSceneRect(img_rect.adjusted(-margin, -margin, margin, margin))
+        self._layout_feedback_item()
+
+    def _layout_feedback_item(self) -> None:
+        """Center feedback text within the current viewport."""
+
+        bounds = self._feedback_item.boundingRect()
+        scene_center = self.mapToScene(self.viewport().rect().center())
+        self._feedback_item.setPos(
+            scene_center.x() - bounds.width() / 2.0,
+            scene_center.y() - bounds.height() / 2.0,
+        )
 
     def _source_index_at_view_pos(self, view_pos: QPoint) -> int | None:
         """Return the source index under the given viewport position."""
@@ -473,4 +505,45 @@ class ImageCanvas(QGraphicsView):
         self.scale(factor, factor)
         new_scale = self.zoom_state.scale_factor * factor
         self.set_zoom_state(ZoomState(scale_factor=new_scale, mode="custom"))
+        self._layout_feedback_item()
         self.zoom_changed.emit(new_scale)
+
+    def dragEnterEvent(self, event: Any) -> None:
+        """Accept local file drags so the main window can open dropped FITS files."""
+
+        mime_data = event.mimeData()
+        if mime_data is not None and mime_data.hasUrls():
+            local_paths = [
+                url.toLocalFile()
+                for url in mime_data.urls()
+                if hasattr(url, "isLocalFile") and url.isLocalFile()
+            ]
+            if local_paths:
+                event.acceptProposedAction()
+                return
+        event.ignore()
+
+    def dragMoveEvent(self, event: Any) -> None:
+        """Continue accepting valid local-file drags over the canvas."""
+
+        self.dragEnterEvent(event)
+
+    def dropEvent(self, event: Any) -> None:
+        """Emit dropped local file paths back to the window controller."""
+
+        mime_data = event.mimeData()
+        if mime_data is None or not mime_data.hasUrls():
+            event.ignore()
+            return
+
+        local_paths = [
+            url.toLocalFile()
+            for url in mime_data.urls()
+            if hasattr(url, "isLocalFile") and url.isLocalFile()
+        ]
+        if not local_paths:
+            event.ignore()
+            return
+
+        self.files_dropped.emit(local_paths)
+        event.acceptProposedAction()

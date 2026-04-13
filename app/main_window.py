@@ -70,6 +70,7 @@ class MainWindow(QMainWindow):
         "Detailed": {"load_dimension": 3072, "render_dimensions": (1024, 2048, 3072)},
     }
     DEFAULT_PREVIEW_PROFILE = "Balanced"
+    SUPPORTED_FITS_SUFFIXES = frozenset({".fits", ".fit", ".fts"})
 
     def __init__(
         self,
@@ -97,6 +98,7 @@ class MainWindow(QMainWindow):
         self.menu_view: Any = None
         self.menu_tools: Any = None
         self.menu_help: Any = None
+        self.menu_recent_files: Any = None
 
         self.main_toolbar: Any = None
         self.stretch_selector: Any = None
@@ -108,6 +110,7 @@ class MainWindow(QMainWindow):
         self.action_export_catalog: QAction | None = None
         self.action_show_header: QAction | None = None
         self.action_close_file: QAction | None = None
+        self.action_reopen_last_session: QAction | None = None
         self.action_quit: QAction | None = None
         self.action_fit_to_window: QAction | None = None
         self.action_actual_pixels: QAction | None = None
@@ -164,6 +167,11 @@ class MainWindow(QMainWindow):
         self._update_check_thread: QThread | None = None
         self._update_check_worker: UpdateCheckWorker | None = None
         self._startup_request_applied = False
+        self._status_activity_kind: str | None = None
+        self._latest_error_title: str = ""
+        self._latest_error_detail: str = ""
+        self._catalog_results_stale: bool = False
+        self._pending_session_restore_frame_index: int | None = None
 
     def initialize(self, *, apply_startup_request: bool = True) -> None:
         """High-level bootstrap entry for the window skeleton.
@@ -242,6 +250,7 @@ class MainWindow(QMainWindow):
         self.bind_sep_panel_signals()
         self.bind_toolbar_signals()
         self.bind_action_triggers()
+        self.bind_status_bar_signals()
 
     def configure_window_shell(self) -> None:
         """Set window title, default size, dock policy, and startup flags."""
@@ -249,6 +258,7 @@ class MainWindow(QMainWindow):
         self.setObjectName("main_window")
         self._set_window_title()
         self.resize(1440, 900)
+        self.setAcceptDrops(True)
         self.setDockOptions(
             QMainWindow.DockOption.AllowNestedDocks | QMainWindow.DockOption.AllowTabbedDocks
         )
@@ -390,6 +400,9 @@ class MainWindow(QMainWindow):
 
         if self.action_open_file is not None:
             self.menu_file.addAction(self.action_open_file)
+        self.menu_recent_files = self.menu_file.addMenu("Recent Files")
+        if self.action_reopen_last_session is not None:
+            self.menu_file.addAction(self.action_reopen_last_session)
         if self.action_export_catalog is not None:
             self.menu_file.addAction(self.action_export_catalog)
         if self.action_show_header is not None:
@@ -401,6 +414,7 @@ class MainWindow(QMainWindow):
         self.menu_file.addSeparator()
         if self.action_quit is not None:
             self.menu_file.addAction(self.action_quit)
+        self._refresh_recent_files_menu()
         if self.action_fit_to_window is not None:
             self.menu_view.addAction(self.action_fit_to_window)
         if self.action_actual_pixels is not None:
@@ -527,6 +541,7 @@ class MainWindow(QMainWindow):
         self.action_append_frames.setShortcut("Ctrl+Shift+O")
         self.action_close_file = QAction("Close File", self)
         self.action_close_file.setShortcut("Ctrl+W")
+        self.action_reopen_last_session = QAction("Reopen Last Session", self)
         self.action_quit = QAction("Quit", self)
         self.action_quit.setShortcut(QKeySequence.StandardKey.Quit)
 
@@ -617,6 +632,7 @@ class MainWindow(QMainWindow):
         self.canvas.roi_selected.connect(self.handle_roi_selected)
         self.canvas.source_double_clicked.connect(self.handle_source_clicked)
         self.canvas.zoom_changed.connect(self.handle_zoom_changed)
+        self.canvas.files_dropped.connect(self._handle_dropped_paths)
 
     def bind_source_table_signals(self) -> None:
         """Bind source-table signals to window controller methods."""
@@ -634,6 +650,14 @@ class MainWindow(QMainWindow):
         if self.sep_panel is None:
             return
         self.sep_panel.params_changed.connect(self.handle_sep_params_changed)
+
+    def bind_status_bar_signals(self) -> None:
+        """Bind status-bar task affordances back into the controller."""
+
+        if self.app_status_bar is None:
+            return
+        self.app_status_bar.cancel_requested.connect(self._handle_status_bar_cancel_requested)
+        self.app_status_bar.error_details_requested.connect(self._show_latest_error_details)
 
     def bind_toolbar_signals(self) -> None:
         """Bind toolbar selectors and buttons to render-refresh methods."""
@@ -664,6 +688,8 @@ class MainWindow(QMainWindow):
             self.action_show_header.triggered.connect(self.show_header_dialog)
         if self.action_close_file is not None:
             self.action_close_file.triggered.connect(self.close_current_file)
+        if self.action_reopen_last_session is not None:
+            self.action_reopen_last_session.triggered.connect(self._reopen_last_session)
         if self.action_quit is not None:
             self.action_quit.triggered.connect(self.close)
         if self.action_fit_to_window is not None and self.canvas is not None:
@@ -739,9 +765,7 @@ class MainWindow(QMainWindow):
         else:
             paths = [path]
 
-        self._remember_open_directory(paths)
-        self._reset_render_controls_for_new_file()
-        self._start_frame_load(paths, hdu_index=hdu_index, append=False)
+        self._open_paths(paths, hdu_index=hdu_index, append=False)
 
     def open_file_from_request(self, request: OpenFileRequest) -> None:
         """Structured wrapper around the public open-file entry point."""
@@ -822,6 +846,7 @@ class MainWindow(QMainWindow):
         if state:
             self.restoreState(state)
 
+        self._refresh_recent_files_menu()
         self.sync_render_controls()
         self._sync_marker_visual_style()
         self._refresh_histogram_view()
@@ -885,6 +910,7 @@ class MainWindow(QMainWindow):
 
         self._settings.setValue("window/geometry", self.saveGeometry())
         self._settings.setValue("window/state", self.saveState())
+        self._persist_session_state()
 
     def _persist_catalog_preferences(self, *_args: Any) -> None:
         """Store catalog column visibility and free-text filter state."""
@@ -907,7 +933,89 @@ class MainWindow(QMainWindow):
             return []
         if isinstance(value, str):
             return [value]
-        return [str(item) for item in value]
+        if isinstance(value, (list, tuple)):
+            return [str(item) for item in value]
+        return []
+
+    def _recent_files(self) -> list[str]:
+        """Return the persisted recent-file list."""
+
+        value = self._settings.value("paths/recent_files", [])
+        return self._normalize_settings_string_list(value)
+
+    def _remember_recent_paths(self, paths: list[str]) -> None:
+        """Update the recent-files list using newly opened FITS paths."""
+
+        normalized_new = [str(Path(path)) for path in paths if path]
+        if not normalized_new:
+            return
+
+        existing = self._recent_files()
+        merged: list[str] = []
+        for path in [*normalized_new, *existing]:
+            if path not in merged:
+                merged.append(path)
+        self._settings.setValue("paths/recent_files", merged[:8])
+        self._refresh_recent_files_menu()
+
+    def _refresh_recent_files_menu(self) -> None:
+        """Rebuild the Recent Files submenu from persisted settings."""
+
+        if self.menu_recent_files is None:
+            return
+
+        self.menu_recent_files.clear()
+        recent_files = self._recent_files()
+        if not recent_files:
+            placeholder = self.menu_recent_files.addAction("No Recent Files")
+            placeholder.setEnabled(False)
+        else:
+            for path in recent_files:
+                action = self.menu_recent_files.addAction(Path(path).name)
+                action.setToolTip(path)
+                action.triggered.connect(lambda _checked=False, p=path: self._open_recent_file(p))
+
+        if self.action_reopen_last_session is not None:
+            self.action_reopen_last_session.setEnabled(bool(self._last_session_paths()))
+
+    def _open_recent_file(self, path: str) -> None:
+        """Open a path chosen from the Recent Files submenu."""
+
+        if not path:
+            return
+        self.open_file(path=path)
+
+    def _last_session_paths(self) -> list[str]:
+        """Return the last successfully loaded frame-path list."""
+
+        value = self._settings.value("session/last_paths", [])
+        return self._normalize_settings_string_list(value)
+
+    def _persist_session_state(self) -> None:
+        """Store the last successful frame list and active frame index for reopen."""
+
+        session_paths = [frame.path for frame in self._frames if getattr(frame, "path", None)]
+        if not session_paths:
+            return
+
+        self._settings.setValue("session/last_paths", session_paths)
+        self._settings.setValue("session/current_index", self._current_frame_index)
+        self._refresh_recent_files_menu()
+
+    def _reopen_last_session(self) -> None:
+        """Reopen the most recently persisted multi-frame session."""
+
+        session_paths = self._last_session_paths()
+        if not session_paths:
+            self.show_error("Reopen Session", "No previous session is available yet.")
+            return
+
+        self._pending_session_restore_frame_index = self._settings.value(
+            "session/current_index",
+            0,
+            type=int,
+        )
+        self._open_paths(session_paths, append=False)
 
     def _base_window_title(self) -> str:
         """Return the versioned application title shown in the main window."""
@@ -1609,7 +1717,7 @@ class MainWindow(QMainWindow):
         total: int = 0,
         current_path: str | None = None,
     ) -> None:
-        """Update action enablement and status-bar text for file loading."""
+        """Update action enablement and visible status-bar progress for file loading."""
 
         for action in (self.action_open_file, self.action_append_frames, self.action_close_file):
             if action is not None:
@@ -1619,20 +1727,95 @@ class MainWindow(QMainWindow):
             return
 
         if not is_loading:
+            self._clear_status_activity(kind="load")
             self.app_status_bar.clearMessage()
             return
 
         if total <= 0:
-            self.app_status_bar.showMessage("Loading FITS files...")
+            self._set_status_activity(
+                kind="load",
+                text="Loading FITS files...",
+                progress_value=0,
+                progress_max=0,
+                cancellable=True,
+            )
             return
 
         filename = ""
         if current_path:
             filename = Path(current_path).name
         if filename:
-            self.app_status_bar.showMessage(f"Loading FITS {loaded}/{total}: {filename}")
+            text = f"Loading FITS {loaded}/{total}: {filename}"
         else:
-            self.app_status_bar.showMessage(f"Loading FITS {loaded}/{total}...")
+            text = f"Loading FITS {loaded}/{total}..."
+        self._set_status_activity(
+            kind="load",
+            text=text,
+            progress_value=loaded,
+            progress_max=total,
+            cancellable=True,
+        )
+
+    def _set_status_activity(
+        self,
+        *,
+        kind: str,
+        text: str,
+        progress_value: int | None = None,
+        progress_max: int | None = None,
+        cancellable: bool = False,
+    ) -> None:
+        """Push a persistent task indicator into the status bar."""
+
+        self._status_activity_kind = kind
+        if self.app_status_bar is not None:
+            self.app_status_bar.set_activity(
+                text,
+                progress_value=progress_value,
+                progress_max=progress_max,
+                cancellable=cancellable,
+            )
+
+    def _clear_status_activity(self, *, kind: str | None = None) -> None:
+        """Hide the status-bar task indicator when the active kind matches."""
+
+        if kind is not None and self._status_activity_kind not in (None, kind):
+            return
+        self._status_activity_kind = None
+        if self.app_status_bar is not None:
+            self.app_status_bar.clear_activity()
+
+    def _clear_latest_error(self) -> None:
+        """Drop the currently stored inline error summary."""
+
+        self._latest_error_title = ""
+        self._latest_error_detail = ""
+        if self.app_status_bar is not None:
+            self.app_status_bar.clear_error_indicator()
+
+    def _handle_status_bar_cancel_requested(self) -> None:
+        """Cancel the currently exposed long-running task when supported."""
+
+        if self._status_activity_kind == "load":
+            self._stop_active_frame_load(wait=False)
+            self._set_status_activity(
+                kind="load",
+                text="Cancelling FITS load...",
+                progress_value=self._load_completed_count,
+                progress_max=self._load_total_count,
+                cancellable=False,
+            )
+
+    def _show_latest_error_details(self) -> None:
+        """Open a dialog with the most recently stored error detail."""
+
+        if not self._latest_error_title and not self._latest_error_detail:
+            return
+        QMessageBox.warning(
+            self,
+            self._latest_error_title or "Error",
+            self._latest_error_detail or self._latest_error_title,
+        )
 
     def _handle_loaded_frame(self, data: Any, preview_image_u8: Any = None) -> None:
         """Accept one loaded FITS frame from the background worker."""
@@ -1674,6 +1857,7 @@ class MainWindow(QMainWindow):
         success_count = max(0, self._load_total_count - self._load_error_count)
 
         if not self._frames:
+            self._pending_session_restore_frame_index = None
             if self.app_status_bar is not None:
                 self.app_status_bar.showMessage("No FITS files were loaded.", 5000)
             return
@@ -1689,6 +1873,84 @@ class MainWindow(QMainWindow):
                     f"Loaded {success_count} FITS file{'s' if success_count != 1 else ''}.",
                     3000,
                 )
+        self._persist_session_state()
+        if self._pending_session_restore_frame_index is not None and len(self._frames) > 1:
+            restore_index = max(0, min(self._pending_session_restore_frame_index, len(self._frames) - 1))
+            if restore_index != self._current_frame_index:
+                self._switch_frame(restore_index)
+        self._pending_session_restore_frame_index = None
+
+    def _open_paths(
+        self,
+        paths: list[str],
+        *,
+        hdu_index: int | None = None,
+        append: bool = False,
+    ) -> None:
+        """Open or append a set of already-selected FITS paths."""
+
+        if not paths:
+            return
+
+        self._remember_open_directory(paths)
+        self._remember_recent_paths(paths)
+        self._clear_latest_error()
+        if not append:
+            self._reset_render_controls_for_new_file()
+        self._start_frame_load(paths, hdu_index=hdu_index, append=append)
+
+    def _supported_fits_paths(self, paths: list[str]) -> list[str]:
+        """Return only local FITS-like paths supported by AstroView."""
+
+        supported: list[str] = []
+        for path in paths:
+            suffix = Path(path).suffix.lower()
+            if suffix in self.SUPPORTED_FITS_SUFFIXES:
+                supported.append(path)
+        return supported
+
+    def _handle_dropped_paths(self, paths: list[str]) -> None:
+        """Handle local file paths dropped onto the main window."""
+
+        fits_paths = self._supported_fits_paths(paths)
+        if not fits_paths:
+            self.show_error("Open failed", "Drop one or more FITS files (.fits, .fit, .fts).")
+            return
+        self._open_paths(fits_paths, append=False)
+
+    def dragEnterEvent(self, event: Any) -> None:
+        """Accept drag-enter events that include at least one FITS path."""
+
+        mime_data = event.mimeData()
+        if mime_data is None or not mime_data.hasUrls():
+            event.ignore()
+            return
+
+        paths = [
+            url.toLocalFile()
+            for url in mime_data.urls()
+            if hasattr(url, "isLocalFile") and url.isLocalFile()
+        ]
+        if self._supported_fits_paths(paths):
+            event.acceptProposedAction()
+            return
+        event.ignore()
+
+    def dropEvent(self, event: Any) -> None:
+        """Open dropped FITS paths directly from the shell or file manager."""
+
+        mime_data = event.mimeData()
+        if mime_data is None or not mime_data.hasUrls():
+            event.ignore()
+            return
+
+        paths = [
+            url.toLocalFile()
+            for url in mime_data.urls()
+            if hasattr(url, "isLocalFile") and url.isLocalFile()
+        ]
+        self._handle_dropped_paths(paths)
+        event.acceptProposedAction()
 
     def close_current_file(self) -> None:
         """Close the current FITS file and reset the window state.
@@ -1708,8 +1970,11 @@ class MainWindow(QMainWindow):
         self._render_request_index_by_id.clear()
         self._latest_render_request_by_index.clear()
         self._render_workers.clear()
+        self._clear_status_activity()
+        self._clear_latest_error()
         self.fits_service.close_file()
         self.current_catalog = None
+        self._catalog_results_stale = False
         self._frames.clear()
         self._frame_images.clear()
         self._frame_dirty.clear()
@@ -1730,6 +1995,7 @@ class MainWindow(QMainWindow):
             self.canvas.set_overlay_state(self.build_canvas_overlay_state())
         if self.source_table_dock is not None:
             self.source_table_dock.clear_catalog()
+            self.source_table_dock.set_status_note("")
             self.source_table_dock.set_view_state(self.build_table_view_state())
         if self.header_dialog is not None:
             self.header_dialog.clear()
@@ -1782,7 +2048,13 @@ class MainWindow(QMainWindow):
         if self.action_run_sep is not None:
             enablement = self.build_sep_enablement_state()
             self.action_run_sep.setEnabled(enablement.enabled)
-            self.action_run_sep.setToolTip(enablement.reason)
+            stale_hint = (
+                " Current source results are outdated; rerun SEP to refresh them."
+                if self._catalog_results_stale and self.current_catalog is not None
+                else ""
+            )
+            self.action_run_sep.setText("Rerun SEP Extract" if stale_hint else "SEP Extract")
+            self.action_run_sep.setToolTip(f"{enablement.reason}{stale_hint}".strip())
 
     def sync_render_controls(self) -> None:
         """Push service-side render configuration into toolbar controls."""
@@ -1840,15 +2112,24 @@ class MainWindow(QMainWindow):
             if self.current_catalog is not None:
                 self.source_table_dock.populate(self.current_catalog)
             self.source_table_dock.set_row_view_models(rows)
+            self.source_table_dock.set_status_note(self._catalog_status_note())
             self.source_table_dock.set_view_state(self.build_table_view_state())
             if self.current_catalog is not None and len(self.current_catalog) > 0:
                 self.source_table_dock.show()
             else:
+                self.source_table_dock.set_status_note("")
                 self.source_table_dock.clear_cutout_image()
         if self.canvas is not None:
             self.canvas.draw_sources(self.current_catalog)
             self.canvas.set_overlay_state(self.build_canvas_overlay_state())
         self.sync_render_controls()
+
+    def _catalog_status_note(self) -> str:
+        """Return the current source-table status note shown beside the row summary."""
+
+        if self._catalog_results_stale and self.current_catalog is not None and len(self.current_catalog) > 0:
+            return "Results outdated. Press Ctrl+R to rerun SEP."
+        return ""
 
     def build_table_rows(self, catalog: SourceCatalog | None) -> list[TableRowViewModel]:
         """Transform a domain catalog into source-table row view models."""
@@ -1962,7 +2243,10 @@ class MainWindow(QMainWindow):
         return ViewFeedbackState(
             status="empty",
             title="No Image Loaded",
-            detail="Open a FITS file to populate the canvas.",
+            detail=(
+                "Drop FITS files here or press Ctrl+O.\n"
+                "Wheel to zoom, drag to pan, and right-drag a ROI to run SEP."
+            ),
             visible=True,
         )
 
@@ -2188,6 +2472,8 @@ class MainWindow(QMainWindow):
         request_id = self._sep_request_id
         self._active_sep_request_id = request_id
         self.current_catalog = None
+        self._catalog_results_stale = False
+        self._clear_latest_error()
 
         self._sep_thread = QThread(self)
         self._sep_worker = SEPExtractWorker(
@@ -2217,8 +2503,13 @@ class MainWindow(QMainWindow):
         if self.canvas is not None:
             self.canvas.clear_sources()
             self.canvas.set_overlay_state(self.build_canvas_overlay_state())
-        if self.app_status_bar is not None:
-            self.app_status_bar.showMessage("Running SEP extraction...", 0)
+        self._set_status_activity(
+            kind="sep",
+            text=f"Running SEP extraction on {normalized_roi.width}x{normalized_roi.height} ROI...",
+            progress_value=0,
+            progress_max=0,
+            cancellable=False,
+        )
         self.sync_sep_panel_state()
         self.sync_render_controls()
         self._sep_thread.start()
@@ -2229,6 +2520,7 @@ class MainWindow(QMainWindow):
         if request_id != self._active_sep_request_id:
             return
 
+        self._catalog_results_stale = False
         self.set_current_catalog(catalog)
         self.sync_catalog_views()
         if len(catalog) == 1:
@@ -2254,6 +2546,7 @@ class MainWindow(QMainWindow):
         """Finalize SEP-extraction UI state when a worker exits."""
 
         if request_id == self._active_sep_request_id:
+            self._clear_status_activity(kind="sep")
             self._active_sep_request_id = None
             self.sync_sep_panel_state()
             if self.source_table_dock is not None:
@@ -2429,6 +2722,7 @@ class MainWindow(QMainWindow):
         if self.canvas is not None:
             self.canvas.highlight_source(index)
             self.canvas.set_overlay_state(self.build_canvas_overlay_state(highlighted_index=index))
+            self.canvas.center_on_source(index)
         if self.source_table_dock is not None and self.source_table_dock.current_selection_state().selected_row != index:
             self.source_table_dock.select_source(index)
         self._update_source_cutout(index)
@@ -2452,6 +2746,16 @@ class MainWindow(QMainWindow):
         if params is not None:
             old = self.sep_service.params
             self.sep_service.params = params
+            if old != params and self.current_catalog is not None and len(self.current_catalog) > 0:
+                self._catalog_results_stale = True
+                if self.app_status_bar is not None:
+                    self.app_status_bar.showMessage(
+                        "SEP settings changed. Current source results are outdated until rerun.",
+                        4000,
+                    )
+                if self.source_table_dock is not None:
+                    self.source_table_dock.set_status_note(self._catalog_status_note())
+                self.sync_sep_panel_state()
             if (
                 old.bkg_box_size != params.bkg_box_size
                 or old.bkg_filter_size != params.bkg_filter_size
@@ -2511,7 +2815,10 @@ class MainWindow(QMainWindow):
         """Show an error message to the user."""
 
         logger.error("%s: %s", title, detail)
+        self._latest_error_title = title
+        self._latest_error_detail = detail
         if self.app_status_bar is not None:
+            self.app_status_bar.show_error_indicator(title, detail)
             self.app_status_bar.showMessage(f"{title}: {detail}", 5000)
 
     def _handle_stretch_changed(self, name: str) -> None:
@@ -2813,6 +3120,7 @@ class MainWindow(QMainWindow):
         self._refresh_histogram_view()
         self._ensure_frame_rendered(index)
         self._prewarm_adjacent_frame()
+        self._persist_session_state()
 
     def _show_current_frame_image(self) -> None:
         """Push the cached QImage for the current frame into the canvas."""
@@ -2949,8 +3257,7 @@ class MainWindow(QMainWindow):
         if not paths:
             return
 
-        self._remember_open_directory(paths)
-        self._start_frame_load(paths, append=True)
+        self._open_paths(paths, append=True)
 
     def _last_open_directory(self) -> str:
         """Return the most recently used FITS directory for file dialogs."""

@@ -7,6 +7,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QImage
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
 import sys
@@ -136,6 +137,126 @@ class TestSourceTableDock(unittest.TestCase):
             self.assertEqual(dock.current_cutout_mode(), SourceTableDock.CUTOUT_MODE_CONNECTED_REGION)
             self.assertEqual(changed[-1], SourceTableDock.CUTOUT_MODE_CONNECTED_REGION)
         finally:
+            dock.deleteLater()
+
+    def test_field_filter_limits_results_to_matching_column(self) -> None:
+        dock = SourceTableDock()
+        try:
+            rows = [
+                TableRowViewModel(row_index=0, values={"ID": 1, "Flux": 10.0, "SNR": 5.0}),
+                TableRowViewModel(row_index=1, values={"ID": 2, "Flux": 20.0, "SNR": 15.0}),
+            ]
+            dock.set_view_state(TableViewState(has_catalog=True, row_count=2))
+            dock.set_row_view_models(rows)
+            dock.set_filter_text("flux:20")
+            self._app.processEvents()
+
+            self.assertEqual([row.row_index for row in dock.filtered_rows], [1])
+        finally:
+            dock.deleteLater()
+
+    def test_status_note_is_appended_to_summary_label(self) -> None:
+        dock = SourceTableDock()
+        try:
+            rows = [
+                TableRowViewModel(row_index=0, values={"ID": 1, "Flux": 10.0}),
+            ]
+            dock.set_view_state(TableViewState(has_catalog=True, row_count=1))
+            dock.set_row_view_models(rows)
+            dock.set_status_note("Results outdated.")
+
+            self.assertIn("Results outdated.", dock.summary_label.text())
+        finally:
+            dock.deleteLater()
+
+    def test_clicking_already_selected_row_reemits_source_clicked(self) -> None:
+        dock = SourceTableDock()
+        clicked: list[int] = []
+        dock.source_clicked.connect(clicked.append)
+        try:
+            rows = [
+                TableRowViewModel(row_index=0, values={"ID": 1, "Flux": 10.0}),
+                TableRowViewModel(row_index=1, values={"ID": 2, "Flux": 20.0}),
+            ]
+            dock.set_view_state(TableViewState(has_catalog=True, row_count=2))
+            dock.set_row_view_models(rows)
+            dock.resize(500, 300)
+            dock.show()
+            self._app.processEvents()
+
+            dock.table_widget.selectRow(0)
+            self._app.processEvents()
+
+            item_rect = dock.table_widget.visualItemRect(dock.table_widget.item(0, 0))
+            QTest.mouseClick(
+                dock.table_widget.viewport(),
+                Qt.MouseButton.LeftButton,
+                Qt.KeyboardModifier.NoModifier,
+                item_rect.center(),
+            )
+            self._app.processEvents()
+
+            self.assertEqual(clicked, [0, 0])
+        finally:
+            dock.close()
+            dock.deleteLater()
+
+    def test_return_key_reemits_current_selection(self) -> None:
+        dock = SourceTableDock()
+        clicked: list[int] = []
+        dock.source_clicked.connect(clicked.append)
+        try:
+            rows = [
+                TableRowViewModel(row_index=0, values={"ID": 1, "Flux": 10.0}),
+                TableRowViewModel(row_index=1, values={"ID": 2, "Flux": 20.0}),
+            ]
+            dock.set_view_state(TableViewState(has_catalog=True, row_count=2))
+            dock.set_row_view_models(rows)
+            dock.resize(500, 300)
+            dock.show()
+            dock.table_widget.setFocus()
+            self._app.processEvents()
+
+            dock.table_widget.selectRow(1)
+            self._app.processEvents()
+
+            QTest.keyClick(dock.table_widget, Qt.Key.Key_Return)
+            self._app.processEvents()
+
+            self.assertEqual(clicked, [1, 1])
+        finally:
+            dock.close()
+            dock.deleteLater()
+
+    def test_cutout_double_click_reemits_current_selection(self) -> None:
+        dock = SourceTableDock()
+        clicked: list[int] = []
+        dock.source_clicked.connect(clicked.append)
+        try:
+            rows = [
+                TableRowViewModel(row_index=0, values={"ID": 1, "Flux": 10.0}),
+            ]
+            dock.set_view_state(TableViewState(has_catalog=True, row_count=1))
+            dock.set_row_view_models(rows)
+            dock.resize(500, 360)
+            dock.show()
+            self._app.processEvents()
+
+            dock.table_widget.selectRow(0)
+            self._app.processEvents()
+
+            cutout_center = dock.cutout_view.rect().center()
+            QTest.mouseDClick(
+                dock.cutout_view,
+                Qt.MouseButton.LeftButton,
+                Qt.KeyboardModifier.NoModifier,
+                cutout_center,
+            )
+            self._app.processEvents()
+
+            self.assertEqual(clicked, [0, 0])
+        finally:
+            dock.close()
             dock.deleteLater()
 
 

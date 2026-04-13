@@ -1,4 +1,26 @@
-﻿# Changelog
+# Changelog
+
+## 1.3.1 - 2026-04-11
+
+### Added
+- Added FITS drag-and-drop open support on both the main window and canvas, plus a more actionable empty-canvas onboarding state that advertises file open, drag-and-drop, zoom, and ROI extraction.
+- Added a persistent status-task area for long-running work so file loading, SEP extraction, and related failures stay visible without forcing users to watch the transient status-bar text.
+- Added explicit recenter affordances for the currently selected source: pressing `Enter` in the source table, re-clicking the active row, or double-clicking the cutout preview now recenters the target on the canvas.
+- Added recent-file history and a `Reopen Last Session` action so successful frame sequences can be reopened from the File menu without rebuilding the same session by hand.
+- Added case-sensitive header filtering, invalid-line reporting for batch marker input, and targeted tests covering the new status bar, header dialog, and source-table behaviors.
+
+### Changed
+- Changed source-table selection behavior so picking a source automatically recenters the canvas, and the cutout preview now advertises its double-click recenter shortcut.
+- Changed frame-player controls to display user-facing frame numbers as 1-based while preserving the existing internal 0-based indexing.
+- Changed source-table sorting to use typed numeric ordering instead of string ordering, and expanded filtering to support `field:value` queries for direct metric filtering.
+
+### Fixed
+- Fixed SEP parameter edits leaving the previous catalog looking current; result views now show an explicit stale/outdated state until extraction is rerun.
+- Fixed marker batch parsing silently dropping invalid rows by surfacing concrete line-level input errors instead.
+- Fixed repeated source recentering workflows that previously required selecting a different target first before the same source could be centered again.
+
+### Validated
+- Verified the updated UI workflow in the `astro` environment with `D:\Miniforge\envs\astro\python.exe -m unittest tests.test_source_table tests.test_marker_dock tests.test_header_dialog tests.test_main_window_loading tests.test_frame_player_dock tests.test_canvas tests.test_status_bar` (`100` tests passed).
 
 ## 1.3.0 - 2026-04-10
 

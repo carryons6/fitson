@@ -71,6 +71,32 @@ class TestFramePlayerDock(unittest.TestCase):
         finally:
             dock.deleteLater()
 
+    def test_frame_spinbox_displays_one_based_frame_numbers(self) -> None:
+        dock = FramePlayerDock()
+        try:
+            dock.set_frame_count(4)
+            dock.set_current_frame(0)
+            self.assertEqual(dock.frame_spin.value(), 1)
+
+            dock.set_current_frame(3)
+            self.assertEqual(dock.frame_spin.value(), 4)
+        finally:
+            dock.deleteLater()
+
+    def test_frame_spinbox_emits_zero_based_index(self) -> None:
+        dock = FramePlayerDock()
+        changed: list[int] = []
+        dock.frame_changed.connect(changed.append)
+        try:
+            dock.set_frame_count(4)
+
+            dock.frame_spin.setValue(2)
+
+            self.assertEqual(dock.current_frame(), 1)
+            self.assertEqual(changed[-1], 1)
+        finally:
+            dock.deleteLater()
+
 
 if __name__ == "__main__":
     unittest.main()

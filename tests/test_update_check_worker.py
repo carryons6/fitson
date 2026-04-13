@@ -22,6 +22,7 @@ from astroview.app.update_check_worker import (
     fetch_json,
     fetch_latest_version_info,
     normalize_version,
+    version_key,
 )
 
 
@@ -84,12 +85,18 @@ class TestUpdateCheckWorker(unittest.TestCase):
         results = []
         worker = UpdateCheckWorker(__version__)
         worker.result_ready.connect(results.append)
+        current_parts = list(version_key(__version__))
+        current_parts[-1] += 1
+        latest_version = ".".join(str(part) for part in current_parts)
 
-        with patch("astroview.app.update_check_worker.fetch_latest_version_info", return_value=("1.3.0", "https://example.com/release")):
+        with patch(
+            "astroview.app.update_check_worker.fetch_latest_version_info",
+            return_value=(latest_version, "https://example.com/release"),
+        ):
             worker.run()
 
         self.assertEqual(results[0].status, "update_available")
-        self.assertEqual(results[0].latest_version, "1.3.0")
+        self.assertEqual(results[0].latest_version, latest_version)
 
 
 if __name__ == "__main__":

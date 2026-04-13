@@ -124,6 +124,7 @@ class MarkerDock(QDockWidget):
         layout.addWidget(self.coord_input)
 
         self.status_label = QLabel("", content)
+        self.status_label.setWordWrap(True)
         layout.addWidget(self.status_label)
 
         # --- Buttons ---
@@ -167,9 +168,16 @@ class MarkerDock(QDockWidget):
         Lines prefixed with 'w ' are WCS; otherwise pixel.
         """
 
+        coords, _errors = self.parse_coordinates_with_feedback()
+        return coords
+
+    def parse_coordinates_with_feedback(self) -> tuple[list[tuple[str, float, float]], list[str]]:
+        """Parse coordinates and return both valid entries and line-specific errors."""
+
         coords: list[tuple[str, float, float]] = []
-        for line in self.coord_input.toPlainText().splitlines():
-            line = line.strip()
+        errors: list[str] = []
+        for line_number, raw_line in enumerate(self.coord_input.toPlainText().splitlines(), start=1):
+            line = raw_line.strip()
             if not line or line.startswith("#"):
                 continue
             coord_type = "pixel"
@@ -178,20 +186,30 @@ class MarkerDock(QDockWidget):
                 line = line[2:].strip()
             parts = line.split(",")
             if len(parts) != 2:
+                errors.append(f"Line {line_number}: expected two comma-separated values.")
                 continue
             try:
                 v1, v2 = float(parts[0].strip()), float(parts[1].strip())
                 coords.append((coord_type, v1, v2))
             except ValueError:
-                continue
-        return coords
+                errors.append(f"Line {line_number}: values must be numeric.")
+        return coords, errors
 
     def _on_apply(self) -> None:
-        entries = self.parse_coordinates()
+        entries, errors = self.parse_coordinates_with_feedback()
         if not entries:
-            self.status_label.setText("No valid coordinates found.")
+            if errors:
+                self.status_label.setText("No valid coordinates found. " + " ".join(errors[:3]))
+            else:
+                self.status_label.setText("No valid coordinates found.")
             return
-        self.status_label.setText(f"{len(entries)} marker(s)")
+        if errors:
+            self.status_label.setText(
+                f"{len(entries)} marker(s). Skipped {len(errors)} invalid line(s): "
+                + ", ".join(error.split(":")[0] for error in errors[:5])
+            )
+        else:
+            self.status_label.setText(f"{len(entries)} marker(s)")
         self.markers_updated.emit(entries)
 
     def _on_add_single(self) -> None:

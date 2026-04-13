@@ -24,6 +24,7 @@ from astroview import __version__
 from astroview.app.contracts import TableColumnSpec
 from astroview.app.main_window import MainWindow
 from astroview.app.update_check_worker import UpdateCheckResult
+from astroview.core.contracts import ROISelection
 from astroview.core.sep_service import SEPParameters
 from astroview.core.fits_data import FITSData
 from astroview.core.source_catalog import SourceCatalog, SourceRecord
@@ -177,8 +178,50 @@ class TestMainWindowLoading(unittest.TestCase):
                 "D:\\fits",
                 "FITS Files (*.fits *.fit *.fts);;All Files (*)",
             )
-            window._settings.setValue.assert_called_once_with("paths/last_open_dir", "D:\\fits\\append")
-            start_mock.assert_called_once_with(["D:\\fits\\append\\frame2.fits"], append=True)
+            self._assert_settings_write(window._settings, "paths/last_open_dir", "D:\\fits\\append")
+            start_mock.assert_called_once_with(["D:\\fits\\append\\frame2.fits"], hdu_index=None, append=True)
+        finally:
+            window.deleteLater()
+
+    def test_open_file_remembers_recent_paths(self) -> None:
+        window = MainWindow()
+        window._settings = Mock()
+        window._settings.value.return_value = []
+        try:
+            with patch.object(window, "_start_frame_load"):
+                window.open_file(path="D:\\fits\\image.fits")
+
+            self._assert_settings_write(window._settings, "paths/recent_files", ["D:\\fits\\image.fits"])
+        finally:
+            window.deleteLater()
+
+    def test_handle_dropped_paths_opens_only_supported_fits_files(self) -> None:
+        window = MainWindow()
+        try:
+            with patch.object(window, "_open_paths") as open_mock:
+                window._handle_dropped_paths([
+                    "D:\\fits\\frame1.fits",
+                    "D:\\fits\\notes.txt",
+                    "D:\\fits\\frame2.FIT",
+                ])
+
+            open_mock.assert_called_once_with(
+                ["D:\\fits\\frame1.fits", "D:\\fits\\frame2.FIT"],
+                append=False,
+            )
+        finally:
+            window.deleteLater()
+
+    def test_handle_dropped_paths_reports_error_for_unsupported_files(self) -> None:
+        window = MainWindow()
+        try:
+            with patch.object(window, "show_error") as error_mock:
+                window._handle_dropped_paths(["D:\\fits\\notes.txt"])
+
+            error_mock.assert_called_once_with(
+                "Open failed",
+                "Drop one or more FITS files (.fits, .fit, .fts).",
+            )
         finally:
             window.deleteLater()
 
@@ -466,6 +509,25 @@ class TestMainWindowLoading(unittest.TestCase):
             qimage_mock.assert_called_once_with("preview-u8")
             activate_mock.assert_called_once_with(0)
             sync_mock.assert_called_once_with()
+        finally:
+            window.deleteLater()
+
+    def test_set_loading_state_updates_status_bar_activity(self) -> None:
+        window = MainWindow()
+        window.app_status_bar = Mock()
+        try:
+            window._set_loading_state(True, loaded=2, total=5, current_path="D:\\fits\\frame2.fits")
+
+            window.app_status_bar.set_activity.assert_called_once_with(
+                "Loading FITS 2/5: frame2.fits",
+                progress_value=2,
+                progress_max=5,
+                cancellable=True,
+            )
+
+            window._set_loading_state(False)
+
+            window.app_status_bar.clear_activity.assert_called_once_with()
         finally:
             window.deleteLater()
 
@@ -930,6 +992,28 @@ class TestMainWindowLoading(unittest.TestCase):
 
             shortcuts = [shortcut.toString() for shortcut in window.action_export_catalog.shortcuts()]
             self.assertEqual(shortcuts, ["Ctrl+E", "Ctrl+Shift+E"])
+            self.assertEqual(window.action_reopen_last_session.text(), "Reopen Last Session")
+        finally:
+            window.deleteLater()
+
+    def test_reopen_last_session_uses_persisted_paths_and_index(self) -> None:
+        window = MainWindow()
+        window._settings = Mock()
+
+        def value_side_effect(key, default=None, type=None):
+            values = {
+                "session/last_paths": ["D:\\fits\\a.fits", "D:\\fits\\b.fits"],
+                "session/current_index": 1,
+            }
+            return values.get(key, default)
+
+        window._settings.value.side_effect = value_side_effect
+        try:
+            with patch.object(window, "_open_paths") as open_mock:
+                window._reopen_last_session()
+
+            self.assertEqual(window._pending_session_restore_frame_index, 1)
+            open_mock.assert_called_once_with(["D:\\fits\\a.fits", "D:\\fits\\b.fits"], append=False)
         finally:
             window.deleteLater()
 
@@ -1050,6 +1134,22 @@ class TestMainWindowLoading(unittest.TestCase):
         finally:
             window.deleteLater()
 
+    def test_handle_source_clicked_centers_canvas_on_selected_source(self) -> None:
+        window = MainWindow()
+        window.canvas = Mock()
+        window.source_table_dock = Mock()
+        window.source_table_dock.current_selection_state.return_value = SimpleNamespace(selected_row=None)
+        try:
+            with patch.object(window, "_update_source_cutout") as cutout_mock:
+                window.handle_source_clicked(2)
+
+            window.canvas.highlight_source.assert_called_once_with(2)
+            window.canvas.center_on_source.assert_called_once_with(2)
+            window.source_table_dock.select_source.assert_called_once_with(2)
+            cutout_mock.assert_called_once_with(2)
+        finally:
+            window.deleteLater()
+
     def test_visible_source_table_columns_always_include_id_x_y(self) -> None:
         window = MainWindow()
         window.source_table_dock = Mock(
@@ -1080,6 +1180,17 @@ class TestMainWindowLoading(unittest.TestCase):
             self.assertEqual(state.feedback.status, "loading")
             self.assertEqual(state.feedback.title, "Rendering Preview")
             self.assertTrue(state.feedback.visible)
+        finally:
+            window.deleteLater()
+
+    def test_build_empty_image_feedback_includes_drop_and_roi_hints(self) -> None:
+        window = MainWindow()
+        try:
+            feedback = window.build_empty_image_feedback()
+
+            self.assertIn("Drop FITS files here", feedback.detail)
+            self.assertIn("Ctrl+O", feedback.detail)
+            self.assertIn("right-drag a ROI", feedback.detail)
         finally:
             window.deleteLater()
 
@@ -1134,6 +1245,57 @@ class TestMainWindowLoading(unittest.TestCase):
             state = window.canvas.set_image_state.call_args.args[0]
             self.assertEqual(state.feedback.status, "loading")
             self.assertEqual(state.feedback.title, "Rendering Full Frame")
+        finally:
+            window.deleteLater()
+
+    def test_show_error_exposes_inline_error_details(self) -> None:
+        window = MainWindow()
+        window.app_status_bar = Mock()
+        try:
+            window.show_error("Open failed", "broken header")
+
+            self.assertEqual(window._latest_error_title, "Open failed")
+            self.assertEqual(window._latest_error_detail, "broken header")
+            window.app_status_bar.show_error_indicator.assert_called_once_with("Open failed", "broken header")
+            window.app_status_bar.showMessage.assert_called_once_with("Open failed: broken header", 5000)
+        finally:
+            window.deleteLater()
+
+    def test_start_sep_extract_shows_busy_status_activity(self) -> None:
+        window = MainWindow()
+        window.app_status_bar = Mock()
+        window.fits_service.current_data = FITSData(path="frame.fits", data=np.zeros((20, 30)))
+        try:
+            with patch("astroview.app.main_window.QThread", _FakeThread):
+                with patch("astroview.app.main_window.SEPExtractWorker") as worker_cls:
+                    worker_cls.return_value = Mock(
+                        moveToThread=Mock(),
+                        extraction_ready=_FakeSignal(),
+                        extraction_error=_FakeSignal(),
+                        finished=_FakeSignal(),
+                        deleteLater=Mock(),
+                    )
+                    window._start_sep_extract(ROISelection(x0=2, y0=3, width=10, height=8))
+
+            window.app_status_bar.set_activity.assert_called_once_with(
+                "Running SEP extraction on 10x8 ROI...",
+                progress_value=0,
+                progress_max=0,
+                cancellable=False,
+            )
+        finally:
+            window.deleteLater()
+
+    def test_handle_sep_extraction_finished_clears_status_activity(self) -> None:
+        window = MainWindow()
+        window.app_status_bar = Mock()
+        window._active_sep_request_id = 7
+        window._status_activity_kind = "sep"
+        try:
+            window._handle_sep_extraction_finished(7)
+
+            window.app_status_bar.clear_activity.assert_called_once_with()
+            self.assertIsNone(window._status_activity_kind)
         finally:
             window.deleteLater()
 
@@ -1223,6 +1385,40 @@ class TestMainWindowLoading(unittest.TestCase):
             window.handle_sep_params_changed(params)
 
             self.assertEqual(window.sep_service.params, params)
+        finally:
+            window.deleteLater()
+
+    def test_handle_sep_params_changed_marks_existing_catalog_as_stale(self) -> None:
+        window = MainWindow()
+        window.app_status_bar = Mock()
+        window.source_table_dock = Mock()
+        window.current_catalog = SourceCatalog(records=[SourceRecord(source_id=1, x=1.0, y=2.0)])
+        params = SEPParameters(thresh=7.5, minarea=12)
+        try:
+            with patch.object(window, "sync_sep_panel_state") as sync_mock:
+                window.handle_sep_params_changed(params)
+
+            self.assertTrue(window._catalog_results_stale)
+            window.source_table_dock.set_status_note.assert_called_once_with(
+                "Results outdated. Press Ctrl+R to rerun SEP."
+            )
+            window.app_status_bar.showMessage.assert_called_once()
+            sync_mock.assert_called_once_with()
+        finally:
+            window.deleteLater()
+
+    def test_sync_sep_panel_state_updates_rerun_label_when_catalog_is_stale(self) -> None:
+        window = MainWindow()
+        window.action_run_sep = Mock()
+        window.current_catalog = SourceCatalog(records=[SourceRecord(source_id=1, x=1.0, y=2.0)])
+        window._catalog_results_stale = True
+        window.fits_service.current_data = FITSData(path="frame.fits", data=np.zeros((2, 2)))
+        try:
+            window.sync_sep_panel_state()
+
+            window.action_run_sep.setText.assert_called_once_with("Rerun SEP Extract")
+            tooltip = window.action_run_sep.setToolTip.call_args.args[0]
+            self.assertIn("outdated", tooltip.lower())
         finally:
             window.deleteLater()
 

@@ -57,6 +57,21 @@ class TestMarkerDock(unittest.TestCase):
         finally:
             dock.deleteLater()
 
+    def test_apply_reports_invalid_batch_lines(self) -> None:
+        dock = MarkerDock()
+        updated: list[list[tuple[str, float, float]]] = []
+        dock.markers_updated.connect(updated.append)
+        try:
+            dock.coord_input.setPlainText("10, 20\nbad line\nw 180.0, nope")
+
+            dock._on_apply()
+
+            self.assertEqual(updated, [[("pixel", 10.0, 20.0)]])
+            self.assertIn("Skipped 2 invalid line(s)", dock.status_label.text())
+            self.assertIn("Line 2", dock.status_label.text())
+        finally:
+            dock.deleteLater()
+
 
 if __name__ == "__main__":
     unittest.main()

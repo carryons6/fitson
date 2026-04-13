@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import shlex
 from typing import Any, Sequence
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QImage, QPixmap
+from PySide6.QtGui import QImage, QKeySequence, QMouseEvent, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
@@ -20,6 +21,29 @@ from PySide6.QtWidgets import (
 
 from .contracts import TableColumnSpec, TableRowViewModel, TableSelectionState, TableViewState, ViewFeedbackState
 from ..core.source_catalog import SourceCatalog
+
+
+class _CutoutPreviewLabel(QLabel):
+    """Cutout preview label that can request re-centering on double click."""
+
+    double_clicked = Signal()
+
+    def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.double_clicked.emit()
+        super().mouseDoubleClickEvent(event)
+
+
+class _TypedTableWidgetItem(QTableWidgetItem):
+    """Table item that sorts using the original typed value when available."""
+
+    def __init__(self, text: str, *, sort_key: tuple[int, Any]) -> None:
+        super().__init__(text)
+        self._sort_key = sort_key
+
+    def __lt__(self, other: QTableWidgetItem) -> bool:
+        other_key = getattr(other, "_sort_key", (1, other.text().casefold()))
+        return self._sort_key < other_key
 
 
 class SourceTableDock(QDockWidget):
@@ -48,6 +72,7 @@ class SourceTableDock(QDockWidget):
         self.filtered_rows: list[TableRowViewModel] = []
         self.selection_state = TableSelectionState()
         self.view_state = TableViewState()
+        self._status_note_text = ""
         self.content_widget = QWidget(self)
         self.layout = QVBoxLayout(self.content_widget)
         self.feedback_label = QLabel("No Sources", self.content_widget)
@@ -61,11 +86,11 @@ class SourceTableDock(QDockWidget):
         self.cutout_header_layout = QHBoxLayout(self.cutout_header_widget)
         self.cutout_mode_label = QLabel("View:", self.cutout_header_widget)
         self.cutout_mode_selector = QComboBox(self.cutout_header_widget)
-        self.cutout_view = QLabel(self.content_widget)
+        self.cutout_view = _CutoutPreviewLabel(self.content_widget)
 
         self.setObjectName("source_table_dock")
         self.setWindowTitle("Source Table")
-        self.filter_input.setPlaceholderText("Filter sources")
+        self.filter_input.setPlaceholderText("Filter sources or use field:value")
         self.table_widget.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table_widget.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.table_widget.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -88,6 +113,7 @@ class SourceTableDock(QDockWidget):
         self.cutout_view.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.cutout_view.setStyleSheet("background: #101419; border: 1px solid #2e3b4a;")
         self.cutout_view.setText("Select a source\nto preview its cutout.")
+        self.cutout_view.setToolTip("Double-click to re-center the selected source.")
         self.layout.addWidget(self.feedback_label)
         self.layout.addWidget(self.filter_input)
         self.layout.addWidget(self.summary_label)
@@ -100,9 +126,15 @@ class SourceTableDock(QDockWidget):
         self.setWidget(self.content_widget)
         self.configure_columns(self.default_columns())
         self.table_widget.itemSelectionChanged.connect(self._emit_selection_changed)
+        self.table_widget.itemPressed.connect(self._handle_item_pressed)
         self.table_widget.setMouseTracking(True)
         self.table_widget.viewport().setMouseTracking(True)
         self.table_widget.itemEntered.connect(self._emit_hover_from_item)
+        self._recenter_shortcut_return = QShortcut(QKeySequence(Qt.Key.Key_Return), self.table_widget)
+        self._recenter_shortcut_enter = QShortcut(QKeySequence(Qt.Key.Key_Enter), self.table_widget)
+        self._recenter_shortcut_return.activated.connect(self._reemit_current_selection)
+        self._recenter_shortcut_enter.activated.connect(self._reemit_current_selection)
+        self.cutout_view.double_clicked.connect(self._reemit_current_selection)
         self.filter_input.textChanged.connect(self._handle_filter_changed)
         self.cutout_mode_selector.currentTextChanged.connect(self.cutout_mode_changed.emit)
         self._apply_view_state()
@@ -192,6 +224,7 @@ class SourceTableDock(QDockWidget):
         self.filtered_rows = []
         self.selection_state = TableSelectionState()
         self.view_state = TableViewState()
+        self._status_note_text = ""
         self.table_widget.clearContents()
         self.table_widget.setRowCount(0)
         self.table_widget.clearSelection()
@@ -246,6 +279,12 @@ class SourceTableDock(QDockWidget):
 
         self.filter_input.setText(text)
 
+    def set_status_note(self, text: str) -> None:
+        """Show supplemental table status such as stale-result warnings."""
+
+        self._status_note_text = text.strip()
+        self._apply_view_state()
+
     def _apply_view_state(self) -> None:
         """Refresh placeholder visibility from the current composite state."""
 
@@ -263,7 +302,10 @@ class SourceTableDock(QDockWidget):
         self.summary_label.setVisible(self.view_state.has_catalog)
         self.table_widget.setVisible(True)
         if self.view_state.has_catalog:
-            self.summary_label.setText(f"Showing {len(self.filtered_rows)} / {len(self.rows)} sources")
+            summary = f"Showing {len(self.filtered_rows)} / {len(self.rows)} sources"
+            if self._status_note_text:
+                summary = f"{summary} | {self._status_note_text}"
+            self.summary_label.setText(summary)
         else:
             self.summary_label.clear()
         self.detail_label.setVisible(self.view_state.has_catalog)
@@ -275,28 +317,56 @@ class SourceTableDock(QDockWidget):
     def _emit_hover_from_item(self, item: QTableWidgetItem) -> None:
         """Emit a hover signal carrying the source index of the entered row."""
 
-        if item is None:
-            return
-        row_item = self.table_widget.item(item.row(), 0)
-        if row_item is None:
-            return
-        source_index = row_item.data(Qt.ItemDataRole.UserRole)
+        source_index = self._source_index_from_item(item)
         if source_index is None:
             return
-        self.source_hovered.emit(int(source_index))
+        self.source_hovered.emit(source_index)
 
     def _emit_selection_changed(self) -> None:
         """Bridge table selection into the public source-clicked signal."""
 
-        current_item = self.table_widget.currentItem()
-        if current_item is None:
-            return
-        source_index = current_item.data(Qt.ItemDataRole.UserRole)
+        source_index = self._source_index_from_item(self.table_widget.currentItem())
         if source_index is None:
             return
-        self.selection_state.selected_row = int(source_index)
-        self._update_detail_view(int(source_index))
-        self.source_clicked.emit(int(source_index))
+        self.selection_state.selected_row = source_index
+        self._update_detail_view(source_index)
+        self.source_clicked.emit(source_index)
+
+    def _handle_item_pressed(self, item: QTableWidgetItem) -> None:
+        """Re-emit clicks on the already-selected row so the caller can re-center."""
+
+        source_index = self._source_index_from_item(item)
+        if source_index is None:
+            return
+        if self.selection_state.selected_row != source_index:
+            return
+        self._update_detail_view(source_index)
+        self.source_clicked.emit(source_index)
+
+    def _reemit_current_selection(self) -> None:
+        """Emit the current selection again for explicit re-centering actions."""
+
+        source_index = self.selection_state.selected_row
+        if source_index is None:
+            source_index = self._source_index_from_item(self.table_widget.currentItem())
+        if source_index is None:
+            return
+        self.selection_state.selected_row = source_index
+        self._update_detail_view(source_index)
+        self.source_clicked.emit(source_index)
+
+    def _source_index_from_item(self, item: QTableWidgetItem | None) -> int | None:
+        """Resolve the backing source index for a rendered table item."""
+
+        if item is None:
+            return None
+        row_item = self.table_widget.item(item.row(), 0)
+        if row_item is None:
+            return None
+        source_index = row_item.data(Qt.ItemDataRole.UserRole)
+        if source_index is None:
+            return None
+        return int(source_index)
 
     def _handle_filter_changed(self, text: str) -> None:
         """Rebuild the visible rows when the free-text filter changes."""
@@ -315,12 +385,13 @@ class SourceTableDock(QDockWidget):
         for row_index, row_model in enumerate(self.filtered_rows):
             for column_index, column in enumerate(self.columns):
                 value = row_model.values.get(column.key, "")
-                item = QTableWidgetItem(str(value))
+                item = _TypedTableWidgetItem(
+                    str(value),
+                    sort_key=self._sort_key_for_value(value),
+                )
                 item.setData(Qt.ItemDataRole.UserRole, row_model.row_index)
                 if column.alignment == "right":
-                    item.setTextAlignment(
-                        int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-                    )
+                    item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
                 self.table_widget.setItem(row_index, column_index, item)
         self.table_widget.setSortingEnabled(sorting_enabled)
         if self.selection_state.selected_row is not None:
@@ -336,17 +407,91 @@ class SourceTableDock(QDockWidget):
     def _filtered_row_models(self) -> list[TableRowViewModel]:
         """Return the row models matching the current free-text filter."""
 
-        query = self.filter_input.text().strip().lower()
+        query = self.filter_input.text().strip()
         if not query:
             return list(self.rows)
 
+        tokens = self._parse_filter_tokens(query)
         filtered: list[TableRowViewModel] = []
         for row_model in self.rows:
-            for value in row_model.values.values():
-                if query in str(value).lower():
-                    filtered.append(row_model)
-                    break
+            if self._row_matches_filter_tokens(row_model, tokens):
+                filtered.append(row_model)
         return filtered
+
+    def _parse_filter_tokens(self, query: str) -> list[tuple[str, str, str]]:
+        """Split a free-text query into general or column-specific filter tokens."""
+
+        try:
+            raw_tokens = shlex.split(query)
+        except ValueError:
+            raw_tokens = query.split()
+
+        tokens: list[tuple[str, str, str]] = []
+        for token in raw_tokens:
+            field_name, sep, value = token.partition(":")
+            if sep:
+                resolved_key = self._resolve_filter_field_key(field_name)
+                if resolved_key is not None:
+                    tokens.append(("field", resolved_key, value.casefold()))
+                    continue
+            tokens.append(("general", "", token.casefold()))
+        return tokens
+
+    def _resolve_filter_field_key(self, field_name: str) -> str | None:
+        """Map a query field alias such as `flux` or `bkg_rms` to a column key."""
+
+        normalized = self._normalize_filter_field_name(field_name)
+        if not normalized:
+            return None
+
+        for column in self.columns:
+            aliases = {
+                self._normalize_filter_field_name(column.key),
+                self._normalize_filter_field_name(column.title),
+            }
+            if normalized in aliases:
+                return column.key
+        return None
+
+    @staticmethod
+    def _normalize_filter_field_name(text: str) -> str:
+        """Normalize field aliases so filter keys can ignore spaces and punctuation."""
+
+        return "".join(ch for ch in text.casefold() if ch.isalnum())
+
+    def _row_matches_filter_tokens(
+        self,
+        row_model: TableRowViewModel,
+        tokens: list[tuple[str, str, str]],
+    ) -> bool:
+        """Return whether a row satisfies all active filter tokens."""
+
+        for token_kind, field_key, query in tokens:
+            if token_kind == "field":
+                value = row_model.values.get(field_key, "")
+                if query not in str(value).casefold():
+                    return False
+                continue
+
+            if not any(query in str(value).casefold() for value in row_model.values.values()):
+                return False
+        return True
+
+    @staticmethod
+    def _sort_key_for_value(value: Any) -> tuple[int, Any]:
+        """Build a stable sort key that keeps numeric values in numeric order."""
+
+        if isinstance(value, bool):
+            return (0, int(value))
+        if isinstance(value, (int, float)):
+            return (0, float(value))
+        text = str(value).strip()
+        if not text or text == "-":
+            return (2, "")
+        try:
+            return (0, float(text))
+        except ValueError:
+            return (1, text.casefold())
 
     def _update_detail_view(self, source_index: int | None = None) -> None:
         """Refresh the selected-source detail panel from the backing catalog."""

@@ -18,6 +18,7 @@ if str(REPO_PARENT) not in sys.path:
     sys.path.insert(0, str(REPO_PARENT))
 
 from astroview.app.canvas import ImageCanvas
+from astroview.app.contracts import ViewFeedbackState
 from astroview.core.contracts import ZoomState
 from astroview.core.source_catalog import SourceCatalog, SourceRecord
 
@@ -117,6 +118,25 @@ class TestImageCanvas(unittest.TestCase):
             self._app.processEvents()
 
             self.assertEqual(captured_indices, [0])
+        finally:
+            canvas.close()
+            canvas.deleteLater()
+
+    def test_feedback_state_renders_title_and_detail_text(self) -> None:
+        canvas = ImageCanvas()
+        try:
+            canvas.set_feedback_state(
+                ViewFeedbackState(
+                    status="empty",
+                    title="No Image Loaded",
+                    detail="Drop FITS files here or press Ctrl+O.",
+                    visible=True,
+                )
+            )
+
+            text = canvas._feedback_item.toPlainText()
+            self.assertIn("No Image Loaded", text)
+            self.assertIn("Drop FITS files here", text)
         finally:
             canvas.close()
             canvas.deleteLater()

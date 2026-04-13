@@ -135,7 +135,12 @@ class FramePlayerDock(QDockWidget):
         if count < 2 and self._playing:
             self._stop_playback()
         self.frame_slider.setMaximum(max_idx)
-        self.frame_spin.setMaximum(max_idx)
+        if count > 0:
+            self.frame_spin.setMinimum(1)
+            self.frame_spin.setMaximum(count)
+        else:
+            self.frame_spin.setMinimum(0)
+            self.frame_spin.setMaximum(0)
         self.set_current_frame(min(self.current_frame(), max_idx))
         self.total_label.setText(f"/ {count}")
         if count > 0:
@@ -171,21 +176,24 @@ class FramePlayerDock(QDockWidget):
         self.frame_slider.blockSignals(True)
         self.frame_spin.blockSignals(True)
         self.frame_slider.setValue(index)
-        self.frame_spin.setValue(index)
+        self.frame_spin.setValue(index + 1 if self._frame_count > 0 else 0)
         self.frame_slider.blockSignals(False)
         self.frame_spin.blockSignals(False)
 
     def _on_slider_changed(self, value: int) -> None:
         self.frame_spin.blockSignals(True)
-        self.frame_spin.setValue(value)
+        self.frame_spin.setValue(value + 1 if self._frame_count > 0 else 0)
         self.frame_spin.blockSignals(False)
         self.frame_changed.emit(value)
 
     def _on_spin_changed(self, value: int) -> None:
+        if self._frame_count <= 0:
+            return
+        index = max(0, min(self._frame_count - 1, value - 1))
         self.frame_slider.blockSignals(True)
-        self.frame_slider.setValue(value)
+        self.frame_slider.setValue(index)
         self.frame_slider.blockSignals(False)
-        self.frame_changed.emit(value)
+        self.frame_changed.emit(index)
 
     def _toggle_play(self) -> None:
         if self._playing:

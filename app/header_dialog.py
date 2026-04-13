@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from PySide6.QtGui import QFontDatabase, QTextOption
-from PySide6.QtWidgets import QDialog, QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit, QVBoxLayout
+from PySide6.QtWidgets import QCheckBox, QDialog, QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit, QVBoxLayout
 
 from .contracts import HeaderFilterState, HeaderViewState, ViewFeedbackState
 
@@ -21,6 +21,7 @@ class HeaderDialog(QDialog):
         self.feedback_label = QLabel("No Header", self)
         self.filter_input = QLineEdit(self)
         self.status_layout = QHBoxLayout()
+        self.case_sensitive_checkbox = QCheckBox("Case sensitive", self)
         self.result_label = QLabel(self)
         self.line_count_label = QLabel(self)
         self.text_view = QPlainTextEdit(self)
@@ -44,6 +45,7 @@ class HeaderDialog(QDialog):
 
         self.status_layout.addWidget(self.result_label)
         self.status_layout.addWidget(self.line_count_label)
+        self.status_layout.addWidget(self.case_sensitive_checkbox)
         self.status_layout.addStretch()
 
         self.layout.addWidget(self.feedback_label)
@@ -53,6 +55,8 @@ class HeaderDialog(QDialog):
 
         self.filter_input.textChanged.connect(self.set_filter_text)
         self.filter_input.textChanged.connect(lambda _text: self.apply_filter())
+        self.case_sensitive_checkbox.toggled.connect(self.set_case_sensitive)
+        self.case_sensitive_checkbox.toggled.connect(lambda _checked: self.apply_filter())
         self._apply_view_state()
 
     def set_header_text(self, text: str) -> None:
@@ -71,10 +75,18 @@ class HeaderDialog(QDialog):
         if self.filter_input.text() != text:
             self.filter_input.setText(text)
 
+    def set_case_sensitive(self, checked: bool) -> None:
+        """Update whether header filtering should respect case."""
+
+        self.filter_state.case_sensitive = bool(checked)
+        if self.case_sensitive_checkbox.isChecked() != checked:
+            self.case_sensitive_checkbox.setChecked(checked)
+
     def set_filter_state(self, state: HeaderFilterState) -> None:
         """Apply structured filter state to the header view."""
 
         self.filter_state = state
+        self.case_sensitive_checkbox.setChecked(state.case_sensitive)
 
     def current_filter_state(self) -> HeaderFilterState:
         """Return the current structured filter state."""
@@ -107,7 +119,10 @@ class HeaderDialog(QDialog):
 
         self.filter_state.match_count = len(filtered_lines)
         self.text_view.setPlainText("\n".join(filtered_lines))
-        self.result_label.setText(f"Matches: {self.filter_state.match_count}")
+        result_text = f"Matches: {self.filter_state.match_count}"
+        if query and self.filter_state.match_count == 0:
+            result_text += " (No matches)"
+        self.result_label.setText(result_text)
         self.line_count_label.setText(f"Lines: {self.view_state.line_count}")
         self._apply_view_state()
 
@@ -118,6 +133,7 @@ class HeaderDialog(QDialog):
         self.filter_state = HeaderFilterState()
         self.view_state = HeaderViewState()
         self.filter_input.clear()
+        self.case_sensitive_checkbox.setChecked(False)
         self.text_view.clear()
         self.result_label.clear()
         self.line_count_label.clear()
@@ -140,4 +156,5 @@ class HeaderDialog(QDialog):
         self.feedback_label.setVisible(feedback.visible and not has_header)
         self.result_label.setVisible(has_header)
         self.line_count_label.setVisible(has_header)
+        self.case_sensitive_checkbox.setVisible(has_header)
         self.text_view.setVisible(has_header)
