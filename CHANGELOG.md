@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.4.1 - 2026-04-15
+
+### Fixed
+- Fixed UI freeze during multi-frame playback on large files by deferring synchronous SEP cancellation, histogram computation, session persistence, and panel refreshes to playback stop.
+
 ## 1.4.0 - 2026-04-15
 
 ### Added
