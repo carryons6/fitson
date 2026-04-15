@@ -3,9 +3,18 @@ from __future__ import annotations
 import math
 from typing import Any
 
-from PySide6.QtCore import QPoint, QRect, Qt, Signal
-from PySide6.QtGui import QColor, QImage, QMouseEvent, QPen, QPixmap
-from PySide6.QtWidgets import QFrame, QGraphicsEllipseItem, QGraphicsPixmapItem, QGraphicsScene, QGraphicsTextItem, QGraphicsView, QRubberBand
+from PySide6.QtCore import QPoint, QPointF, QRect, Qt, Signal
+from PySide6.QtGui import QBrush, QColor, QFont, QImage, QMouseEvent, QPen, QPixmap
+from PySide6.QtWidgets import (
+    QFrame,
+    QGraphicsEllipseItem,
+    QGraphicsPixmapItem,
+    QGraphicsRectItem,
+    QGraphicsScene,
+    QGraphicsTextItem,
+    QGraphicsView,
+    QRubberBand,
+)
 
 from .compass_overlay import CompassOverlay
 from .magnifier_overlay import MagnifierOverlay, _make_crosshair_cursor
@@ -38,6 +47,7 @@ class ImageCanvas(QGraphicsView):
         self.overlay_state = CanvasOverlayState()
         self._scene = QGraphicsScene(self)
         self._pixmap_item = QGraphicsPixmapItem()
+        self._feedback_background_item = QGraphicsRectItem()
         self._feedback_item = QGraphicsTextItem("No Image Loaded")
 
         self._rubber_band = QRubberBand(QRubberBand.Shape.Rectangle, self)
@@ -62,8 +72,15 @@ class ImageCanvas(QGraphicsView):
         self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
         self.setScene(self._scene)
         self._scene.addItem(self._pixmap_item)
+        self._scene.addItem(self._feedback_background_item)
         self._scene.addItem(self._feedback_item)
+        self._feedback_background_item.setZValue(9)
+        self._feedback_item.setZValue(10)
+        self._feedback_item.document().setDocumentMargin(0)
+        self._feedback_item.setFont(QFont("Segoe UI", 12))
         self._feedback_item.setVisible(True)
+        self._feedback_background_item.setVisible(True)
+        self._apply_feedback_style("empty")
         self.set_roi_color(self._roi_color)
 
         self._source_position_transform = None  # callable (x, y) -> (x, y)
@@ -215,8 +232,10 @@ class ImageCanvas(QGraphicsView):
         self.image_state.feedback = state
         parts = [part for part in (state.title.strip(), state.detail.strip()) if part]
         message = "\n\n".join(parts)
+        self._apply_feedback_style(state.status)
         self._feedback_item.setPlainText(message)
         self._feedback_item.setVisible(state.visible)
+        self._feedback_background_item.setVisible(state.visible and bool(message))
         self._layout_feedback_item()
 
     def fit_to_window(self) -> None:
@@ -414,12 +433,45 @@ class ImageCanvas(QGraphicsView):
     def _layout_feedback_item(self) -> None:
         """Center feedback text within the current viewport."""
 
+        if not self._feedback_item.isVisible() or not self._feedback_item.toPlainText().strip():
+            self._feedback_background_item.setVisible(False)
+            return
+
+        text_width = min(max(self.viewport().width() * 0.58, 260.0), 520.0)
+        self._feedback_item.setTextWidth(text_width)
         bounds = self._feedback_item.boundingRect()
         scene_center = self.mapToScene(self.viewport().rect().center())
-        self._feedback_item.setPos(
-            scene_center.x() - bounds.width() / 2.0,
-            scene_center.y() - bounds.height() / 2.0,
-        )
+        padding_x = 18.0
+        padding_y = 14.0
+        bg_width = bounds.width() + padding_x * 2.0
+        bg_height = bounds.height() + padding_y * 2.0
+        bg_x = scene_center.x() - bg_width / 2.0
+        bg_y = scene_center.y() - bg_height / 2.0
+        self._feedback_background_item.setRect(bg_x, bg_y, bg_width, bg_height)
+        self._feedback_background_item.setVisible(True)
+        self._feedback_item.setPos(bg_x + padding_x, bg_y + padding_y)
+
+    def _apply_feedback_style(self, status: str) -> None:
+        """Apply high-contrast colors for canvas feedback cards."""
+
+        if status == "error":
+            background = QColor(69, 10, 10, 228)
+            border = QColor(248, 113, 113, 240)
+            text = QColor(255, 241, 242)
+        elif status == "loading":
+            background = QColor(8, 24, 48, 228)
+            border = QColor(96, 165, 250, 240)
+            text = QColor(239, 246, 255)
+        else:
+            background = QColor(15, 23, 42, 228)
+            border = QColor(56, 189, 248, 240)
+            text = QColor(239, 246, 255)
+
+        pen = QPen(border)
+        pen.setWidth(2)
+        self._feedback_background_item.setPen(pen)
+        self._feedback_background_item.setBrush(QBrush(background))
+        self._feedback_item.setDefaultTextColor(text)
 
     def _source_index_at_view_pos(self, view_pos: QPoint) -> int | None:
         """Return the source index under the given viewport position."""
@@ -454,7 +506,7 @@ class ImageCanvas(QGraphicsView):
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
         """Update rubber band during drag; emit cursor coordinates always."""
 
-        scene_pos = self.mapToScene(event.pos())
+        scene_pos = self._scene_pos_from_view_pos(event.position())
         self.mouse_moved.emit(scene_pos.x(), scene_pos.y())
 
         if self.magnifier.isVisible():
@@ -470,6 +522,19 @@ class ImageCanvas(QGraphicsView):
             self._rubber_band.setGeometry(QRect(self._drag_origin, event.pos()).normalized())
         else:
             super().mouseMoveEvent(event)
+
+    def _scene_pos_from_view_pos(self, view_pos: QPointF | QPoint) -> QPointF:
+        """Map viewport coordinates into scene coordinates with subpixel precision."""
+
+        point = QPointF(view_pos)
+        if math.isclose(point.x(), round(point.x()), abs_tol=1e-6):
+            point.setX(point.x() + 0.5)
+        if math.isclose(point.y(), round(point.y()), abs_tol=1e-6):
+            point.setY(point.y() + 0.5)
+        inverse, invertible = self.viewportTransform().inverted()
+        if not invertible:
+            return QPointF()
+        return inverse.map(point)
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:
         """Finish rubber-band selection and emit ROI signal."""

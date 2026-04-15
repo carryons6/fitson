@@ -103,13 +103,16 @@ class TestSourceTableDock(unittest.TestCase):
             dock.select_source(0)
             self._app.processEvents()
 
-            detail_text = dock.detail_view.toPlainText()
-            self.assertIn("ID: 7", detail_text)
-            self.assertIn("X: 12.5", detail_text)
-            self.assertIn("Y: 34.5", detail_text)
-            self.assertIn("RA: 123.456", detail_text)
-            self.assertIn("SNR: 8.7", detail_text)
-            self.assertIn("NPix: 15", detail_text)
+            rendered = {
+                dock.detail_table.item(row, 0).text(): dock.detail_table.item(row, 1).text()
+                for row in range(dock.detail_table.rowCount())
+            }
+            self.assertEqual(rendered["ID"], "7")
+            self.assertEqual(rendered["X"], "12.5")
+            self.assertEqual(rendered["Y"], "34.5")
+            self.assertEqual(rendered["RA"], "123.456")
+            self.assertEqual(rendered["SNR"], "8.7")
+            self.assertEqual(rendered["NPix"], "15")
         finally:
             dock.deleteLater()
 
@@ -166,6 +169,70 @@ class TestSourceTableDock(unittest.TestCase):
             dock.set_status_note("Results outdated.")
 
             self.assertIn("Results outdated.", dock.summary_label.text())
+        finally:
+            dock.deleteLater()
+
+    def test_inspector_tabs_are_only_visible_when_catalog_exists(self) -> None:
+        dock = SourceTableDock()
+        try:
+            self.assertIs(dock.inspector_tabs.currentWidget(), dock.cutout_panel)
+            self.assertEqual(dock.cutout_view.toolTip(), "")
+            self.assertIn("Double-click", dock.cutout_hint_label.text())
+            self.assertIn("No source selected", dock.cutout_view.text())
+            self.assertIn("#60a5fa", dock.cutout_view.styleSheet())
+            dock.set_view_state(TableViewState(has_catalog=False, row_count=0))
+            self._app.processEvents()
+            self.assertFalse(dock.inspector_tabs.isVisible())
+
+            dock.set_view_state(TableViewState(has_catalog=True, row_count=1))
+            dock.show()
+            self._app.processEvents()
+            self.assertTrue(dock.inspector_tabs.isVisible())
+            self.assertEqual(dock.inspector_tabs.tabText(0), "Details")
+            self.assertEqual(dock.inspector_tabs.tabText(1), "Cutout")
+        finally:
+            dock.close()
+            dock.deleteLater()
+
+    def test_cutout_tab_refreshes_cached_preview_when_activated(self) -> None:
+        dock = SourceTableDock()
+        try:
+            dock.set_view_state(TableViewState(has_catalog=True, row_count=1))
+            dock.show()
+            dock.inspector_tabs.setCurrentIndex(0)
+            self._app.processEvents()
+
+            image = QImage(24, 18, QImage.Format.Format_Grayscale8)
+            image.fill(200)
+            dock.set_cutout_image(image)
+            dock.inspector_tabs.setCurrentIndex(1)
+            self._app.processEvents()
+
+            self.assertIsNotNone(dock.cutout_view.pixmap())
+            self.assertEqual(dock.inspector_tabs.tabText(1), "Cutout")
+        finally:
+            dock.close()
+            dock.deleteLater()
+
+    def test_clear_cutout_image_formats_custom_placeholder_message(self) -> None:
+        dock = SourceTableDock()
+        try:
+            dock.clear_cutout_image("Connected region unavailable.")
+
+            self.assertIn("Connected region unavailable.", dock.cutout_view.text())
+            self.assertIn("#60a5fa", dock.cutout_view.styleSheet())
+        finally:
+            dock.close()
+            dock.deleteLater()
+
+    def test_layout_switches_between_side_and_bottom_dock_modes(self) -> None:
+        dock = SourceTableDock()
+        try:
+            dock.update_layout_for_dock_area(Qt.DockWidgetArea.RightDockWidgetArea)
+            self.assertEqual(dock.content_splitter.orientation(), Qt.Orientation.Vertical)
+
+            dock.update_layout_for_dock_area(Qt.DockWidgetArea.BottomDockWidgetArea)
+            self.assertEqual(dock.content_splitter.orientation(), Qt.Orientation.Horizontal)
         finally:
             dock.deleteLater()
 

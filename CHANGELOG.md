@@ -1,5 +1,30 @@
 # Changelog
 
+## Unreleased
+
+## 1.4.0 - 2026-04-15
+
+### Added
+- Added a resettable, versioned workspace layout with safer screen-geometry restore so saved dock/window state no longer reopens off-screen or with unusable proportions on different displays.
+- Added richer source inspection on the right side of the workspace, including a dedicated `Cutout` tab, a compact field/value details panel, and clearer high-contrast empty states for the cutout preview.
+- Added a custom magnifier cursor plus subpixel coordinate sampling so the magnifier label now reports meaningful two-decimal pixel positions instead of staying pinned to integer values.
+
+### Changed
+- Reworked the default dock arrangement so `Source Table`, `SEP Params`, and `Markers` share the right-side tab stack while `Frame Player` stays below, improving space usage on narrower and 3:2 displays.
+- Changed the source-table inspector to adapt its internal splitter layout by dock area, keeping the table, details, and cutout preview visible without forcing the cutout below the screen edge.
+- Changed canvas empty/loading feedback and cutout placeholder messaging to use high-contrast cards so guidance stays legible over dark imagery and dark-theme panels.
+
+### Fixed
+- Fixed blurry cutout previews after the dock refactor by restoring a sharper scaling path for the preview image.
+- Fixed repeated `QWindowsWindow::setGeometry` restore warnings on Windows by validating saved screen metadata before applying stored window geometry.
+- Fixed low-visibility guidance in the main canvas and cutout preview where onboarding and rendering messages could disappear against dark backgrounds.
+- Fixed packaged Windows builds missing `FileVersion` / `ProductVersion` metadata on `AstroView.exe`.
+- Fixed packaged `AstroView.exe` failing at startup with `Importing the numpy C-extensions failed` by collecting the minimal MKL runtime DLLs (`mkl_rt`, `mkl_core`, `mkl_intel_thread`, `mkl_def`, `mkl_avx2`, `mkl_vml_*`) required by `libcblas.dll` and registering the bundle's `_internal` directories as Windows DLL search paths.
+
+### Validated
+- Verified the updated canvas, source-table, and main-window workflows with `python -m unittest tests.test_canvas tests.test_source_table tests.test_main_window_loading -v` (`97` tests passed).
+- Verified the Windows packaging flow with `.\scripts\build_windows.ps1 -SkipTests`, producing `installer_output\AstroView_Setup_1.4.0.exe`.
+
 ## 1.3.1 - 2026-04-11
 
 ### Added

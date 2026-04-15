@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import html
 import shlex
 from typing import Any, Sequence
 
@@ -9,10 +10,12 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
     QDockWidget,
+    QHeaderView,
     QHBoxLayout,
     QLabel,
     QLineEdit,
-    QPlainTextEdit,
+    QSplitter,
+    QTabWidget,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -27,11 +30,16 @@ class _CutoutPreviewLabel(QLabel):
     """Cutout preview label that can request re-centering on double click."""
 
     double_clicked = Signal()
+    resized = Signal()
 
     def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
             self.double_clicked.emit()
         super().mouseDoubleClickEvent(event)
+
+    def resizeEvent(self, event: Any) -> None:
+        super().resizeEvent(event)
+        self.resized.emit()
 
 
 class _TypedTableWidgetItem(QTableWidgetItem):
@@ -63,6 +71,27 @@ class SourceTableDock(QDockWidget):
     CUTOUT_MODE_BACKGROUND = "Background"
     CUTOUT_MODE_RESIDUAL = "Residual"
     CUTOUT_MODE_CONNECTED_REGION = "Connected Region"
+    CUTOUT_EMPTY_VIEW_STYLE = (
+        "background-color: #0f172a; color: #eff6ff; border: 1px solid #60a5fa; "
+        "border-radius: 8px; padding: 16px; font-size: 13px; font-weight: 600;"
+    )
+    CUTOUT_FILLED_VIEW_STYLE = "background: #101419; border: 1px solid #2e3b4a;"
+    DETAIL_FIELDS = (
+        ("ID", "source_id"),
+        ("X", "x"),
+        ("Y", "y"),
+        ("RA", "ra"),
+        ("Dec", "dec"),
+        ("Flux", "flux"),
+        ("Peak", "peak"),
+        ("SNR", "snr"),
+        ("NPix", "npix"),
+        ("BkgRMS", "background_rms"),
+        ("A", "a"),
+        ("B", "b"),
+        ("Theta", "theta"),
+        ("Flag", "flag"),
+    )
 
     def __init__(self, parent: Any | None = None) -> None:
         super().__init__(parent)
@@ -73,32 +102,61 @@ class SourceTableDock(QDockWidget):
         self.selection_state = TableSelectionState()
         self.view_state = TableViewState()
         self._status_note_text = ""
+        self._cutout_image: QImage | None = None
         self.content_widget = QWidget(self)
         self.layout = QVBoxLayout(self.content_widget)
+        self.content_splitter = QSplitter(Qt.Orientation.Vertical, self.content_widget)
+        self.inspector_tabs = QTabWidget(self.content_splitter)
         self.feedback_label = QLabel("No Sources", self.content_widget)
         self.filter_input = QLineEdit(self.content_widget)
         self.summary_label = QLabel("", self.content_widget)
-        self.table_widget = QTableWidget(self.content_widget)
-        self.detail_label = QLabel("Target Details", self.content_widget)
-        self.detail_view = QPlainTextEdit(self.content_widget)
-        self.cutout_label = QLabel("Cutout Preview", self.content_widget)
-        self.cutout_header_widget = QWidget(self.content_widget)
+        self.table_widget = QTableWidget(self.content_splitter)
+        self.detail_panel = QWidget(self.inspector_tabs)
+        self.detail_layout = QVBoxLayout(self.detail_panel)
+        self.detail_table = QTableWidget(self.detail_panel)
+        self.cutout_panel = QWidget(self.inspector_tabs)
+        self.cutout_layout = QVBoxLayout(self.cutout_panel)
+        self.cutout_header_widget = QWidget(self.cutout_panel)
         self.cutout_header_layout = QHBoxLayout(self.cutout_header_widget)
         self.cutout_mode_label = QLabel("View:", self.cutout_header_widget)
         self.cutout_mode_selector = QComboBox(self.cutout_header_widget)
-        self.cutout_view = _CutoutPreviewLabel(self.content_widget)
+        self.cutout_hint_label = QLabel(self.cutout_panel)
+        self.cutout_view = _CutoutPreviewLabel(self.cutout_panel)
 
         self.setObjectName("source_table_dock")
         self.setWindowTitle("Source Table")
+        self.setMinimumHeight(260)
+        self.layout.setContentsMargins(6, 6, 6, 6)
+        self.layout.setSpacing(6)
         self.filter_input.setPlaceholderText("Filter sources or use field:value")
         self.table_widget.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table_widget.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.table_widget.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table_widget.setAlternatingRowColors(True)
         self.table_widget.setSortingEnabled(True)
-        self.detail_view.setReadOnly(True)
-        self.detail_view.setPlaceholderText("Select a source to inspect its detailed fields.")
-        self.detail_view.setMaximumBlockCount(256)
+        self.table_widget.setMinimumHeight(180)
+        self.table_widget.setMinimumWidth(320)
+        self.detail_layout.setContentsMargins(0, 0, 0, 0)
+        self.detail_layout.setSpacing(6)
+        self.detail_table.setColumnCount(2)
+        self.detail_table.setHorizontalHeaderLabels(["Field", "Value"])
+        self.detail_table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        self.detail_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.detail_table.setAlternatingRowColors(True)
+        self.detail_table.verticalHeader().setVisible(False)
+        self.detail_table.horizontalHeader().setStretchLastSection(True)
+        self.detail_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        self.detail_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.detail_table.setWordWrap(False)
+        self.detail_table.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.detail_table.setMinimumHeight(160)
+        self.cutout_layout.setContentsMargins(0, 0, 0, 0)
+        self.cutout_layout.setSpacing(6)
+        self.inspector_tabs.setDocumentMode(True)
+        self.inspector_tabs.addTab(self.detail_panel, "Details")
+        self.inspector_tabs.addTab(self.cutout_panel, "Cutout")
+        self.inspector_tabs.setTabToolTip(0, "Selected source fields and metrics.")
+        self.inspector_tabs.setTabToolTip(1, "Source cutout preview and view mode.")
         self.cutout_header_layout.setContentsMargins(0, 0, 0, 0)
         self.cutout_header_layout.addWidget(self.cutout_mode_label)
         self.cutout_mode_selector.addItems([
@@ -109,20 +167,29 @@ class SourceTableDock(QDockWidget):
         ])
         self.cutout_header_layout.addWidget(self.cutout_mode_selector)
         self.cutout_header_layout.addStretch(1)
-        self.cutout_view.setMinimumSize(160, 160)
+        self.cutout_hint_label.setWordWrap(True)
+        self.cutout_hint_label.setText("Double-click the cutout to recenter the selected source.")
+        self.cutout_hint_label.setStyleSheet(
+            "background-color: #dbeafe; color: #102a43; border: 1px solid #93c5fd; "
+            "border-radius: 4px; padding: 6px 8px; font-size: 12px;"
+        )
+        self.cutout_view.setMinimumSize(120, 120)
         self.cutout_view.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.cutout_view.setStyleSheet("background: #101419; border: 1px solid #2e3b4a;")
-        self.cutout_view.setText("Select a source\nto preview its cutout.")
-        self.cutout_view.setToolTip("Double-click to re-center the selected source.")
+        self.cutout_view.setWordWrap(True)
+        self.cutout_view.setStyleSheet(self.CUTOUT_EMPTY_VIEW_STYLE)
+        self.cutout_view.setTextFormat(Qt.TextFormat.RichText)
+        self.cutout_view.setText(self._cutout_placeholder_html())
+        self.cutout_view.setToolTip("")
         self.layout.addWidget(self.feedback_label)
         self.layout.addWidget(self.filter_input)
         self.layout.addWidget(self.summary_label)
-        self.layout.addWidget(self.table_widget)
-        self.layout.addWidget(self.detail_label)
-        self.layout.addWidget(self.detail_view)
-        self.layout.addWidget(self.cutout_label)
-        self.layout.addWidget(self.cutout_header_widget)
-        self.layout.addWidget(self.cutout_view)
+        self.layout.addWidget(self.content_splitter, 1)
+        self.detail_layout.addWidget(self.detail_table, 1)
+        self.cutout_layout.addWidget(self.cutout_header_widget)
+        self.cutout_layout.addWidget(self.cutout_hint_label)
+        self.cutout_layout.addWidget(self.cutout_view, 1)
+        self.content_splitter.addWidget(self.table_widget)
+        self.content_splitter.addWidget(self.inspector_tabs)
         self.setWidget(self.content_widget)
         self.configure_columns(self.default_columns())
         self.table_widget.itemSelectionChanged.connect(self._emit_selection_changed)
@@ -135,8 +202,13 @@ class SourceTableDock(QDockWidget):
         self._recenter_shortcut_return.activated.connect(self._reemit_current_selection)
         self._recenter_shortcut_enter.activated.connect(self._reemit_current_selection)
         self.cutout_view.double_clicked.connect(self._reemit_current_selection)
+        self.cutout_view.resized.connect(self._refresh_cutout_pixmap)
+        self.inspector_tabs.currentChanged.connect(self._handle_inspector_tab_changed)
+        self.dockLocationChanged.connect(self.update_layout_for_dock_area)
         self.filter_input.textChanged.connect(self._handle_filter_changed)
         self.cutout_mode_selector.currentTextChanged.connect(self.cutout_mode_changed.emit)
+        self.show_cutout_tab()
+        self.update_layout_for_dock_area(Qt.DockWidgetArea.RightDockWidgetArea)
         self._apply_view_state()
 
     def default_columns(self) -> list[TableColumnSpec]:
@@ -228,7 +300,8 @@ class SourceTableDock(QDockWidget):
         self.table_widget.clearContents()
         self.table_widget.setRowCount(0)
         self.table_widget.clearSelection()
-        self.detail_view.clear()
+        self.detail_table.clearContents()
+        self.detail_table.setRowCount(0)
         self.clear_cutout_image()
         self._apply_view_state()
 
@@ -308,11 +381,7 @@ class SourceTableDock(QDockWidget):
             self.summary_label.setText(summary)
         else:
             self.summary_label.clear()
-        self.detail_label.setVisible(self.view_state.has_catalog)
-        self.detail_view.setVisible(self.view_state.has_catalog)
-        self.cutout_label.setVisible(self.view_state.has_catalog)
-        self.cutout_header_widget.setVisible(self.view_state.has_catalog)
-        self.cutout_view.setVisible(self.view_state.has_catalog)
+        self.inspector_tabs.setVisible(self.view_state.has_catalog)
 
     def _emit_hover_from_item(self, item: QTableWidgetItem) -> None:
         """Emit a hover signal carrying the source index of the entered row."""
@@ -403,6 +472,46 @@ class SourceTableDock(QDockWidget):
             else:
                 self.select_source(self.selection_state.selected_row)
         self._apply_view_state()
+
+    def _handle_inspector_tab_changed(self, _index: int) -> None:
+        """Refresh cutout rendering when its tab becomes visible."""
+
+        if self.inspector_tabs.currentWidget() is self.cutout_panel:
+            self._refresh_cutout_pixmap()
+
+    def show_cutout_tab(self) -> None:
+        """Switch the inspector to the cutout preview tab."""
+
+        self.inspector_tabs.setCurrentWidget(self.cutout_panel)
+
+    def update_layout_for_dock_area(self, area: Qt.DockWidgetArea) -> None:
+        """Adapt the internal splitter to side-vs-bottom docking constraints."""
+
+        side_dock = area in (
+            Qt.DockWidgetArea.LeftDockWidgetArea,
+            Qt.DockWidgetArea.RightDockWidgetArea,
+        )
+        orientation = Qt.Orientation.Vertical if side_dock else Qt.Orientation.Horizontal
+        if self.content_splitter.orientation() != orientation:
+            self.content_splitter.setOrientation(orientation)
+        self.content_splitter.setChildrenCollapsible(False)
+        self.content_splitter.setStretchFactor(0, 5 if side_dock else 4)
+        self.content_splitter.setStretchFactor(1, 3 if side_dock else 2)
+        if side_dock:
+            self.table_widget.setMinimumWidth(320)
+            self.table_widget.setMinimumHeight(180)
+            self.inspector_tabs.setMinimumWidth(0)
+            self.inspector_tabs.setMinimumHeight(240)
+            self.cutout_view.setMinimumSize(140, 140)
+            self.content_splitter.setSizes([560, 320])
+        else:
+            self.table_widget.setMinimumWidth(420)
+            self.table_widget.setMinimumHeight(160)
+            self.inspector_tabs.setMinimumWidth(300)
+            self.inspector_tabs.setMinimumHeight(0)
+            self.cutout_view.setMinimumSize(120, 120)
+            self.content_splitter.setSizes([760, 360])
+        self._refresh_cutout_pixmap()
 
     def _filtered_row_models(self) -> list[TableRowViewModel]:
         """Return the row models matching the current free-text filter."""
@@ -500,31 +609,26 @@ class SourceTableDock(QDockWidget):
             source_index = self.selection_state.selected_row
 
         if self.catalog is None or source_index is None:
-            self.detail_view.setPlainText("")
+            self.detail_table.clearContents()
+            self.detail_table.setRowCount(0)
             return
 
         record = self.catalog.get(source_index)
         if record is None:
-            self.detail_view.setPlainText("")
+            self.detail_table.clearContents()
+            self.detail_table.setRowCount(0)
             return
 
-        lines = [
-            f"ID: {record.source_id}",
-            f"X: {record.x}",
-            f"Y: {record.y}",
-            f"RA: {record.ra}",
-            f"Dec: {record.dec}",
-            f"Flux: {record.flux}",
-            f"Peak: {record.peak}",
-            f"SNR: {record.snr}",
-            f"NPix: {record.npix}",
-            f"BkgRMS: {record.background_rms}",
-            f"A: {record.a}",
-            f"B: {record.b}",
-            f"Theta: {record.theta}",
-            f"Flag: {record.flag}",
-        ]
-        self.detail_view.setPlainText("\n".join(lines))
+        self.detail_table.clearContents()
+        self.detail_table.setRowCount(len(self.DETAIL_FIELDS))
+        for row_index, (label, attr_name) in enumerate(self.DETAIL_FIELDS):
+            label_item = QTableWidgetItem(label)
+            value_item = QTableWidgetItem(str(getattr(record, attr_name)))
+            label_item.setFlags(label_item.flags() & ~Qt.ItemFlag.ItemIsSelectable)
+            value_item.setFlags(value_item.flags() & ~Qt.ItemFlag.ItemIsSelectable)
+            self.detail_table.setItem(row_index, 0, label_item)
+            self.detail_table.setItem(row_index, 1, value_item)
+        self.detail_table.resizeRowsToContents()
 
     def set_cutout_image(self, image: QImage | None) -> None:
         """Show a source-centered cutout preview below the detail fields."""
@@ -533,12 +637,26 @@ class SourceTableDock(QDockWidget):
             self.clear_cutout_image()
             return
 
-        pixmap = QPixmap.fromImage(image)
+        self._cutout_image = image.copy()
+        self._refresh_cutout_pixmap()
+
+    def _refresh_cutout_pixmap(self) -> None:
+        """Rescale the cached cutout to fit the current preview pane."""
+
+        if self._cutout_image is None or self._cutout_image.isNull():
+            return
+
+        preview_size = self.cutout_view.size()
+        if preview_size.width() <= 1 or preview_size.height() <= 1:
+            return
+
+        pixmap = QPixmap.fromImage(self._cutout_image)
         scaled = pixmap.scaled(
-            self.cutout_view.size(),
+            preview_size,
             Qt.AspectRatioMode.KeepAspectRatio,
             Qt.TransformationMode.FastTransformation,
         )
+        self.cutout_view.setStyleSheet(self.CUTOUT_FILLED_VIEW_STYLE)
         self.cutout_view.setPixmap(scaled)
         self.cutout_view.setText("")
 
@@ -550,5 +668,32 @@ class SourceTableDock(QDockWidget):
     def clear_cutout_image(self, message: str | None = None) -> None:
         """Reset the cutout preview to its empty placeholder state."""
 
+        self._cutout_image = None
         self.cutout_view.clear()
-        self.cutout_view.setText(message or "Select a source\nto preview its cutout.")
+        self.cutout_view.setStyleSheet(self.CUTOUT_EMPTY_VIEW_STYLE)
+        self.cutout_view.setText(self._cutout_placeholder_html(message))
+
+    def _cutout_placeholder_html(self, message: str | None = None) -> str:
+        """Return the rich-text placeholder shown when no cutout preview is available."""
+
+        if message is None or not message.strip():
+            title = "No source selected"
+            detail = "Choose a row to preview its cutout."
+        else:
+            title = message.strip()
+            detail = ""
+
+        title_html = html.escape(title)
+        if detail:
+            detail_html = html.escape(detail)
+            return (
+                "<div style='text-align:center;'>"
+                f"<div style='font-size:15px; font-weight:700; margin-bottom:6px;'>{title_html}</div>"
+                f"<div style='font-size:12px; font-weight:500; color:#bfdbfe;'>{detail_html}</div>"
+                "</div>"
+            )
+        return (
+            "<div style='text-align:center;'>"
+            f"<div style='font-size:14px; font-weight:700;'>{title_html}</div>"
+            "</div>"
+        )

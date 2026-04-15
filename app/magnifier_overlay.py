@@ -6,7 +6,7 @@ from PySide6.QtWidgets import QWidget
 
 
 def _make_crosshair_cursor(size: int = 32, color: QColor | None = None) -> QCursor:
-    """Build a bright crosshair cursor that stays visible on dark backgrounds."""
+    """Build a bright magnifier-style cursor that stays visible on dark backgrounds."""
 
     if color is None:
         color = QColor(0, 255, 128)  # lime green
@@ -15,30 +15,33 @@ def _make_crosshair_cursor(size: int = 32, color: QColor | None = None) -> QCurs
     p = QPainter(pm)
     p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
     mid = size // 2
-    gap = 3
-    # Outline for contrast on any background
+    gap = 4
+    ring_radius = max(7, size // 4)
     outline = QPen(QColor(0, 0, 0, 180))
     outline.setWidth(3)
     p.setPen(outline)
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    p.drawEllipse(mid - ring_radius, mid - ring_radius, ring_radius * 2, ring_radius * 2)
+    p.drawLine(mid + ring_radius - 1, mid + ring_radius - 1, size - 4, size - 4)
     for x1, y1, x2, y2 in (
-        (mid, 0, mid, mid - gap),
-        (mid, mid + gap, mid, size - 1),
-        (0, mid, mid - gap, mid),
-        (mid + gap, mid, size - 1, mid),
+        (mid, mid - ring_radius + 2, mid, mid - gap),
+        (mid, mid + gap, mid, mid + ring_radius - 2),
+        (mid - ring_radius + 2, mid, mid - gap, mid),
+        (mid + gap, mid, mid + ring_radius - 2, mid),
     ):
         p.drawLine(x1, y1, x2, y2)
-    # Bright inner line
     inner = QPen(color)
-    inner.setWidth(1)
+    inner.setWidth(2)
     p.setPen(inner)
+    p.drawEllipse(mid - ring_radius, mid - ring_radius, ring_radius * 2, ring_radius * 2)
+    p.drawLine(mid + ring_radius - 1, mid + ring_radius - 1, size - 4, size - 4)
     for x1, y1, x2, y2 in (
-        (mid, 0, mid, mid - gap),
-        (mid, mid + gap, mid, size - 1),
-        (0, mid, mid - gap, mid),
-        (mid + gap, mid, size - 1, mid),
+        (mid, mid - ring_radius + 2, mid, mid - gap),
+        (mid, mid + gap, mid, mid + ring_radius - 2),
+        (mid - ring_radius + 2, mid, mid - gap, mid),
+        (mid + gap, mid, mid + ring_radius - 2, mid),
     ):
         p.drawLine(x1, y1, x2, y2)
-    # Center dot
     p.setPen(Qt.PenStyle.NoPen)
     p.setBrush(color)
     p.drawEllipse(mid - 1, mid - 1, 3, 3)
@@ -153,7 +156,7 @@ class MagnifierOverlay(QWidget):
         font.setPointSize(9)
         font.setBold(True)
         painter.setFont(font)
-        text = f"({int(self._scene_x)}, {int(self._scene_y)})"
+        text = self.coordinate_text()
         text_rect = painter.fontMetrics().boundingRect(text)
 
         label_x = 4
@@ -177,3 +180,8 @@ class MagnifierOverlay(QWidget):
         painter.setPen(border_pen)
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawRoundedRect(self.rect().adjusted(0, 0, -1, -1), 6, 6)
+
+    def coordinate_text(self) -> str:
+        """Return the currently sampled source-image coordinates for the label."""
+
+        return f"({self._scene_x:.2f}, {self._scene_y:.2f})"

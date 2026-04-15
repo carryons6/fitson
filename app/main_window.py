@@ -6,7 +6,7 @@ from typing import Any
 
 import numpy as np
 from PySide6.QtCore import QByteArray, Qt, QThread, QSettings, QTimer, QUrl
-from PySide6.QtGui import QAction, QActionGroup, QDesktopServices, QImage, QKeySequence, QTransform
+from PySide6.QtGui import QAction, QActionGroup, QDesktopServices, QGuiApplication, QImage, QKeySequence, QTransform
 from PySide6.QtWidgets import (
     QComboBox,
     QDockWidget,
@@ -71,6 +71,7 @@ class MainWindow(QMainWindow):
     }
     DEFAULT_PREVIEW_PROFILE = "Balanced"
     SUPPORTED_FITS_SUFFIXES = frozenset({".fits", ".fit", ".fts"})
+    WORKSPACE_LAYOUT_VERSION = 4
 
     def __init__(
         self,
@@ -123,6 +124,7 @@ class MainWindow(QMainWindow):
         self.action_check_updates: QAction | None = None
         self.action_cycle_view_mode: QAction | None = None
         self.action_toggle_magnifier: QAction | None = None
+        self.action_reset_workspace_layout: QAction | None = None
 
         self.fits_service = fits_service or FITSService()
         self.sep_service = sep_service or SEPService()
@@ -257,11 +259,68 @@ class MainWindow(QMainWindow):
 
         self.setObjectName("main_window")
         self._set_window_title()
-        self.resize(1440, 900)
+        self._apply_initial_window_size()
         self.setAcceptDrops(True)
         self.setDockOptions(
             QMainWindow.DockOption.AllowNestedDocks | QMainWindow.DockOption.AllowTabbedDocks
         )
+
+    def _apply_initial_window_size(self) -> None:
+        """Size the window to fit the current screen before any saved geometry is restored."""
+
+        default_width = 1440
+        default_height = 900
+        screen = self.screen() or QGuiApplication.primaryScreen()
+        if screen is None:
+            self.resize(default_width, default_height)
+            return
+
+        available = screen.availableGeometry()
+        width = min(default_width, max(960, available.width() - 80))
+        height = min(default_height, max(720, available.height() - 80))
+        self.resize(min(width, available.width()), min(height, available.height()))
+
+    def _ensure_window_visible_on_screen(self) -> None:
+        """Clamp the restored window geometry so it remains visible on the active screen."""
+
+        screen = self.screen() or QGuiApplication.primaryScreen()
+        if screen is None:
+            return
+
+        available = screen.availableGeometry()
+        width = min(max(self.width(), 960), available.width())
+        height = min(max(self.height(), 720), available.height())
+        if width != self.width() or height != self.height():
+            self.resize(width, height)
+
+        max_x = max(available.left(), available.right() - width + 1)
+        max_y = max(available.top(), available.bottom() - height + 1)
+        clamped_x = min(max(self.x(), available.left()), max_x)
+        clamped_y = min(max(self.y(), available.top()), max_y)
+        if clamped_x != self.x() or clamped_y != self.y():
+            self.move(clamped_x, clamped_y)
+
+    def _can_restore_saved_geometry(self) -> bool:
+        """Return whether the saved geometry is compatible with the current screen."""
+
+        screen = self.screen() or QGuiApplication.primaryScreen()
+        if screen is None:
+            return True
+
+        saved_name = self._settings.value("window/screen_name", "", type=str)
+        saved_width = self._settings.value("window/screen_available_width", 0, type=int)
+        saved_height = self._settings.value("window/screen_available_height", 0, type=int)
+        if not saved_name or saved_width <= 0 or saved_height <= 0:
+            return False
+
+        available = screen.availableGeometry()
+        if saved_name != screen.name():
+            return False
+        if available.width() + 80 < saved_width:
+            return False
+        if available.height() + 80 < saved_height:
+            return False
+        return True
 
     def build_central_canvas(self) -> None:
         """Create the central `ImageCanvas` and register it as the main view."""
@@ -274,48 +333,40 @@ class MainWindow(QMainWindow):
 
         self.source_table_dock = SourceTableDock(self)
         self.source_table_dock.setAllowedAreas(
-            Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea
+            Qt.DockWidgetArea.LeftDockWidgetArea
+            | Qt.DockWidgetArea.RightDockWidgetArea
+            | Qt.DockWidgetArea.BottomDockWidgetArea
         )
+        self.source_table_dock.setMinimumWidth(360)
         self.sep_panel = SEPParamsPanel(self)
         self.sep_panel_dock = QDockWidget("SEP Params", self)
         self.sep_panel_dock.setObjectName("sep_panel_dock")
         self.sep_panel_dock.setWidget(self.sep_panel)
+        self.sep_panel_dock.setMinimumWidth(260)
         self.sep_panel_dock.setAllowedAreas(
-            Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea
+            Qt.DockWidgetArea.LeftDockWidgetArea
+            | Qt.DockWidgetArea.RightDockWidgetArea
         )
-        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.source_table_dock)
-        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.sep_panel_dock)
-        self.splitDockWidget(
-            self.source_table_dock,
-            self.sep_panel_dock,
-            Qt.Orientation.Vertical,
-        )
-        self.source_table_dock.hide()
-        self.sep_panel_dock.hide()
 
         self.marker_dock = MarkerDock(self)
+        self.marker_dock.setMinimumWidth(300)
         self.marker_dock.setAllowedAreas(
-            Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea
+            Qt.DockWidgetArea.LeftDockWidgetArea
+            | Qt.DockWidgetArea.RightDockWidgetArea
         )
-        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.marker_dock)
-        self.marker_dock.hide()
 
         self.histogram_dock = HistogramDock(self)
+        self.histogram_dock.setMinimumWidth(280)
         self.histogram_dock.setAllowedAreas(
             Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea
         )
-        self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.histogram_dock)
-        self.histogram_dock.hide()
 
         self.frame_player_dock = FramePlayerDock(self)
+        self.frame_player_dock.setMinimumHeight(110)
         self.frame_player_dock.setAllowedAreas(
             Qt.DockWidgetArea.TopDockWidgetArea
             | Qt.DockWidgetArea.BottomDockWidgetArea
-            | Qt.DockWidgetArea.LeftDockWidgetArea
-            | Qt.DockWidgetArea.RightDockWidgetArea
         )
-        self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self.frame_player_dock)
-        self.frame_player_dock.hide()
 
         for dock in (
             self.source_table_dock,
@@ -327,6 +378,74 @@ class MainWindow(QMainWindow):
             if dock is not None:
                 self._install_dock_titlebar(dock)
                 self._enable_dock_window_chrome(dock)
+
+        self._apply_default_workspace_layout()
+        self.source_table_dock.hide()
+        self.sep_panel_dock.hide()
+        self.marker_dock.hide()
+        self.histogram_dock.hide()
+        self.frame_player_dock.hide()
+
+    def _dock_widgets(self) -> list[QDockWidget]:
+        """Return all managed dock widgets in a stable order."""
+
+        return [
+            dock
+            for dock in (
+                self.source_table_dock,
+                self.sep_panel_dock,
+                self.marker_dock,
+                self.histogram_dock,
+                self.frame_player_dock,
+            )
+            if dock is not None
+        ]
+
+    def _apply_default_workspace_layout(self, *, persist: bool = False) -> None:
+        """Apply the default dock arrangement used for a clean workspace."""
+
+        dock_visibility = {dock: dock.isVisible() for dock in self._dock_widgets()}
+        for dock in self._dock_widgets():
+            dock.setFloating(False)
+            self.removeDockWidget(dock)
+
+        if self.histogram_dock is not None:
+            self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.histogram_dock)
+        if self.source_table_dock is not None:
+            self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.source_table_dock)
+            self.source_table_dock.show_cutout_tab()
+            self.source_table_dock.update_layout_for_dock_area(Qt.DockWidgetArea.RightDockWidgetArea)
+        if self.sep_panel_dock is not None:
+            self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.sep_panel_dock)
+            if self.source_table_dock is not None:
+                self.tabifyDockWidget(self.source_table_dock, self.sep_panel_dock)
+        if self.marker_dock is not None:
+            self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.marker_dock)
+            if self.source_table_dock is not None:
+                self.tabifyDockWidget(self.source_table_dock, self.marker_dock)
+        if self.frame_player_dock is not None:
+            self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self.frame_player_dock)
+
+        if self.source_table_dock is not None and self.histogram_dock is not None:
+            self.resizeDocks(
+                [self.histogram_dock, self.source_table_dock],
+                [280, 420],
+                Qt.Orientation.Horizontal,
+            )
+        if self.source_table_dock is not None:
+            self.source_table_dock.show_cutout_tab()
+            self.source_table_dock.raise_()
+
+        for dock, visible in dock_visibility.items():
+            dock.setVisible(visible)
+
+        if persist:
+            self._persist_window_state()
+
+    def _reset_workspace_layout(self) -> None:
+        """Restore the managed docks to the default arrangement."""
+
+        self._apply_default_workspace_layout(persist=True)
 
     def _install_dock_titlebar(self, dock: QDockWidget) -> None:
         """Install a custom title bar with a dock/undock toggle button."""
@@ -446,6 +565,9 @@ class MainWindow(QMainWindow):
         self.menu_view.addSeparator()
         self._build_theme_menu(self.menu_view)
         self.menu_view.addSeparator()
+        if self.action_reset_workspace_layout is not None:
+            self.menu_view.addAction(self.action_reset_workspace_layout)
+            self.menu_view.addSeparator()
         if self.source_table_dock is not None:
             self.menu_view.addAction(self.source_table_dock.toggleViewAction())
         if self.sep_panel_dock is not None:
@@ -563,6 +685,7 @@ class MainWindow(QMainWindow):
         self.action_zoom_in.setShortcut(QKeySequence.StandardKey.ZoomIn)
         self.action_zoom_out = QAction("Zoom Out", self)
         self.action_zoom_out.setShortcut(QKeySequence.StandardKey.ZoomOut)
+        self.action_reset_workspace_layout = QAction("Reset Workspace Layout", self)
 
         self.action_cycle_view_mode = QAction("切换视图模式", self)
         self.action_cycle_view_mode.setShortcut("Tab")
@@ -700,6 +823,8 @@ class MainWindow(QMainWindow):
             self.action_zoom_in.triggered.connect(self.canvas.zoom_in)
         if self.action_zoom_out is not None and self.canvas is not None:
             self.action_zoom_out.triggered.connect(self.canvas.zoom_out)
+        if self.action_reset_workspace_layout is not None:
+            self.action_reset_workspace_layout.triggered.connect(self._reset_workspace_layout)
         if self.action_cycle_view_mode is not None:
             self.action_cycle_view_mode.triggered.connect(self._cycle_view_mode)
         if self.action_toggle_magnifier is not None and self.canvas is not None:
@@ -839,12 +964,24 @@ class MainWindow(QMainWindow):
             )
 
         geometry = self._settings.value("window/geometry", QByteArray(), type=QByteArray)
-        if geometry:
+        if geometry and self._can_restore_saved_geometry():
             self.restoreGeometry(geometry)
+        else:
+            self._apply_initial_window_size()
+        self._ensure_window_visible_on_screen()
 
         state = self._settings.value("window/state", QByteArray(), type=QByteArray)
-        if state:
-            self.restoreState(state)
+        layout_version = self._settings.value("window/layout_version", 0, type=int)
+        restored_state = False
+        if state and layout_version == self.WORKSPACE_LAYOUT_VERSION:
+            restored_state = bool(self.restoreState(state))
+        if not restored_state:
+            self._apply_default_workspace_layout()
+        if self.source_table_dock is not None:
+            self.source_table_dock.update_layout_for_dock_area(
+                self.dockWidgetArea(self.source_table_dock)
+            )
+        self._ensure_window_visible_on_screen()
 
         self._refresh_recent_files_menu()
         self.sync_render_controls()
@@ -910,6 +1047,13 @@ class MainWindow(QMainWindow):
 
         self._settings.setValue("window/geometry", self.saveGeometry())
         self._settings.setValue("window/state", self.saveState())
+        self._settings.setValue("window/layout_version", self.WORKSPACE_LAYOUT_VERSION)
+        screen = self.screen() or QGuiApplication.primaryScreen()
+        if screen is not None:
+            available = screen.availableGeometry()
+            self._settings.setValue("window/screen_name", screen.name())
+            self._settings.setValue("window/screen_available_width", available.width())
+            self._settings.setValue("window/screen_available_height", available.height())
         self._persist_session_state()
 
     def _persist_catalog_preferences(self, *_args: Any) -> None:
@@ -2321,6 +2465,8 @@ class MainWindow(QMainWindow):
 
         if self.source_table_dock is not None:
             self.source_table_dock.show()
+            self.source_table_dock.show_cutout_tab()
+            self.source_table_dock.raise_()
         if self.sep_panel_dock is not None:
             self.sep_panel_dock.show()
 
@@ -2498,6 +2644,8 @@ class MainWindow(QMainWindow):
             self.source_table_dock.show()
             self.source_table_dock.set_row_view_models([])
             self.source_table_dock.set_view_state(self.build_table_view_state())
+            self.source_table_dock.show_cutout_tab()
+            self.source_table_dock.raise_()
         if self.sep_panel_dock is not None:
             self.sep_panel_dock.show()
         if self.canvas is not None:

@@ -115,6 +115,30 @@ function Assert-BundledVersion {
     }
 }
 
+function Assert-BundledExeVersionInfo {
+    param([string]$RepoRoot)
+
+    $sourceVersionPath = Join-Path $RepoRoot "VERSION"
+    $bundledExePath = Join-Path $RepoRoot "dist\AstroView\AstroView.exe"
+
+    if (-not (Test-Path -LiteralPath $bundledExePath)) {
+        throw "Bundled executable was not produced at '$bundledExePath'."
+    }
+
+    $sourceVersion = (Get-Content -LiteralPath $sourceVersionPath | Select-Object -First 1).Trim()
+    $exeVersionInfo = (Get-Item -LiteralPath $bundledExePath).VersionInfo
+    $productVersion = ($exeVersionInfo.ProductVersion | Select-Object -First 1)
+    $fileVersion = ($exeVersionInfo.FileVersion | Select-Object -First 1)
+
+    if (-not $productVersion -or -not $fileVersion) {
+        throw "Bundled executable is missing ProductVersion/FileVersion metadata."
+    }
+
+    if ($productVersion -ne $sourceVersion -or $fileVersion -ne $sourceVersion) {
+        throw "Bundled executable version info ('$productVersion' / '$fileVersion') does not match source version '$sourceVersion'."
+    }
+}
+
 $buildPython = Resolve-BuildPython -RepoRoot $repoRoot
 if (-not $buildPython) {
     throw "Could not locate a usable python.exe for the build."
@@ -135,6 +159,7 @@ try {
     }
 
     Assert-BundledVersion -RepoRoot $repoRoot
+    Assert-BundledExeVersionInfo -RepoRoot $repoRoot
 
     if (-not $SkipInstaller) {
         $iscc = Resolve-IsccPath

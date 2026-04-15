@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, Mock, patch
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import numpy as np
-from PySide6.QtCore import QByteArray
+from PySide6.QtCore import QByteArray, Qt
 from PySide6.QtGui import QColor, QImage
 from PySide6.QtWidgets import QApplication, QMessageBox
 
@@ -264,20 +264,129 @@ class TestMainWindowLoading(unittest.TestCase):
                 "markers/color": "#00ff00",
                 "window/geometry": geometry,
                 "window/state": state,
+                "window/layout_version": MainWindow.WORKSPACE_LAYOUT_VERSION,
             }
             return values.get(key, default)
 
         window._settings.value.side_effect = value_side_effect
         try:
-            with patch.object(window, "restoreGeometry") as restore_geometry_mock:
-                with patch.object(window, "restoreState") as restore_state_mock:
-                    window._restore_workspace_state()
+            with patch.object(window, "_can_restore_saved_geometry", return_value=True):
+                with patch.object(window, "restoreGeometry") as restore_geometry_mock:
+                    with patch.object(window, "restoreState") as restore_state_mock:
+                        window._restore_workspace_state()
 
             self.assertEqual(window.marker_dock.radius(), 42.0)
             self.assertEqual(window.marker_dock.line_width(), 7)
             self.assertEqual(window.marker_dock.color().name(), "#00ff00")
             restore_geometry_mock.assert_called_once_with(geometry)
             restore_state_mock.assert_called_once_with(state)
+        finally:
+            window.deleteLater()
+
+    def test_restore_workspace_state_uses_default_layout_when_saved_version_is_stale(self) -> None:
+        window = MainWindow()
+        window.create_actions()
+        window.build_ui()
+        window._settings = Mock()
+
+        geometry = QByteArray(b"geometry")
+        state = QByteArray(b"state")
+
+        def value_side_effect(key, default=None, type=None):
+            values = {
+                "window/geometry": geometry,
+                "window/state": state,
+                "window/layout_version": MainWindow.WORKSPACE_LAYOUT_VERSION - 1,
+            }
+            return values.get(key, default)
+
+        window._settings.value.side_effect = value_side_effect
+        try:
+            with patch.object(window, "_can_restore_saved_geometry", return_value=True):
+                with patch.object(window, "restoreGeometry") as restore_geometry_mock:
+                    with patch.object(window, "restoreState") as restore_state_mock:
+                        with patch.object(window, "_apply_default_workspace_layout") as default_layout_mock:
+                            window._restore_workspace_state()
+
+            restore_geometry_mock.assert_called_once_with(geometry)
+            restore_state_mock.assert_not_called()
+            default_layout_mock.assert_called_once_with()
+        finally:
+            window.deleteLater()
+
+    def test_build_ui_tabs_source_table_sep_and_markers_on_right(self) -> None:
+        window = MainWindow()
+        window.create_actions()
+        try:
+            window.build_ui()
+            window.show()
+            window.source_table_dock.show()
+            window.sep_panel_dock.show()
+            window.frame_player_dock.show()
+            window.marker_dock.show()
+            window.source_table_dock.raise_()
+            self._app.processEvents()
+
+            self.assertEqual(
+                window.dockWidgetArea(window.source_table_dock),
+                Qt.DockWidgetArea.RightDockWidgetArea,
+            )
+            self.assertEqual(
+                window.dockWidgetArea(window.frame_player_dock),
+                Qt.DockWidgetArea.BottomDockWidgetArea,
+            )
+            self.assertEqual(
+                window.dockWidgetArea(window.sep_panel_dock),
+                Qt.DockWidgetArea.RightDockWidgetArea,
+            )
+            self.assertEqual(
+                window.dockWidgetArea(window.marker_dock),
+                Qt.DockWidgetArea.RightDockWidgetArea,
+            )
+            self.assertEqual(
+                window.dockWidgetArea(window.histogram_dock),
+                Qt.DockWidgetArea.LeftDockWidgetArea,
+            )
+            self.assertIn(window.sep_panel_dock, window.tabifiedDockWidgets(window.source_table_dock))
+            self.assertIn(window.marker_dock, window.tabifiedDockWidgets(window.source_table_dock))
+            self.assertEqual(len(window.tabifiedDockWidgets(window.frame_player_dock)), 0)
+            self.assertEqual(
+                window.source_table_dock.content_splitter.orientation(),
+                Qt.Orientation.Vertical,
+            )
+            self.assertIs(
+                window.source_table_dock.inspector_tabs.currentWidget(),
+                window.source_table_dock.cutout_panel,
+            )
+        finally:
+            window.close()
+            window.deleteLater()
+
+    def test_restore_workspace_state_skips_geometry_when_screen_metadata_is_missing(self) -> None:
+        window = MainWindow()
+        window.create_actions()
+        window.build_ui()
+        window._settings = Mock()
+
+        geometry = QByteArray(b"geometry")
+
+        def value_side_effect(key, default=None, type=None):
+            values = {
+                "window/geometry": geometry,
+                "window/state": QByteArray(),
+                "window/layout_version": MainWindow.WORKSPACE_LAYOUT_VERSION,
+                "window/screen_name": "",
+                "window/screen_available_width": 0,
+                "window/screen_available_height": 0,
+            }
+            return values.get(key, default)
+
+        window._settings.value.side_effect = value_side_effect
+        try:
+            with patch.object(window, "restoreGeometry") as restore_geometry_mock:
+                window._restore_workspace_state()
+
+            restore_geometry_mock.assert_not_called()
         finally:
             window.deleteLater()
 
@@ -453,6 +562,11 @@ class TestMainWindowLoading(unittest.TestCase):
             cancel_renders_mock.assert_called_once_with(wait=True)
             self._assert_settings_write(window._settings, "window/geometry", QByteArray(b"g"))
             self._assert_settings_write(window._settings, "window/state", QByteArray(b"s"))
+            self._assert_settings_write(
+                window._settings,
+                "window/layout_version",
+                MainWindow.WORKSPACE_LAYOUT_VERSION,
+            )
             super_close_mock.assert_called_once_with(event)
         finally:
             window.deleteLater()

@@ -5,7 +5,7 @@ import unittest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QPoint, Qt
+from PySide6.QtCore import QPoint, QPointF, Qt
 from PySide6.QtGui import QImage
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
@@ -19,6 +19,7 @@ if str(REPO_PARENT) not in sys.path:
 
 from astroview.app.canvas import ImageCanvas
 from astroview.app.contracts import ViewFeedbackState
+from astroview.app.magnifier_overlay import MagnifierOverlay
 from astroview.core.contracts import ZoomState
 from astroview.core.source_catalog import SourceCatalog, SourceRecord
 
@@ -125,6 +126,8 @@ class TestImageCanvas(unittest.TestCase):
     def test_feedback_state_renders_title_and_detail_text(self) -> None:
         canvas = ImageCanvas()
         try:
+            canvas.resize(400, 300)
+            canvas.show()
             canvas.set_feedback_state(
                 ViewFeedbackState(
                     status="empty",
@@ -133,10 +136,86 @@ class TestImageCanvas(unittest.TestCase):
                     visible=True,
                 )
             )
+            self._app.processEvents()
 
             text = canvas._feedback_item.toPlainText()
             self.assertIn("No Image Loaded", text)
             self.assertIn("Drop FITS files here", text)
+            self.assertTrue(canvas._feedback_background_item.isVisible())
+            self.assertGreater(canvas._feedback_background_item.brush().color().alpha(), 0)
+            self.assertGreater(canvas._feedback_item.defaultTextColor().lightness(), 180)
+        finally:
+            canvas.close()
+            canvas.deleteLater()
+
+    def test_loading_feedback_uses_high_contrast_text(self) -> None:
+        canvas = ImageCanvas()
+        try:
+            canvas.resize(400, 300)
+            canvas.show()
+            canvas.set_feedback_state(
+                ViewFeedbackState(
+                    status="loading",
+                    title="Rendering Preview",
+                    detail="Preparing the first visible render for this frame.",
+                    visible=True,
+                )
+            )
+            self._app.processEvents()
+
+            self.assertTrue(canvas._feedback_background_item.isVisible())
+            self.assertGreater(canvas._feedback_item.defaultTextColor().lightness(), 180)
+            self.assertGreater(canvas._feedback_background_item.brush().color().alpha(), 0)
+        finally:
+            canvas.close()
+            canvas.deleteLater()
+
+    def test_set_magnifier_visible_switches_to_custom_cursor(self) -> None:
+        canvas = ImageCanvas()
+        try:
+            canvas.set_magnifier_visible(True)
+            self.assertNotEqual(canvas.viewport().cursor().shape(), Qt.CursorShape.ArrowCursor)
+
+            canvas.set_magnifier_visible(False)
+            self.assertEqual(canvas.viewport().cursor().shape(), Qt.CursorShape.ArrowCursor)
+        finally:
+            canvas.close()
+            canvas.deleteLater()
+
+    def test_magnifier_overlay_formats_coordinates_with_two_decimals(self) -> None:
+        overlay = MagnifierOverlay()
+        try:
+            overlay._scene_x = 123.456
+            overlay._scene_y = 78.9
+            self.assertEqual(overlay.coordinate_text(), "(123.46, 78.90)")
+        finally:
+            overlay.deleteLater()
+
+    def test_scene_pos_from_view_pos_preserves_fractional_precision(self) -> None:
+        canvas = ImageCanvas()
+        try:
+            canvas.resetTransform()
+            canvas.scale(2.0, 2.0)
+            inverse, invertible = canvas.viewportTransform().inverted()
+            self.assertTrue(invertible)
+            scene_pos = canvas._scene_pos_from_view_pos(QPointF(11.5, 7.25))
+            expected = inverse.map(QPointF(11.5, 7.25))
+            self.assertAlmostEqual(scene_pos.x(), expected.x(), places=2)
+            self.assertAlmostEqual(scene_pos.y(), expected.y(), places=2)
+        finally:
+            canvas.close()
+            canvas.deleteLater()
+
+    def test_scene_pos_from_integer_view_pos_uses_pixel_center(self) -> None:
+        canvas = ImageCanvas()
+        try:
+            canvas.resetTransform()
+            inverse, invertible = canvas.viewportTransform().inverted()
+            self.assertTrue(invertible)
+            scene_pos = canvas._scene_pos_from_view_pos(QPoint(11, 7))
+            expected = inverse.map(QPointF(11.5, 7.5))
+            self.assertAlmostEqual(scene_pos.x(), expected.x(), places=2)
+            self.assertAlmostEqual(scene_pos.y(), expected.y(), places=2)
         finally:
             canvas.close()
             canvas.deleteLater()

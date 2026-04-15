@@ -6,6 +6,7 @@ import PyInstaller.building.build_main as build_main
 import numpy
 import PySide6
 import shiboken6
+from PyInstaller.utils.win32 import versioninfo
 
 
 spec_dir = Path(SPECPATH).resolve()
@@ -55,6 +56,21 @@ def _append_binary_glob_if_exists(source_dir: Path, pattern: str, dest: str = ".
 
 
 _append_binary_if_exists(python_dlls_dir, "_ssl.pyd")
+
+# NumPy in conda depends on libcblas.dll which forwards all exports to MKL.
+# Collect libcblas and the minimal MKL runtime set that numpy actually loads.
+for dll_name in [
+    "libcblas.dll",
+    "mkl_rt.2.dll",
+    "mkl_core.2.dll",
+    "mkl_intel_thread.2.dll",
+    "mkl_def.2.dll",
+    "mkl_avx2.2.dll",
+    "mkl_vml_avx2.2.dll",
+    "mkl_vml_def.2.dll",
+    "mkl_vml_cmpt.2.dll",
+]:
+    _append_binary_if_exists(qt_bin, dll_name)
 
 
 # PySide6 / Shiboken runtime DLLs. Prefer package-local DLLs because the exact
@@ -138,6 +154,52 @@ if runtime_icon.is_file():
 version_file = spec_dir / "VERSION"
 if version_file.is_file():
     datas.append((str(version_file), "astroview"))
+app_version = version_file.read_text(encoding="utf-8").strip() if version_file.is_file() else "0.0.0"
+
+
+def _parse_windows_version(version_text: str) -> tuple[int, int, int, int]:
+    parts = [int(part) for part in version_text.split(".") if part.strip()]
+    while len(parts) < 4:
+        parts.append(0)
+    return tuple(parts[:4])
+
+
+def _build_windows_version_info(version_text: str) -> versioninfo.VSVersionInfo:
+    version_tuple = _parse_windows_version(version_text)
+    return versioninfo.VSVersionInfo(
+        ffi=versioninfo.FixedFileInfo(
+            filevers=version_tuple,
+            prodvers=version_tuple,
+            mask=0x3F,
+            flags=0x0,
+            OS=0x40004,
+            fileType=0x1,
+            subtype=0x0,
+            date=(0, 0),
+        ),
+        kids=[
+            versioninfo.StringFileInfo(
+                [
+                    versioninfo.StringTable(
+                        "040904B0",
+                        [
+                            versioninfo.StringStruct("CompanyName", "Fitson"),
+                            versioninfo.StringStruct("FileDescription", "AstroView"),
+                            versioninfo.StringStruct("FileVersion", version_text),
+                            versioninfo.StringStruct("InternalName", "AstroView.exe"),
+                            versioninfo.StringStruct("OriginalFilename", "AstroView.exe"),
+                            versioninfo.StringStruct("ProductName", "AstroView"),
+                            versioninfo.StringStruct("ProductVersion", version_text),
+                        ],
+                    )
+                ]
+            ),
+            versioninfo.VarFileInfo([versioninfo.VarStruct("Translation", [1033, 1200])]),
+        ],
+    )
+
+
+windows_version_info = _build_windows_version_info(app_version)
 
 hiddenimports = [
     "sep",
@@ -156,7 +218,7 @@ a = Analysis(
     hiddenimports=hiddenimports,
     hookspath=hookspath,
     hooksconfig={},
-    runtime_hooks=[],
+    runtime_hooks=[str(spec_dir / "rthooks" / "pyi_rth_dll_search_paths.py")],
     excludes=[
         "PyQt6",
         "IPython",
@@ -200,10 +262,14 @@ a = Analysis(
 # ---------------------------------------------------------------------------
 import re
 
-# MKL is not needed — numpy uses OpenBLAS in this environment.
-# Strip ALL MKL DLLs unconditionally (saves ~130 MB).
+# Keep only the MKL DLLs that numpy actually loads at runtime; strip the rest.
+_mkl_keep = {
+    "mkl_rt.2.dll", "mkl_core.2.dll", "mkl_intel_thread.2.dll",
+    "mkl_def.2.dll", "mkl_avx2.2.dll",
+    "mkl_vml_avx2.2.dll", "mkl_vml_def.2.dll", "mkl_vml_cmpt.2.dll",
+}
 _strip_patterns = [
-    re.compile(r"^mkl_", re.I),
+    re.compile(r"^mkl_", re.I),  # caught first, but _should_strip checks _mkl_keep
     re.compile(r"^icudt\.dll$", re.I),
     # Duplicate unversioned ICU DLLs (keep only versioned icuXX78.dll variants)
     re.compile(r"^icu(in|uc)\.dll$", re.I),
@@ -271,6 +337,8 @@ _strip_exact_data = {
 
 def _should_strip(name):
     basename = Path(name).name.lower()
+    if basename in _mkl_keep:
+        return False
     if basename in _strip_exact_binaries:
         return True
     for pat in _strip_patterns:
@@ -323,6 +391,7 @@ exe = EXE(
     disable_windowed_traceback=False,
     argv_emulation=False,
     icon=[str(spec_dir / "resources" / "icons" / "main_icon.ico")],
+    version=windows_version_info,
 )
 
 coll = COLLECT(
