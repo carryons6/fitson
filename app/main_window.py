@@ -1681,12 +1681,24 @@ class MainWindow(QMainWindow):
         self._pump_playback_render_queue()
 
     def _on_playback_stopped(self) -> None:
-        """Trigger a full render for the current frame when playback stops."""
+        """Restore full UI state and trigger a full render when playback stops."""
         self._playback_render_queue.clear()
         self._playback_bg_render_ids.clear()
         idx = self._current_frame_index
         if 0 <= idx < len(self._frame_dirty) and self._frame_dirty[idx]:
             self._schedule_frame_render(idx)
+
+        # Refresh panels that were skipped during playback.
+        self.sync_render_controls()
+        if self.canvas is not None:
+            self.canvas.set_image_state(self.build_canvas_image_state())
+            self.canvas.set_overlay_state(self.build_canvas_overlay_state())
+        self.sync_sep_panel_state()
+        if self.source_table_dock is not None:
+            self.source_table_dock.set_row_view_models([])
+            self.source_table_dock.set_view_state(self.build_table_view_state())
+        self._refresh_histogram_view()
+        self._persist_session_state()
 
     def _build_playback_render_queue(self) -> None:
         """Build ordered queue of dirty frames to render during playback.
@@ -3225,7 +3237,9 @@ class MainWindow(QMainWindow):
         if index < 0 or index >= len(self._frames):
             return
 
-        self._cancel_active_sep_extract(wait=True)
+        playing = self._is_playback_active()
+
+        self._cancel_active_sep_extract(wait=not playing)
         self._current_frame_index = index
         data = self._frames[index]
         self.fits_service.current_data = data
@@ -3249,6 +3263,16 @@ class MainWindow(QMainWindow):
             else:
                 self.canvas.set_source_position_transform(None)
         self._show_current_frame_image()
+
+        if playing:
+            # During playback only update the frame counter and trigger rendering;
+            # skip expensive histogram, session persistence, SEP panel, and source
+            # table refreshes to keep the UI responsive.
+            if self.app_status_bar is not None:
+                self.app_status_bar.set_frame_info(index, len(self._frames))
+            self._ensure_frame_rendered(index)
+            return
+
         self.sync_render_controls()
 
         if self.canvas is not None:
