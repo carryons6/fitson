@@ -66,7 +66,9 @@ class TestMarkerDock(unittest.TestCase):
 
             dock._on_apply()
 
-            self.assertEqual(updated, [[("pixel", 10.0, 20.0)]])
+            self.assertEqual(len(updated), 1)
+            self.assertEqual(len(updated[0]), 1)
+            self.assertEqual(tuple(updated[0][0]), ("pixel", 10.0, 20.0))
             self.assertIn("Skipped 2 invalid line(s)", dock.status_label.text())
             self.assertIn("Line 2", dock.status_label.text())
         finally:
