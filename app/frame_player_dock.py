@@ -215,6 +215,12 @@ class FramePlayerDock(QDockWidget):
         """Return whether playback is currently active."""
         return self._playing
 
+    def stop_playback(self) -> None:
+        """Stop playback if it is currently active."""
+
+        if self._playing:
+            self._stop_playback()
+
     def _stop_playback(self) -> None:
         self._playing = False
         self._timer.stop()

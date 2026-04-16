@@ -32,18 +32,21 @@ class MarkerDock(QDockWidget):
     markers_updated = Signal(list)  # list[MarkerSpec]
     color_changed = Signal(QColor)
     line_width_changed = Signal(int)
+    source_color_changed = Signal(QColor)
+    source_line_width_changed = Signal(int)
 
     def __init__(self, parent: Any | None = None) -> None:
         super().__init__("Markers", parent)
         self.setObjectName("marker_dock")
 
         self._color = QColor(255, 0, 0)
+        self._source_color = QColor(255, 0, 0)
 
         content = QWidget(self)
         layout = QVBoxLayout(content)
 
-        # --- Parameters ---
-        param_group = QGroupBox("Parameters", content)
+        # --- Imported-marker parameters ---
+        param_group = QGroupBox("Imported Markers", content)
         param_form = QFormLayout(param_group)
 
         self.radius_spin = QDoubleSpinBox(param_group)
@@ -73,6 +76,31 @@ class MarkerDock(QDockWidget):
         param_form.addRow("Color:", color_row)
 
         layout.addWidget(param_group)
+
+        # --- ROI / detected source parameters ---
+        source_group = QGroupBox("Detected Sources (ROI)", content)
+        source_form = QFormLayout(source_group)
+
+        self.source_line_width_spin = QSpinBox(source_group)
+        self.source_line_width_spin.setRange(1, 25)
+        self.source_line_width_spin.setValue(5)
+        self.source_line_width_spin.valueChanged.connect(self.source_line_width_changed.emit)
+        source_form.addRow("Line width:", self.source_line_width_spin)
+
+        source_color_row = QWidget(source_group)
+        source_color_layout = QHBoxLayout(source_color_row)
+        source_color_layout.setContentsMargins(0, 0, 0, 0)
+        self.source_color_preview = QLabel(source_color_row)
+        self.source_color_preview.setFixedSize(24, 24)
+        self._update_source_color_preview()
+        source_color_btn = QPushButton("Choose...", source_color_row)
+        source_color_btn.clicked.connect(self._pick_source_color)
+        source_color_layout.addWidget(self.source_color_preview)
+        source_color_layout.addWidget(source_color_btn)
+        source_color_layout.addStretch()
+        source_form.addRow("Color:", source_color_row)
+
+        layout.addWidget(source_group)
 
         # --- Single coordinate add ---
         add_group = QGroupBox("Add Coordinate", content)
@@ -160,6 +188,19 @@ class MarkerDock(QDockWidget):
 
     def set_line_width(self, line_width: int) -> None:
         self.line_width_spin.setValue(line_width)
+
+    def source_color(self) -> QColor:
+        return QColor(self._source_color)
+
+    def set_source_color(self, color: QColor | str) -> None:
+        self._source_color = QColor(color)
+        self._update_source_color_preview()
+
+    def source_line_width(self) -> int:
+        return self.source_line_width_spin.value()
+
+    def set_source_line_width(self, line_width: int) -> None:
+        self.source_line_width_spin.setValue(line_width)
 
     def parse_coordinates(self) -> list[tuple[str, float, float]]:
         """Parse text input into (type, v1, v2) tuples.
@@ -253,7 +294,19 @@ class MarkerDock(QDockWidget):
             self._update_color_preview()
             self.color_changed.emit(self.color())
 
+    def _pick_source_color(self) -> None:
+        color = QColorDialog.getColor(self._source_color, self, "Source Overlay Color")
+        if color.isValid():
+            self._source_color = color
+            self._update_source_color_preview()
+            self.source_color_changed.emit(self.source_color())
+
     def _update_color_preview(self) -> None:
         self.color_preview.setStyleSheet(
             f"background-color: {self._color.name()}; border: 1px solid gray;"
+        )
+
+    def _update_source_color_preview(self) -> None:
+        self.source_color_preview.setStyleSheet(
+            f"background-color: {self._source_color.name()}; border: 1px solid gray;"
         )

@@ -162,8 +162,21 @@ class FITSService:
 
         return float(np.nanmin(finite)), float(np.nanmax(finite))
 
-    def histogram(self, data: FITSData | None = None, *, bins: int = 256) -> tuple[np.ndarray, float, float]:
-        """Return histogram counts and numeric range for the current image."""
+    def histogram(
+        self,
+        data: FITSData | None = None,
+        *,
+        bins: int = 256,
+        limits: tuple[float, float] | None = None,
+    ) -> tuple[np.ndarray, float, float]:
+        """Return histogram counts and numeric range for the current image.
+
+        When ``limits`` is provided, only finite pixel values within the
+        inclusive ``[low, high]`` interval contribute to the histogram, and
+        the returned range reflects those limits rather than the raw data
+        extent. This is used to restrict the histogram view to the span of
+        the active interval (e.g. ZScale or a manual range).
+        """
 
         target = self.current_data if data is None else data
         if target is None or target.data is None:
@@ -172,6 +185,17 @@ class FITSService:
         finite = _finite_sample(target.data)
         if finite.size == 0:
             return np.zeros(bins, dtype=np.int64), 0.0, 0.0
+
+        if limits is not None:
+            low, high = float(limits[0]), float(limits[1])
+            if high < low:
+                low, high = high, low
+            finite = finite[(finite >= low) & (finite <= high)]
+            if finite.size == 0 or high <= low:
+                counts = np.zeros(bins, dtype=np.int64)
+                return counts, low, high
+            counts, _edges = np.histogram(finite, bins=bins, range=(low, high))
+            return counts.astype(np.int64, copy=False), low, high
 
         min_value = float(np.nanmin(finite))
         max_value = float(np.nanmax(finite))
@@ -182,6 +206,27 @@ class FITSService:
 
         counts, _edges = np.histogram(finite, bins=bins, range=(min_value, max_value))
         return counts.astype(np.int64, copy=False), min_value, max_value
+
+    def current_interval_limits(self, data: FITSData | None = None) -> tuple[float, float] | None:
+        """Return the effective ``[vmin, vmax]`` for the active interval on the given data."""
+
+        target = self.current_data if data is None else data
+        if target is None or target.data is None:
+            return None
+
+        interval = _build_interval(
+            self.current_interval,
+            manual_vmin=None if self.manual_interval_limits is None else self.manual_interval_limits[0],
+            manual_vmax=None if self.manual_interval_limits is None else self.manual_interval_limits[1],
+        )
+        sample = target.data if self.current_interval == "Original" else _subsample(target.data)
+        try:
+            vmin, vmax = interval.get_limits(sample)
+        except Exception:
+            return None
+        if not np.isfinite(vmin) or not np.isfinite(vmax):
+            return None
+        return float(vmin), float(vmax)
 
     def header_text(self) -> str:
         """Return the active header as plain text.

@@ -39,6 +39,22 @@ class TestFramePlayerDock(unittest.TestCase):
         finally:
             dock.deleteLater()
 
+    def test_stop_playback_stops_active_playback_and_updates_button(self) -> None:
+        dock = FramePlayerDock()
+        stopped: list[bool] = []
+        dock.playback_stopped.connect(lambda: stopped.append(True))
+        try:
+            dock.set_frame_count(3)
+            dock._start_playback()
+
+            dock.stop_playback()
+
+            self.assertFalse(dock.is_playing())
+            self.assertEqual(dock.play_btn.text(), "Play")
+            self.assertEqual(stopped, [True])
+        finally:
+            dock.deleteLater()
+
     def test_set_render_state_updates_info_label_for_preview_and_full_render(self) -> None:
         dock = FramePlayerDock()
         try:

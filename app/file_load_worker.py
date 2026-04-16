@@ -19,6 +19,7 @@ class FITSLoadWorker(QObject):
         paths: list[str],
         hdu_index: int | None = None,
         *,
+        source_group_start: int = 0,
         preview_first_frame: bool = False,
         preview_each_frame: bool = False,
         stretch_name: str = "Linear",
@@ -29,6 +30,7 @@ class FITSLoadWorker(QObject):
         super().__init__()
         self.paths = list(paths)
         self.hdu_index = hdu_index
+        self.source_group_start = int(source_group_start)
         self.preview_first_frame = preview_first_frame
         self.preview_each_frame = preview_each_frame
         self.stretch_name = stretch_name
@@ -46,18 +48,27 @@ class FITSLoadWorker(QObject):
             if thread.isInterruptionRequested():
                 break
             try:
-                data = FITSData.load(path, self.hdu_index)
+                frames = FITSData.load_frames(
+                    path,
+                    self.hdu_index,
+                    source_group_id=self.source_group_start + index - 1,
+                )
             except Exception as exc:
                 self.file_error.emit(path, str(exc))
             else:
-                preview_image_u8 = None
-                if self.preview_each_frame:
-                    preview_image_u8 = self._render_preview(data)
-                elif preview_pending:
-                    preview_pending = False
-                    preview_image_u8 = self._render_preview(data)
-                self.file_loaded.emit(data, preview_image_u8)
+                for data in frames:
+                    preview_image_u8 = None
+                    if self.preview_each_frame:
+                        preview_image_u8 = self._render_preview(data)
+                    elif preview_pending:
+                        preview_pending = False
+                        preview_image_u8 = self._render_preview(data)
+                    self.file_loaded.emit(data, preview_image_u8)
+                    if thread.isInterruptionRequested():
+                        break
             self.progress.emit(index, total, path)
+            if thread.isInterruptionRequested():
+                break
 
         self.finished.emit()
 

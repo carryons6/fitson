@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 import logging
 from pathlib import Path
 from typing import Any
 
 import numpy as np
-from PySide6.QtCore import QByteArray, Qt, QThread, QSettings, QTimer, QUrl
-from PySide6.QtGui import QAction, QActionGroup, QDesktopServices, QGuiApplication, QImage, QKeySequence, QTransform
+from PySide6.QtCore import QByteArray, QMarginsF, QSizeF, Qt, QThread, QSettings, QTimer, QUrl
+from PySide6.QtGui import QAction, QActionGroup, QDesktopServices, QGuiApplication, QImage, QKeySequence, QPainter, QTransform
 from PySide6.QtWidgets import (
     QComboBox,
     QDockWidget,
@@ -53,6 +54,19 @@ from .update_check_worker import UpdateCheckResult, UpdateCheckWorker
 
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(slots=True)
+class _FrameCompositePlacement:
+    """Display-space placement for one frame inside a composite image."""
+
+    index: int
+    x: int
+    y: int
+    display_width: int
+    display_height: int
+    original_width: int
+    original_height: int
 
 
 class MainWindow(QMainWindow):
@@ -109,6 +123,8 @@ class MainWindow(QMainWindow):
 
         self.action_open_file: QAction | None = None
         self.action_export_catalog: QAction | None = None
+        self.action_export_image: QAction | None = None
+        self.action_export_raw_image: QAction | None = None
         self.action_show_header: QAction | None = None
         self.action_close_file: QAction | None = None
         self.action_reopen_last_session: QAction | None = None
@@ -126,6 +142,10 @@ class MainWindow(QMainWindow):
         self.action_cycle_view_mode: QAction | None = None
         self.action_toggle_magnifier: QAction | None = None
         self.action_reset_workspace_layout: QAction | None = None
+        self.action_frame_layout_single: QAction | None = None
+        self.action_frame_layout_tiled: QAction | None = None
+        self.action_frame_layout_vertical: QAction | None = None
+        self.frame_layout_action_group: QActionGroup | None = None
 
         self.fits_service = fits_service or FITSService()
         self.sep_service = sep_service or SEPService()
@@ -133,6 +153,7 @@ class MainWindow(QMainWindow):
         self._settings = QSettings("AstroView", "AstroView")
         self._preview_profile_name = self.DEFAULT_PREVIEW_PROFILE
         self._last_auto_interval_name = self.fits_service.current_interval
+        self._histogram_axis_limits: tuple[float, float] | None = None
 
         from ..core.fits_data import FITSData
         self._frames: list[FITSData] = []
@@ -141,10 +162,12 @@ class MainWindow(QMainWindow):
         self._frame_bkg_cache: list[FITSData | None] = []
         self._frame_residual_cache: list[FITSData | None] = []
         self._view_mode: str = "original"  # "original" | "background" | "residual"
+        self._frame_layout_mode: str = "single"  # "single" | "tiled" | "vertical"
         self._last_title_detail: str | None = None
         self._orientation: tuple[bool, bool, bool] = self._load_orientation_setting()
         self._current_frame_index: int = 0
         self._frame_step_direction: int = 1
+        self._next_source_group_id: int = 0
 
         self._load_thread: QThread | None = None
         self._load_worker: FITSLoadWorker | None = None
@@ -525,6 +548,10 @@ class MainWindow(QMainWindow):
             self.menu_file.addAction(self.action_reopen_last_session)
         if self.action_export_catalog is not None:
             self.menu_file.addAction(self.action_export_catalog)
+        if self.action_export_image is not None:
+            self.menu_file.addAction(self.action_export_image)
+        if self.action_export_raw_image is not None:
+            self.menu_file.addAction(self.action_export_raw_image)
         if self.action_show_header is not None:
             self.menu_file.addAction(self.action_show_header)
         if self.action_close_file is not None:
@@ -548,6 +575,19 @@ class MainWindow(QMainWindow):
         if self.action_cycle_view_mode is not None:
             self.menu_view.addSeparator()
             self.menu_view.addAction(self.action_cycle_view_mode)
+        if any((
+            self.action_frame_layout_single is not None,
+            self.action_frame_layout_tiled is not None,
+            self.action_frame_layout_vertical is not None,
+        )):
+            layout_menu = self.menu_view.addMenu("多帧布局")
+            for action in (
+                self.action_frame_layout_single,
+                self.action_frame_layout_tiled,
+                self.action_frame_layout_vertical,
+            ):
+                if action is not None:
+                    layout_menu.addAction(action)
         if self.action_toggle_magnifier is not None:
             self.menu_view.addAction(self.action_toggle_magnifier)
         if self.orientation_actions:
@@ -660,6 +700,9 @@ class MainWindow(QMainWindow):
         self.action_open_file.setShortcut(QKeySequence.StandardKey.Open)
         self.action_export_catalog = QAction("Export CSV", self)
         self.action_export_catalog.setShortcuts(["Ctrl+E", "Ctrl+Shift+E"])
+        self.action_export_image = QAction("Export Image...", self)
+        self.action_export_image.setShortcut("Ctrl+Shift+S")
+        self.action_export_raw_image = QAction("Export Raw Image...", self)
         self.action_show_header = QAction("Show Header", self)
         self.action_show_header.setShortcut("Ctrl+H")
         self.action_append_frames = QAction("Append Frames...", self)
@@ -716,9 +759,30 @@ class MainWindow(QMainWindow):
             self.orientation_actions.append(act)
 
         self.action_prev_frame = QAction("Previous Frame", self)
-        self.action_prev_frame.setShortcut("Left")
+        self.action_prev_frame.setShortcuts(["Left", "A"])
+        self.addAction(self.action_prev_frame)
         self.action_next_frame = QAction("Next Frame", self)
-        self.action_next_frame.setShortcut("Right")
+        self.action_next_frame.setShortcuts(["Right", "D"])
+        self.addAction(self.action_next_frame)
+
+        self.frame_layout_action_group = QActionGroup(self)
+        self.frame_layout_action_group.setExclusive(True)
+
+        self.action_frame_layout_single = QAction("单帧显示", self)
+        self.action_frame_layout_single.setCheckable(True)
+        self.action_frame_layout_tiled = QAction("多帧平铺", self)
+        self.action_frame_layout_tiled.setCheckable(True)
+        self.action_frame_layout_vertical = QAction("多帧竖排", self)
+        self.action_frame_layout_vertical.setCheckable(True)
+
+        for action in (
+            self.action_frame_layout_single,
+            self.action_frame_layout_tiled,
+            self.action_frame_layout_vertical,
+        ):
+            self.frame_layout_action_group.addAction(action)
+
+        self._sync_frame_layout_actions()
 
     def create_tool_actions(self) -> None:
         """Define tool-oriented actions and non-action controls.
@@ -802,6 +866,8 @@ class MainWindow(QMainWindow):
             self.marker_dock.radius_spin.valueChanged.connect(self._persist_marker_preferences)
             self.marker_dock.line_width_spin.valueChanged.connect(self._persist_marker_preferences)
             self.marker_dock.color_changed.connect(self._persist_marker_preferences)
+            self.marker_dock.source_line_width_spin.valueChanged.connect(self._persist_marker_preferences)
+            self.marker_dock.source_color_changed.connect(self._persist_marker_preferences)
         if self.histogram_dock is not None:
             self.histogram_dock.manual_range_applied.connect(self._handle_histogram_manual_range)
             self.histogram_dock.auto_range_requested.connect(self._handle_histogram_auto_range)
@@ -814,6 +880,10 @@ class MainWindow(QMainWindow):
             self.action_open_file.triggered.connect(self.open_file)
         if self.action_export_catalog is not None:
             self.action_export_catalog.triggered.connect(self.export_catalog)
+        if self.action_export_image is not None:
+            self.action_export_image.triggered.connect(self.export_image)
+        if self.action_export_raw_image is not None:
+            self.action_export_raw_image.triggered.connect(self.export_raw_image)
         if self.action_show_header is not None:
             self.action_show_header.triggered.connect(self.show_header_dialog)
         if self.action_close_file is not None:
@@ -836,6 +906,18 @@ class MainWindow(QMainWindow):
             self.action_reset_workspace_layout.triggered.connect(self._reset_workspace_layout)
         if self.action_cycle_view_mode is not None:
             self.action_cycle_view_mode.triggered.connect(self._cycle_view_mode)
+        if self.action_frame_layout_single is not None:
+            self.action_frame_layout_single.triggered.connect(
+                lambda _checked=False: self._set_frame_layout_mode("single")
+            )
+        if self.action_frame_layout_tiled is not None:
+            self.action_frame_layout_tiled.triggered.connect(
+                lambda _checked=False: self._set_frame_layout_mode("tiled")
+            )
+        if self.action_frame_layout_vertical is not None:
+            self.action_frame_layout_vertical.triggered.connect(
+                lambda _checked=False: self._set_frame_layout_mode("vertical")
+            )
         if self.action_toggle_magnifier is not None and self.canvas is not None:
             self.action_toggle_magnifier.triggered.connect(self.canvas.set_magnifier_visible)
         if self.magnifier_spinbox is not None and self.canvas is not None:
@@ -858,6 +940,8 @@ class MainWindow(QMainWindow):
             self.marker_dock.markers_updated.connect(self._apply_markers)
             self.marker_dock.color_changed.connect(self._handle_marker_color_changed)
             self.marker_dock.line_width_changed.connect(self._handle_marker_line_width_changed)
+            self.marker_dock.source_color_changed.connect(self._handle_source_color_changed)
+            self.marker_dock.source_line_width_changed.connect(self._handle_source_line_width_changed)
             self._sync_marker_visual_style()
         if self.frame_player_dock is not None:
             self.frame_player_dock.frame_changed.connect(self._switch_frame)
@@ -950,6 +1034,12 @@ class MainWindow(QMainWindow):
             )
             self.marker_dock.set_color(
                 self._settings.value("markers/color", self.marker_dock.color().name(), type=str)
+            )
+            self.marker_dock.set_source_line_width(
+                self._settings.value("sources/line_width", self.marker_dock.source_line_width(), type=int)
+            )
+            self.marker_dock.set_source_color(
+                self._settings.value("sources/color", self.marker_dock.source_color().name(), type=str)
             )
         if self.source_table_dock is not None:
             visible_columns = self._settings.value("catalog/visible_columns", [])
@@ -1050,6 +1140,8 @@ class MainWindow(QMainWindow):
         self._settings.setValue("markers/radius", self.marker_dock.radius())
         self._settings.setValue("markers/line_width", self.marker_dock.line_width())
         self._settings.setValue("markers/color", self.marker_dock.color().name())
+        self._settings.setValue("sources/line_width", self.marker_dock.source_line_width())
+        self._settings.setValue("sources/color", self.marker_dock.source_color().name())
 
     def _persist_window_state(self) -> None:
         """Store the current window geometry and dock layout."""
@@ -1147,13 +1239,41 @@ class MainWindow(QMainWindow):
     def _persist_session_state(self) -> None:
         """Store the last successful frame list and active frame index for reopen."""
 
-        session_paths = [frame.path for frame in self._frames if getattr(frame, "path", None)]
+        session_paths = self._session_frame_paths()
         if not session_paths:
             return
 
         self._settings.setValue("session/last_paths", session_paths)
         self._settings.setValue("session/current_index", self._current_frame_index)
         self._refresh_recent_files_menu()
+
+    def _session_frame_paths(self) -> list[str]:
+        """Return source FITS paths in frame order without duplicating cube slices."""
+
+        session_paths: list[str] = []
+        seen_source_groups: set[int] = set()
+        previous_path: str | None = None
+
+        for frame in self._frames:
+            path = getattr(frame, "path", None)
+            if not path:
+                continue
+
+            source_group_id = getattr(frame, "source_group_id", None)
+            if source_group_id is not None:
+                if source_group_id in seen_source_groups:
+                    continue
+                seen_source_groups.add(source_group_id)
+                session_paths.append(path)
+                previous_path = path
+                continue
+
+            if path == previous_path:
+                continue
+            session_paths.append(path)
+            previous_path = path
+
+        return session_paths
 
     def _reopen_last_session(self) -> None:
         """Reopen the most recently persisted multi-frame session."""
@@ -1182,15 +1302,22 @@ class MainWindow(QMainWindow):
         title = self._base_window_title()
         if detail:
             title = f"{title} - {detail}"
-        suffix = self._VIEW_MODE_TITLE_SUFFIX.get(self._view_mode, "")
-        if suffix:
+        suffixes: list[str] = []
+        view_suffix = self._VIEW_MODE_TITLE_SUFFIX.get(self._view_mode, "")
+        if view_suffix:
             computing = (
                 self._view_mode != "original"
                 and self._current_frame_index in self._bkg_threads
             )
             if computing:
-                suffix = f"{suffix} 计算中..."
-            title = f"{title} {suffix}"
+                view_suffix = f"{view_suffix} 计算中..."
+            suffixes.append(view_suffix)
+        if self._is_composite_frame_layout_active():
+            layout_suffix = self._FRAME_LAYOUT_TITLE_SUFFIX.get(self._frame_layout_mode, "")
+            if layout_suffix:
+                suffixes.append(layout_suffix)
+        if suffixes:
+            title = f"{title} {' '.join(suffixes)}"
         self.setWindowTitle(title)
 
     def check_for_updates(self) -> None:
@@ -1282,6 +1409,7 @@ class MainWindow(QMainWindow):
         self._load_worker = FITSLoadWorker(
             paths,
             hdu_index=hdu_index,
+            source_group_start=self._next_source_group_id,
             preview_first_frame=not append,
             preview_each_frame=True,
             stretch_name=self.fits_service.current_stretch,
@@ -1289,6 +1417,7 @@ class MainWindow(QMainWindow):
             preview_max_dimension=self._preview_load_dimension(),
             manual_limits=self.fits_service.manual_interval_limits,
         )
+        self._next_source_group_id += len(paths)
         self._load_worker.moveToThread(self._load_thread)
 
         self._load_thread.started.connect(self._load_worker.run)
@@ -1343,6 +1472,8 @@ class MainWindow(QMainWindow):
         self._playback_bg_render_ids.discard(request_id)
         if was_bg:
             self._pump_playback_render_queue()
+        else:
+            self._schedule_next_composite_dirty_frame()
 
     def _cancel_frame_render_request(self, request_id: int, *, wait: bool = False) -> None:
         """Request cancellation for one active frame-render request."""
@@ -1630,6 +1761,204 @@ class MainWindow(QMainWindow):
         h, w = data.data.shape[:2]
         return w, h
 
+    def _frame_original_shape(self, index: int) -> tuple[int, int] | None:
+        """Return the original (width, height) for one frame."""
+
+        if not (0 <= index < len(self._frames)):
+            return None
+        data = self._frames[index].data
+        if data is not None:
+            h, w = data.shape[:2]
+            return w, h
+        if 0 <= index < len(self._frame_images):
+            image = self._frame_images[index]
+            if isinstance(image, QImage) and not image.isNull():
+                return image.width(), image.height()
+        return None
+
+    def _frame_display_shape(self, index: int) -> tuple[int, int] | None:
+        """Return the displayed (width, height) for one frame after orientation."""
+
+        shape = self._frame_original_shape(index)
+        if shape is None:
+            return None
+        width, height = shape
+        if self._orientation[2]:
+            return height, width
+        return width, height
+
+    def _frame_composite_layout(self) -> tuple[int, int, list[_FrameCompositePlacement]]:
+        """Return composite image size and frame placements for the active layout."""
+
+        placements: list[_FrameCompositePlacement] = []
+        count = len(self._frames)
+        if count == 0:
+            return 0, 0, placements
+
+        frame_sizes: list[tuple[int, int, int, int, int]] = []
+        for index in range(count):
+            original_shape = self._frame_original_shape(index)
+            display_shape = self._frame_display_shape(index)
+            if original_shape is None or display_shape is None:
+                continue
+            original_width, original_height = original_shape
+            display_width, display_height = display_shape
+            frame_sizes.append((index, display_width, display_height, original_width, original_height))
+
+        if not frame_sizes:
+            return 0, 0, placements
+
+        if self._frame_layout_mode == "vertical":
+            total_width = max(width for _, width, _, _, _ in frame_sizes)
+            offset_y = 0
+            for index, display_width, display_height, original_width, original_height in frame_sizes:
+                placements.append(_FrameCompositePlacement(
+                    index=index,
+                    x=0,
+                    y=offset_y,
+                    display_width=display_width,
+                    display_height=display_height,
+                    original_width=original_width,
+                    original_height=original_height,
+                ))
+                offset_y += display_height
+            return total_width, offset_y, placements
+
+        total_height = max(height for _, _, height, _, _ in frame_sizes)
+        offset_x = 0
+        for index, display_width, display_height, original_width, original_height in frame_sizes:
+            placements.append(_FrameCompositePlacement(
+                index=index,
+                x=offset_x,
+                y=0,
+                display_width=display_width,
+                display_height=display_height,
+                original_width=original_width,
+                original_height=original_height,
+            ))
+            offset_x += display_width
+        return offset_x, total_height, placements
+
+    def _is_composite_frame_layout_active(self) -> bool:
+        """Return whether the current frame layout displays multiple frames as one image."""
+
+        return self._frame_layout_mode != "single" and len(self._frames) > 1
+
+    def _current_canvas_image_dimensions(self) -> tuple[int, int]:
+        """Return the dimensions of the image currently shown on the canvas."""
+
+        if self._is_composite_frame_layout_active():
+            width, height, _placements = self._frame_composite_layout()
+            return width, height
+
+        current_data = self.fits_service.current_data
+        if current_data is None or current_data.data is None:
+            return 0, 0
+        height, width = current_data.data.shape[:2]
+        return width, height
+
+    def _current_view_badge_text(self) -> str:
+        """Return the status-bar badge text for the active data and layout modes."""
+
+        parts: list[str] = []
+        view_badge = self._VIEW_MODE_BADGE.get(self._view_mode, "")
+        if view_badge:
+            parts.append(view_badge)
+        if self._is_composite_frame_layout_active():
+            layout_badge = self._FRAME_LAYOUT_BADGE.get(self._frame_layout_mode, "")
+            if layout_badge:
+                parts.append(layout_badge)
+        return " ".join(parts)
+
+    def _sync_frame_layout_actions(self) -> None:
+        """Keep the frame-layout actions checked state aligned with the active mode."""
+
+        actions = {
+            "single": self.action_frame_layout_single,
+            "tiled": self.action_frame_layout_tiled,
+            "vertical": self.action_frame_layout_vertical,
+        }
+        has_data = self.fits_service.current_data is not None
+        for mode, action in actions.items():
+            if action is None:
+                continue
+            action.blockSignals(True)
+            action.setChecked(mode == self._frame_layout_mode)
+            action.setEnabled(has_data or mode == self._frame_layout_mode)
+            action.blockSignals(False)
+
+    def _refresh_view_mode_indicators(self) -> None:
+        """Refresh title and status badges that depend on view and layout mode."""
+
+        if self.app_status_bar is not None:
+            self.app_status_bar.set_view_mode_label(self._current_view_badge_text())
+        self._set_window_title(self._last_title_detail)
+
+    def _apply_canvas_display_context(self) -> None:
+        """Update canvas compass and source-coordinate mapping for the active layout."""
+
+        if self.canvas is None:
+            return
+
+        self.canvas.compass.setVisible(not self._is_composite_frame_layout_active())
+        x_axis, y_axis = self._axis_directions()
+        self.canvas.compass.set_axes(x_axis, y_axis)
+
+        if self._is_composite_frame_layout_active():
+            self.canvas.set_source_position_transform(None)
+            return
+
+        shape = self._current_original_shape()
+        if shape is not None:
+            w, h = shape
+            self.canvas.set_source_position_transform(
+                lambda px, py, w=w, h=h: self._orient_point(px, py, w, h)
+            )
+        else:
+            self.canvas.set_source_position_transform(None)
+
+    def _build_composite_frame_image(self) -> QImage | None:
+        """Build the currently requested composite frame image from cached frame renders."""
+
+        width, height, placements = self._frame_composite_layout()
+        if width <= 0 or height <= 0:
+            return None
+
+        composite = QImage(width, height, QImage.Format.Format_Grayscale8)
+        composite.fill(0)
+
+        painter = QPainter(composite)
+        try:
+            for placement in placements:
+                if not (0 <= placement.index < len(self._frame_images)):
+                    continue
+                image = self._frame_images[placement.index]
+                if image is None:
+                    continue
+                painter.drawImage(placement.x, placement.y, self._orient_qimage(image))
+        finally:
+            painter.end()
+        return composite
+
+    def _sample_composite_frame(self, x: float, y: float) -> PixelSample:
+        """Return the pixel sample under one displayed point in a composite image."""
+
+        _width, _height, placements = self._frame_composite_layout()
+        for placement in placements:
+            if not (
+                placement.x <= x < placement.x + placement.display_width
+                and placement.y <= y < placement.y + placement.display_height
+            ):
+                continue
+
+            local_x = x - placement.x
+            local_y = y - placement.y
+            ox, oy = self._unorient_point(local_x, local_y, placement.original_width, placement.original_height)
+            frame = self._frames[placement.index]
+            return frame.sample_pixel(int(ox), int(oy))
+
+        return PixelSample(x=int(x), y=int(y), inside_image=False)
+
     def _set_orientation(self, orientation: tuple[bool, bool, bool]) -> None:
         if orientation == self._orientation:
             return
@@ -1637,23 +1966,28 @@ class MainWindow(QMainWindow):
         self._save_orientation_setting()
         for act, (_, o) in zip(getattr(self, "orientation_actions", []), self._ORIENTATIONS):
             act.setChecked(o == orientation)
-        if self.canvas is not None:
-            x_axis, y_axis = self._axis_directions()
-            self.canvas.compass.set_axes(x_axis, y_axis)
-            shape = self._current_original_shape()
-            if shape is not None:
-                w, h = shape
-                self.canvas.set_source_position_transform(
-                    lambda px, py, w=w, h=h: self._orient_point(px, py, w, h)
-                )
-            else:
-                self.canvas.set_source_position_transform(None)
+        self._apply_canvas_display_context()
         self._show_current_frame_image()
 
     _VIEW_MODE_BADGE = {
         "original": "",
         "background": "BKG",
         "residual": "RESIDUAL",
+    }
+    _FRAME_LAYOUT_LABELS = {
+        "single": "单帧显示",
+        "tiled": "多帧平铺",
+        "vertical": "多帧竖排",
+    }
+    _FRAME_LAYOUT_BADGE = {
+        "single": "",
+        "tiled": "TILE",
+        "vertical": "VERT",
+    }
+    _FRAME_LAYOUT_TITLE_SUFFIX = {
+        "single": "",
+        "tiled": "[TILED]",
+        "vertical": "[VERTICAL]",
     }
 
     def _cycle_view_mode(self) -> None:
@@ -1671,14 +2005,29 @@ class MainWindow(QMainWindow):
         if mode == self._view_mode:
             return
         self._view_mode = mode
-        if self.app_status_bar is not None:
-            self.app_status_bar.set_view_mode_label(self._VIEW_MODE_BADGE.get(mode, ""))
-        self._set_window_title(self._last_title_detail)
+        self._refresh_view_mode_indicators()
         if self.app_status_bar is not None:
             self.app_status_bar.showMessage(
                 f"显示：{self._VIEW_MODE_LABELS[mode]}", 2000
             )
         self._rerender_all_frames()
+
+    def _set_frame_layout_mode(self, mode: str) -> None:
+        """Switch between single-frame and composite multi-frame display layouts."""
+
+        if mode == self._frame_layout_mode:
+            return
+        self._frame_layout_mode = mode
+        self._sync_frame_layout_actions()
+        self._refresh_view_mode_indicators()
+        self._apply_canvas_display_context()
+        self._show_current_frame_image()
+        self._sync_canvas_source_overlays()
+        self._sync_current_canvas_image_state()
+        self.sync_sep_panel_state()
+        self._schedule_next_composite_dirty_frame()
+        if self.app_status_bar is not None:
+            self.app_status_bar.showMessage(f"布局：{self._FRAME_LAYOUT_LABELS[mode]}", 2000)
 
     def _is_playback_active(self) -> bool:
         """Return whether the frame player is currently playing."""
@@ -1832,7 +2181,7 @@ class MainWindow(QMainWindow):
             return
 
         self._frame_images[index] = self._qimage_from_u8(image_u8)
-        if self._current_frame_index == index:
+        if self._is_composite_frame_layout_active() or self._current_frame_index == index:
             self._show_current_frame_image()
             self._sync_current_canvas_image_state()
             if self.canvas is not None and len(self._frames) == 1:
@@ -1853,10 +2202,11 @@ class MainWindow(QMainWindow):
 
         self._frame_images[index] = self._qimage_from_u8(image_u8)
         self._frame_dirty[index] = False
-        if self._current_frame_index == index:
+        if self._is_composite_frame_layout_active() or self._current_frame_index == index:
             self._show_current_frame_image()
             self._sync_current_canvas_image_state()
-            self._prewarm_adjacent_frame()
+            if self._current_frame_index == index:
+                self._prewarm_adjacent_frame()
 
     def _handle_frame_render_error(
         self,
@@ -1870,7 +2220,7 @@ class MainWindow(QMainWindow):
         if not self._should_accept_render_result(request_id, generation, index):
             return
         self._frame_dirty[index] = False
-        if self._current_frame_index == index:
+        if self._is_composite_frame_layout_active() or self._current_frame_index == index:
             self._sync_current_canvas_image_state()
         self.show_error("Render failed", detail)
 
@@ -1998,6 +2348,7 @@ class MainWindow(QMainWindow):
             self._activate_frame(0)
 
         self._sync_frame_player()
+        self._schedule_next_composite_dirty_frame()
         if self.app_status_bar is not None and self._frames:
             self.app_status_bar.set_frame_info(self._current_frame_index, len(self._frames))
 
@@ -2145,12 +2496,14 @@ class MainWindow(QMainWindow):
         self._frame_dirty.clear()
         self._frame_bkg_cache.clear()
         self._frame_residual_cache.clear()
+        self._next_source_group_id = 0
         if self._view_mode != "original":
             self._view_mode = "original"
             if self.app_status_bar is not None:
                 self.app_status_bar.set_view_mode_label("")
         self._current_frame_index = 0
         self._set_window_title()
+        self._refresh_view_mode_indicators()
 
         if self.canvas is not None:
             self.canvas.clear_image()
@@ -2253,6 +2606,11 @@ class MainWindow(QMainWindow):
             self.preview_profile_selector.blockSignals(False)
         if self.action_export_catalog is not None:
             self.action_export_catalog.setEnabled(self.current_catalog is not None and len(self.current_catalog) > 0)
+        if self.action_export_image is not None:
+            self.action_export_image.setEnabled(self._can_export_image())
+        if self.action_export_raw_image is not None:
+            self.action_export_raw_image.setEnabled(self._can_export_image())
+        self._sync_frame_layout_actions()
 
     def build_render_control_state(self) -> RenderControlState:
         """Construct the toolbar render-control state from the FITS service."""
@@ -2284,10 +2642,22 @@ class MainWindow(QMainWindow):
             else:
                 self.source_table_dock.set_status_note("")
                 self.source_table_dock.clear_cutout_image()
-        if self.canvas is not None:
-            self.canvas.draw_sources(self.current_catalog)
-            self.canvas.set_overlay_state(self.build_canvas_overlay_state())
+        self._sync_canvas_source_overlays()
         self.sync_render_controls()
+
+    def _sync_canvas_source_overlays(self) -> None:
+        """Update canvas source overlays while respecting the active frame layout."""
+
+        if self.canvas is None:
+            return
+
+        if self._is_composite_frame_layout_active():
+            self.canvas.clear_sources()
+            self.canvas.set_overlay_state(self.build_canvas_overlay_state())
+            return
+
+        self.canvas.draw_sources(self.current_catalog)
+        self.canvas.set_overlay_state(self.build_canvas_overlay_state())
 
     def _catalog_status_note(self) -> str:
         """Return the current source-table status note shown beside the row summary."""
@@ -2335,9 +2705,17 @@ class MainWindow(QMainWindow):
         current_data = self.fits_service.current_data
         if current_data is None or current_data.data is None:
             return CanvasImageState(feedback=self.build_empty_image_feedback())
-        height, width = current_data.data.shape[:2]
+
+        width, height = self._current_canvas_image_dimensions()
         feedback = ViewFeedbackState(status="ready")
-        if self._is_frame_rendering(self._current_frame_index) and not self._is_playback_active():
+        if self._is_composite_frame_layout_active() and any(self._frame_dirty) and not self._is_playback_active():
+            feedback = ViewFeedbackState(
+                status="loading",
+                title="Rendering Composite View",
+                detail="Visible frame previews are shown while the remaining frames finish rendering.",
+                visible=True,
+            )
+        elif self._is_frame_rendering(self._current_frame_index) and not self._is_playback_active():
             feedback = self.build_rendering_image_feedback(
                 has_preview=self._current_frame_has_preview_image()
             )
@@ -2350,6 +2728,13 @@ class MainWindow(QMainWindow):
 
     def build_canvas_overlay_state(self, highlighted_index: int | None = None) -> CanvasOverlayState:
         """Construct the overlay presentation state for the canvas."""
+
+        if self._is_composite_frame_layout_active():
+            return CanvasOverlayState(
+                source_count=0,
+                highlighted_index=None,
+                feedback=ViewFeedbackState(status="ready"),
+            )
 
         source_count = 0 if self.current_catalog is None else len(self.current_catalog)
         feedback = self.build_empty_catalog_feedback()
@@ -2392,6 +2777,11 @@ class MainWindow(QMainWindow):
         """Construct the SEP panel enablement state."""
 
         has_image = self.fits_service.current_data is not None
+        if self._is_composite_frame_layout_active():
+            return ControlEnablementState(
+                enabled=False,
+                reason="SEP extraction is unavailable while frames are shown in a composite layout.",
+            )
         if self._is_sep_extract_running():
             return ControlEnablementState(
                 enabled=False,
@@ -2531,14 +2921,27 @@ class MainWindow(QMainWindow):
         ]
 
     def _refresh_histogram_view(self) -> None:
-        """Push the current image histogram and manual limits into the histogram dock."""
+        """Push the current-interval histogram and manual limits into the histogram dock.
+
+        The X-axis range is anchored to the most recent non-Manual interval
+        (or the initial Manual range if no auto mode was seen yet) so that
+        dragging the handles only moves the handles, not the chart extent.
+        """
 
         if self.histogram_dock is None:
             return
         if not self.histogram_dock.isVisible():
             return
 
-        counts, min_value, max_value = self.fits_service.histogram()
+        interval_limits = self.fits_service.current_interval_limits()
+        if self.fits_service.current_interval == "Manual":
+            axis_limits = self._histogram_axis_limits or interval_limits
+        else:
+            axis_limits = interval_limits
+            if axis_limits is not None:
+                self._histogram_axis_limits = axis_limits
+
+        counts, min_value, max_value = self.fits_service.histogram(limits=axis_limits)
         if counts.size == 0 or (counts.sum() == 0 and min_value == 0.0 and max_value == 0.0):
             self.histogram_dock.clear_histogram()
             return
@@ -2575,6 +2978,7 @@ class MainWindow(QMainWindow):
     def _handle_histogram_auto_range(self) -> None:
         """Return from Manual interval mode to the most recent automatic interval."""
 
+        self.fits_service.clear_manual_interval_limits()
         self.fits_service.set_interval(self._last_auto_interval_name or "ZScale")
         self._persist_render_preferences()
         self.sync_render_controls()
@@ -2764,31 +3168,39 @@ class MainWindow(QMainWindow):
         )
 
     def _handle_marker_color_changed(self, color: Any) -> None:
-        """Keep ROI selection color aligned and repaint existing markers."""
+        """Repaint imported markers with the new color."""
 
-        self._sync_marker_visual_style()
         if self.marker_dock is not None:
             entries = self.marker_dock.parse_coordinates()
             if entries:
                 self._apply_markers(entries)
 
     def _handle_marker_line_width_changed(self, line_width: int) -> None:
-        """Keep ROI selection width aligned and repaint existing markers."""
+        """Repaint imported markers with the new line width."""
 
-        self._sync_marker_visual_style()
         if self.marker_dock is not None:
             entries = self.marker_dock.parse_coordinates()
             if entries:
                 self._apply_markers(entries)
 
+    def _handle_source_color_changed(self, color: Any) -> None:
+        """Keep ROI rubber band and SEP source overlays aligned with the source color."""
+
+        self._sync_marker_visual_style()
+
+    def _handle_source_line_width_changed(self, line_width: int) -> None:
+        """Keep ROI rubber band and SEP source overlays aligned with the source line width."""
+
+        self._sync_marker_visual_style()
+
     def _sync_marker_visual_style(self) -> None:
-        """Apply the current marker color/width to ROI and source overlays."""
+        """Apply the current source-overlay color/width to ROI and source ellipses."""
 
         if self.canvas is None or self.marker_dock is None:
             return
 
-        color = self.marker_dock.color()
-        line_width = self.marker_dock.line_width()
+        color = self.marker_dock.source_color()
+        line_width = self.marker_dock.source_line_width()
         self.canvas.set_roi_color(color)
         self.canvas.set_roi_line_width(line_width)
         self.canvas.set_source_overlay_style(color=color, line_width=line_width)
@@ -2812,6 +3224,7 @@ class MainWindow(QMainWindow):
             self.app_status_bar.clear_data()
         if self.histogram_dock is not None:
             self.histogram_dock.clear_histogram()
+        self._histogram_axis_limits = None
         self.sync_sep_panel_state()
         self.sync_render_controls()
 
@@ -2842,6 +3255,206 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self.show_error("Export failed", str(e))
 
+    def _can_export_image(self) -> bool:
+        """Return whether the current view has any exportable image content."""
+
+        if self.canvas is not None and self.canvas.current_image is not None:
+            return True
+        return self.fits_service.current_data is not None and self.fits_service.current_data.data is not None
+
+    _EXPORT_IMAGE_FILTERS = (
+        "PNG Image (*.png);;"
+        "PDF Document (*.pdf);;"
+        "Encapsulated PostScript (*.eps);;"
+        "FITS Image (*.fits *.fit);;"
+        "All Files (*)"
+    )
+
+    def export_image(self) -> None:
+        """Export the current view as PNG / PDF / EPS / FITS with annotations.
+
+        PNG, PDF, and EPS include everything drawn on the canvas (sources,
+        markers). FITS always writes the raw data of the current frame with
+        its original header preserved, ignoring annotations.
+        """
+
+        self._run_image_export(with_annotations=True, title="Export Image")
+
+    def export_raw_image(self) -> None:
+        """Export only the underlying pixmap (no sources/markers) or raw FITS."""
+
+        self._run_image_export(with_annotations=False, title="Export Raw Image")
+
+    def _run_image_export(self, *, with_annotations: bool, title: str) -> None:
+        if not self._can_export_image():
+            self.show_error(title, "No image is currently loaded.")
+            return
+
+        default_stem = self._default_export_stem()
+        initial = str(Path(default_stem + ".png"))
+        path, selected_filter = QFileDialog.getSaveFileName(
+            self, title, initial, self._EXPORT_IMAGE_FILTERS
+        )
+        if not path:
+            return
+
+        fmt = self._resolve_export_format(path, selected_filter)
+        path = self._ensure_export_extension(path, fmt)
+
+        try:
+            if fmt == "png":
+                self._export_visual_image_to_png(path, with_annotations=with_annotations)
+            elif fmt == "pdf":
+                self._export_visual_image_to_pdf(path, with_annotations=with_annotations)
+            elif fmt == "eps":
+                self._export_visual_image_to_eps(path, with_annotations=with_annotations)
+            elif fmt == "fits":
+                self._export_current_frame_to_fits(path)
+            else:
+                self.show_error(title, f"Unsupported format: {fmt}")
+                return
+        except Exception as exc:
+            log_current_exception(logger, "export_image failed")
+            self.show_error("Export failed", str(exc))
+            return
+
+        if self.app_status_bar is not None:
+            self.app_status_bar.showMessage(f"Exported image to {path}", 3000)
+
+    def _default_export_stem(self) -> str:
+        """Return a sensible default filename stem for image export."""
+
+        current = self.fits_service.current_data
+        if current is not None and current.path:
+            return Path(current.path).stem or "image"
+        return "image"
+
+    @staticmethod
+    def _resolve_export_format(path: str, selected_filter: str) -> str:
+        """Determine the export format from the selected filter or file extension."""
+
+        lowered_filter = (selected_filter or "").lower()
+        if "png" in lowered_filter:
+            return "png"
+        if "pdf" in lowered_filter:
+            return "pdf"
+        if "postscript" in lowered_filter or "eps" in lowered_filter:
+            return "eps"
+        if "fits" in lowered_filter:
+            return "fits"
+
+        suffix = Path(path).suffix.lower().lstrip(".")
+        if suffix in {"png", "pdf", "eps"}:
+            return suffix
+        if suffix in {"fits", "fit"}:
+            return "fits"
+        return "png"
+
+    @staticmethod
+    def _ensure_export_extension(path: str, fmt: str) -> str:
+        """Append the canonical extension for the target format if missing."""
+
+        target = Path(path)
+        current = target.suffix.lower().lstrip(".")
+        if fmt == "fits":
+            if current in {"fits", "fit"}:
+                return str(target)
+            return str(target.with_suffix(".fits"))
+        expected = f".{fmt}"
+        if current == fmt:
+            return str(target)
+        return str(target.with_suffix(expected))
+
+    def _visual_image_for_export(self, *, with_annotations: bool) -> QImage:
+        """Return the QImage to rasterize for PNG/PDF/EPS export.
+
+        When ``with_annotations`` is true the scene is rendered so that
+        source ellipses, markers, and other overlays are baked into the
+        raster. Otherwise the raw pixmap image is returned.
+        """
+
+        if self.canvas is None:
+            raise RuntimeError("Canvas is not available.")
+        if with_annotations:
+            rendered = self.canvas.render_scene_image()
+            if rendered is not None:
+                return rendered
+        if self.canvas.current_image is None:
+            raise RuntimeError("No image is currently displayed on the canvas.")
+        return self.canvas.current_image
+
+    def _export_visual_image_to_png(self, path: str, *, with_annotations: bool) -> None:
+        image = self._visual_image_for_export(with_annotations=with_annotations)
+        if not image.save(path, "PNG"):
+            raise RuntimeError(f"QImage.save refused to write PNG to {path}")
+
+    def _export_visual_image_to_pdf(self, path: str, *, with_annotations: bool) -> None:
+        from PySide6.QtGui import QPageLayout, QPageSize, QPdfWriter
+
+        image = self._visual_image_for_export(with_annotations=with_annotations)
+        writer = QPdfWriter(path)
+        writer.setResolution(300)
+        # Size the page to match the image at the writer's resolution so the
+        # raster maps to native pixels without scaling artefacts.
+        dpi = writer.resolution()
+        inches_w = image.width() / dpi
+        inches_h = image.height() / dpi
+        writer.setPageSize(QPageSize(QSizeF(inches_w, inches_h), QPageSize.Unit.Inch))
+        writer.setPageMargins(QMarginsF(0, 0, 0, 0), QPageLayout.Unit.Inch)
+        painter = QPainter(writer)
+        try:
+            painter.drawImage(0, 0, image)
+        finally:
+            painter.end()
+
+    def _export_visual_image_to_eps(self, path: str, *, with_annotations: bool) -> None:
+        """Write a minimal raster-embedded EPS wrapping the canvas image."""
+
+        image = self._visual_image_for_export(with_annotations=with_annotations).convertToFormat(QImage.Format.Format_RGB888)
+        width = image.width()
+        height = image.height()
+        bpl = image.bytesPerLine()
+
+        ptr = image.constBits()
+        # PySide6 returns a sized memoryview for constBits(); slice per row
+        # so any trailing padding in bytesPerLine is dropped.
+        buf = bytes(ptr)
+        row_bytes = width * 3
+        rgb = bytearray(row_bytes * height)
+        for y in range(height):
+            start = y * bpl
+            rgb[y * row_bytes:(y + 1) * row_bytes] = buf[start:start + row_bytes]
+        hex_data = rgb.hex()
+        hex_wrapped = "\n".join(hex_data[i:i + 64] for i in range(0, len(hex_data), 64))
+
+        eps = (
+            "%!PS-Adobe-3.0 EPSF-3.0\n"
+            f"%%BoundingBox: 0 0 {width} {height}\n"
+            "%%Pages: 0\n"
+            f"%%Creator: {APP_NAME} {__version__}\n"
+            "%%EndComments\n"
+            "gsave\n"
+            "0 0 translate\n"
+            f"{width} {height} scale\n"
+            f"/picstr {width * 3} string def\n"
+            f"{width} {height} 8 [{width} 0 0 -{height} 0 {height}]\n"
+            "{currentfile picstr readhexstring pop}\n"
+            "false 3 colorimage\n"
+            f"{hex_wrapped}\n"
+            "grestore\n"
+            "showpage\n"
+            "%%EOF\n"
+        )
+        Path(path).write_text(eps, encoding="ascii")
+
+    def _export_current_frame_to_fits(self, path: str) -> None:
+        """Write the current frame's raw pixel data and header to a FITS file."""
+
+        current = self.fits_service.current_data
+        if current is None or current.data is None:
+            raise RuntimeError("No FITS data available for the current frame.")
+        current.save_to(path, overwrite=True)
+
     def show_header_dialog(self) -> None:
         """Open the FITS header viewer.
 
@@ -2863,6 +3476,11 @@ class MainWindow(QMainWindow):
         ROI arrives in displayed-image coords; remap to original frame so SEP
         always operates on the unrotated data.
         """
+
+        if self._is_composite_frame_layout_active():
+            if self.app_status_bar is not None:
+                self.app_status_bar.showMessage("复合布局下无法直接框选 ROI。请切回单帧显示后再运行 SEP。", 3000)
+            return
 
         shape = self._current_original_shape()
         if shape is not None and self._orientation != (False, False, False):
@@ -2939,12 +3557,15 @@ class MainWindow(QMainWindow):
         -> `FITSData.sample_pixel()` -> `AppStatusBar.set_sample()`.
         """
 
-        data = self.fits_service.current_data
-        if data is None or data.data is None:
-            return
-        h, w = data.data.shape[:2]
-        ox, oy = self._unorient_point(x, y, w, h)
-        sample = data.sample_pixel(int(ox), int(oy))
+        if self._is_composite_frame_layout_active():
+            sample = self._sample_composite_frame(x, y)
+        else:
+            data = self.fits_service.current_data
+            if data is None or data.data is None:
+                return
+            h, w = data.data.shape[:2]
+            ox, oy = self._unorient_point(x, y, w, h)
+            sample = data.sample_pixel(int(ox), int(oy))
         self.apply_pixel_sample(sample)
 
     def apply_pixel_sample(self, sample: PixelSample) -> None:
@@ -3002,7 +3623,11 @@ class MainWindow(QMainWindow):
                 self._refresh_histogram_view()
 
     def _handle_interval_changed(self, name: str) -> None:
-        """Update the selected interval mode from the toolbar and re-render."""
+        """Update the selected interval mode from the toolbar and re-render.
+
+        Switching to a non-Manual interval clears any stored manual limits so
+        the histogram resets to the new interval's full range.
+        """
 
         if name:
             if name == "Manual":
@@ -3012,6 +3637,7 @@ class MainWindow(QMainWindow):
                         self.fits_service.set_manual_interval_limits(*data_range)
                 self.fits_service.set_interval("Manual")
             else:
+                self.fits_service.clear_manual_interval_limits()
                 self.fits_service.set_interval(name)
                 self._last_auto_interval_name = name
             self._persist_render_preferences()
@@ -3240,6 +3866,29 @@ class MainWindow(QMainWindow):
             return
         self._schedule_frame_render(index)
 
+    def _schedule_next_composite_dirty_frame(self) -> None:
+        """Sequentially render all dirty frames while a composite layout is active."""
+
+        if not self._is_composite_frame_layout_active() or self._is_playback_active():
+            return
+
+        for thread in self._render_threads.values():
+            if thread.isRunning():
+                return
+
+        candidate_indices: list[int] = []
+        if 0 <= self._current_frame_index < len(self._frames):
+            candidate_indices.append(self._current_frame_index)
+        candidate_indices.extend(
+            index for index in range(len(self._frames))
+            if index != self._current_frame_index
+        )
+
+        for index in candidate_indices:
+            if 0 <= index < len(self._frame_dirty) and self._frame_dirty[index]:
+                self._schedule_frame_render(index)
+                return
+
     def _activate_frame(self, index: int) -> None:
         """Switch to frame at index: update service, canvas, title, controls."""
 
@@ -3260,17 +3909,7 @@ class MainWindow(QMainWindow):
         else:
             self._set_window_title(label)
 
-        if self.canvas is not None:
-            x_axis, y_axis = self._axis_directions()
-            self.canvas.compass.set_axes(x_axis, y_axis)
-            shape = self._current_original_shape()
-            if shape is not None and self._orientation != (False, False, False):
-                w, h = shape
-                self.canvas.set_source_position_transform(
-                    lambda px, py, w=w, h=h: self._orient_point(px, py, w, h)
-                )
-            else:
-                self.canvas.set_source_position_transform(None)
+        self._apply_canvas_display_context()
         self._show_current_frame_image()
 
         if playing:
@@ -3309,6 +3948,14 @@ class MainWindow(QMainWindow):
         if self.canvas is None:
             return
         view_state = self.canvas.capture_view_state()
+        if self._is_composite_frame_layout_active():
+            image = self._build_composite_frame_image()
+            if image is None:
+                self.canvas.clear_image()
+                return
+            self.canvas.set_image(image)
+            self.canvas.restore_view_state(view_state)
+            return
         idx = self._current_frame_index
         if 0 <= idx < len(self._frame_images):
             img = self._frame_images[idx]
@@ -3351,6 +3998,7 @@ class MainWindow(QMainWindow):
         else:
             self.frame_player_dock.hide()
         self._sync_frame_player_render_state()
+        self._refresh_view_mode_indicators()
 
     def _sync_frame_player_render_state(self) -> None:
         """Push current-frame render progress into the frame-player dock."""
@@ -3371,6 +4019,12 @@ class MainWindow(QMainWindow):
         self._activate_frame(index)
         if self.frame_player_dock is not None:
             self.frame_player_dock.set_current_frame(index)
+
+    def _pause_playback_for_manual_frame_navigation(self) -> None:
+        """Pause playback before handling a keyboard-initiated frame step."""
+
+        if self.frame_player_dock is not None and self.frame_player_dock.is_playing():
+            self.frame_player_dock.stop_playback()
 
     def _update_frame_step_direction(self, previous_index: int, next_index: int) -> None:
         """Track the most recent frame-navigation direction for prewarming."""
@@ -3467,9 +4121,13 @@ class MainWindow(QMainWindow):
         super().closeEvent(event)
 
     def _go_prev_frame(self) -> None:
-        if len(self._frames) > 1 and self._current_frame_index > 0:
-            self._switch_frame(self._current_frame_index - 1)
+        count = len(self._frames)
+        if count > 1:
+            self._pause_playback_for_manual_frame_navigation()
+            self._switch_frame((self._current_frame_index - 1) % count)
 
     def _go_next_frame(self) -> None:
-        if len(self._frames) > 1 and self._current_frame_index < len(self._frames) - 1:
-            self._switch_frame(self._current_frame_index + 1)
+        count = len(self._frames)
+        if count > 1:
+            self._pause_playback_for_manual_frame_navigation()
+            self._switch_frame((self._current_frame_index + 1) % count)

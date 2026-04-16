@@ -40,6 +40,10 @@ class FITSData:
     has_wcs: bool = False
     invalid_pixels: bool = False
     available_hdus: list[HDUInfo] = field(default_factory=list)
+    frame_index: int = 0
+    frame_count: int = 1
+    frame_coordinates: tuple[int, ...] = ()
+    source_group_id: int | None = None
 
     @classmethod
     def load(cls, path: str, hdu_index: int | None = None) -> "FITSData":
@@ -48,40 +52,20 @@ class FITSData:
         Called by `FITSService.open_file()`.
         Uses memmap=True for large files.
         """
+        return cls.load_frames(path, hdu_index)[0]
 
-        hdul = fits.open(path, memmap=True)
-        available = _scan_image_hdus(hdul)
+    @classmethod
+    def load_frames(
+        cls,
+        path: str,
+        hdu_index: int | None = None,
+        *,
+        source_group_id: int | None = None,
+    ) -> list["FITSData"]:
+        """Load one FITS HDU and expand multidimensional image data into 2D frames."""
 
-        if hdu_index is not None:
-            idx = hdu_index
-        elif available:
-            idx = available[0].index
-        else:
-            hdul.close()
-            return cls(path=path, available_hdus=available)
-
-        hdu = hdul[idx]
-        header = hdu.header
-        data = _read_hdu_data(path, idx, hdul)
-
-        try:
-            with warnings.catch_warnings():
-                warnings.simplefilter('ignore', FITSFixedWarning)
-                wcs = WCS(header)
-            has_wcs = wcs.has_celestial
-        except Exception:
-            wcs = None
-            has_wcs = False
-
-        return cls(
-            path=path,
-            hdu_index=idx,
-            data=data,
-            header=header,
-            wcs=wcs,
-            has_wcs=has_wcs,
-            available_hdus=available,
-        )
+        loaded_hdu = _load_hdu_data(path, hdu_index)
+        return _expand_loaded_hdu_to_frames(loaded_hdu, source_group_id=source_group_id)
 
     def get_data(self) -> np.ndarray | None:
         """Return the current image array."""
@@ -118,6 +102,19 @@ class FITSData:
             return (result.ra.deg, result.dec.deg)
         except Exception:
             return None
+
+    def save_to(self, path: str, *, overwrite: bool = False) -> None:
+        """Write the current frame's raw data and header to a FITS file.
+
+        The original header is passed through so WCS, units, and other
+        provenance keywords are preserved; astropy will update NAXIS/BITPIX
+        to match ``self.data`` automatically.
+        """
+
+        if self.data is None:
+            raise ValueError("No image data available to save.")
+        hdu = fits.PrimaryHDU(data=np.asarray(self.data), header=self.header)
+        hdu.writeto(path, overwrite=overwrite)
 
     def sample_pixel(self, x: int, y: int) -> PixelSample:
         """Return a status-bar oriented sample for one image pixel.
@@ -165,6 +162,107 @@ def _scan_image_hdus(hdul: fits.HDUList) -> list[HDUInfo]:
     return result
 
 
+@dataclass(slots=True)
+class _LoadedHDUData:
+    """Resolved HDU payload before it is expanded into 2D frame objects."""
+
+    path: str
+    hdu_index: int | None = None
+    data: np.ndarray | None = None
+    header: Any = None
+    wcs: Any = None
+    has_wcs: bool = False
+    available_hdus: list[HDUInfo] = field(default_factory=list)
+
+
+def _load_hdu_data(path: str, hdu_index: int | None = None) -> _LoadedHDUData:
+    """Load one HDU from disk and return the raw image payload plus metadata."""
+
+    hdul = fits.open(path, memmap=True)
+    available = _scan_image_hdus(hdul)
+
+    if hdu_index is not None:
+        idx = hdu_index
+    elif available:
+        idx = available[0].index
+    else:
+        hdul.close()
+        return _LoadedHDUData(path=path, available_hdus=available)
+
+    hdu = hdul[idx]
+    header = hdu.header
+    data = _read_hdu_data(path, idx, hdul)
+    wcs, has_wcs = _build_frame_wcs(header)
+
+    return _LoadedHDUData(
+        path=path,
+        hdu_index=idx,
+        data=data,
+        header=header,
+        wcs=wcs,
+        has_wcs=has_wcs,
+        available_hdus=available,
+    )
+
+
+def _expand_loaded_hdu_to_frames(
+    loaded_hdu: _LoadedHDUData,
+    *,
+    source_group_id: int | None = None,
+) -> list[FITSData]:
+    """Expand one loaded HDU into one or more 2D FITSData frame objects."""
+
+    if loaded_hdu.data is None:
+        return [_build_frame(loaded_hdu, source_group_id=source_group_id)]
+
+    array = np.asarray(loaded_hdu.data)
+    if array.ndim <= 2:
+        return [_build_frame(loaded_hdu, data=array, source_group_id=source_group_id)]
+
+    frame_axes = tuple(int(size) for size in array.shape[:-2])
+    if any(size <= 0 for size in frame_axes):
+        return [_build_frame(loaded_hdu, source_group_id=source_group_id)]
+
+    frame_count = int(np.prod(frame_axes, dtype=np.int64))
+    frames: list[FITSData] = []
+    for frame_index, frame_coordinates in enumerate(np.ndindex(*frame_axes)):
+        frames.append(_build_frame(
+            loaded_hdu,
+            data=array[frame_coordinates],
+            frame_index=frame_index,
+            frame_count=frame_count,
+            frame_coordinates=tuple(int(value) for value in frame_coordinates),
+            source_group_id=source_group_id,
+        ))
+    return frames
+
+
+def _build_frame(
+    loaded_hdu: _LoadedHDUData,
+    *,
+    data: np.ndarray | None = None,
+    frame_index: int = 0,
+    frame_count: int = 1,
+    frame_coordinates: tuple[int, ...] = (),
+    source_group_id: int | None = None,
+) -> FITSData:
+    """Build one FITSData frame instance from loaded HDU metadata."""
+
+    return FITSData(
+        path=loaded_hdu.path,
+        hdu_index=loaded_hdu.hdu_index,
+        data=data if data is not None else loaded_hdu.data,
+        header=loaded_hdu.header,
+        wcs=loaded_hdu.wcs,
+        has_wcs=loaded_hdu.has_wcs,
+        available_hdus=loaded_hdu.available_hdus,
+        frame_index=frame_index,
+        frame_count=frame_count,
+        frame_coordinates=frame_coordinates,
+        source_group_id=source_group_id,
+    )
+
+
 def _read_hdu_data(path: str, hdu_index: int, hdul: fits.HDUList) -> np.ndarray | None:
     """Read one image HDU, retrying without memmap for scaled integer FITS data."""
 
@@ -191,6 +289,23 @@ def _should_retry_without_memmap(exc: ValueError, header: Any) -> bool:
     message = str(exc).lower()
     has_scaling = any(key in header for key in ("BSCALE", "BZERO", "BLANK"))
     return "memmap" in message or has_scaling
+
+
+def _build_frame_wcs(header: Any) -> tuple[Any, bool]:
+    """Build a WCS object suitable for per-frame 2D interaction."""
+
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", FITSFixedWarning)
+            full_wcs = WCS(header)
+        if full_wcs.has_celestial:
+            try:
+                return full_wcs.celestial, True
+            except Exception:
+                return full_wcs, True
+        return full_wcs, False
+    except Exception:
+        return None, False
 
 
 def _is_image_hdu(hdu: Any) -> bool:

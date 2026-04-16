@@ -82,6 +82,49 @@ class TestFITSData(unittest.TestCase):
         self.assertEqual(open_mock.call_args_list[0].kwargs, {"memmap": True})
         self.assertEqual(open_mock.call_args_list[1].kwargs, {"memmap": False})
 
+    def test_load_frames_splits_multidimensional_cube_into_2d_frames(self):
+        cube = np.arange(3 * 2 * 4, dtype=np.float32).reshape(3, 2, 4)
+        hdul = _FakeHDUList([
+            _FakeImageHDU(header={"BITPIX": -32}, shape=cube.shape, data=cube),
+        ])
+
+        with patch("core.fits_data.fits.open", return_value=hdul):
+            with patch(
+                "core.fits_data._scan_image_hdus",
+                return_value=[HDUInfo(index=0, name="PRIMARY", dimensions=cube.shape, dtype_name="float32")],
+            ):
+                with patch("core.fits_data.WCS", side_effect=Exception("no wcs")):
+                    frames = FITSData.load_frames("cube.fits", source_group_id=7)
+
+        self.assertEqual(len(frames), 3)
+        self.assertTrue(all(frame.data is not None for frame in frames))
+        self.assertEqual([frame.data.shape for frame in frames], [(2, 4), (2, 4), (2, 4)])
+        self.assertTrue(np.array_equal(frames[0].data, cube[0]))
+        self.assertTrue(np.array_equal(frames[1].data, cube[1]))
+        self.assertTrue(np.array_equal(frames[2].data, cube[2]))
+        self.assertEqual([frame.frame_index for frame in frames], [0, 1, 2])
+        self.assertEqual([frame.frame_count for frame in frames], [3, 3, 3])
+        self.assertEqual([frame.source_group_id for frame in frames], [7, 7, 7])
+
+    def test_load_returns_first_frame_for_multidimensional_cube(self):
+        cube = np.arange(3 * 2 * 2, dtype=np.float32).reshape(3, 2, 2)
+        hdul = _FakeHDUList([
+            _FakeImageHDU(header={"BITPIX": -32}, shape=cube.shape, data=cube),
+        ])
+
+        with patch("core.fits_data.fits.open", return_value=hdul):
+            with patch(
+                "core.fits_data._scan_image_hdus",
+                return_value=[HDUInfo(index=0, name="PRIMARY", dimensions=cube.shape, dtype_name="float32")],
+            ):
+                with patch("core.fits_data.WCS", side_effect=Exception("no wcs")):
+                    data = FITSData.load("cube.fits")
+
+        self.assertEqual(data.frame_index, 0)
+        self.assertEqual(data.frame_count, 3)
+        self.assertEqual(data.data.shape, (2, 2))
+        self.assertTrue(np.array_equal(data.data, cube[0]))
+
 
 if __name__ == "__main__":
     unittest.main()

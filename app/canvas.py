@@ -3,8 +3,8 @@ from __future__ import annotations
 import math
 from typing import Any
 
-from PySide6.QtCore import QPoint, QPointF, QRect, Qt, Signal
-from PySide6.QtGui import QBrush, QColor, QFont, QImage, QMouseEvent, QPen, QPixmap, QTransform
+from PySide6.QtCore import QPoint, QPointF, QRect, QRectF, Qt, Signal
+from PySide6.QtGui import QBrush, QColor, QFont, QImage, QMouseEvent, QPainter, QPen, QPixmap, QTransform
 from PySide6.QtWidgets import (
     QFrame,
     QGraphicsEllipseItem,
@@ -256,6 +256,40 @@ class ImageCanvas(QGraphicsView):
         self._feedback_background_item.setVisible(state.visible and bool(message))
         self._layout_feedback_item()
 
+    def render_scene_image(self) -> QImage | None:
+        """Render the current pixmap plus scene overlays (sources, markers) to a QImage.
+
+        The output matches the pixmap's native pixel size. Feedback text
+        (e.g. "No Image Loaded") is suppressed so it does not appear in
+        exported images. Returns ``None`` if no image is displayed.
+        """
+
+        pixmap = self._pixmap_item.pixmap()
+        if pixmap.isNull():
+            return None
+
+        source_rect = self._pixmap_item.sceneBoundingRect()
+        image = QImage(pixmap.size(), QImage.Format.Format_ARGB32)
+        image.fill(Qt.GlobalColor.black)
+
+        feedback_visible = self._feedback_item.isVisible()
+        background_visible = self._feedback_background_item.isVisible()
+        self._feedback_item.setVisible(False)
+        self._feedback_background_item.setVisible(False)
+
+        painter = QPainter(image)
+        try:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+            target_rect = QRectF(0, 0, float(pixmap.width()), float(pixmap.height()))
+            self._scene.render(painter, target_rect, source_rect)
+        finally:
+            painter.end()
+            self._feedback_item.setVisible(feedback_visible)
+            self._feedback_background_item.setVisible(background_visible)
+
+        return image
+
     def fit_to_window(self) -> None:
         """Scale the image to fit the current viewport.
 
@@ -264,7 +298,7 @@ class ImageCanvas(QGraphicsView):
 
         if self._pixmap_item.pixmap().isNull():
             return
-        self.fitInView(self._pixmap_item, mode=1)
+        self.fitInView(self._pixmap_item, Qt.AspectRatioMode.KeepAspectRatio)
         self.set_zoom_state(ZoomState(scale_factor=1.0, mode="fit"))
         self.zoom_changed.emit(self.zoom_state.scale_factor)
 

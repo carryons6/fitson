@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-_HANDLE_HIT_PX = 8
+_HANDLE_HIT_PX = 10
 
 
 class _HistogramView(QWidget):
@@ -168,21 +168,41 @@ class _HistogramView(QWidget):
         painter.fillRect(QRectF(rect.left(), rect.top(), low_x - rect.left(), rect.height()), shade)
         painter.fillRect(QRectF(high_x, rect.top(), rect.right() - high_x, rect.height()), shade)
 
-        # handle lines
-        handle_pen = QPen(QColor("#ffcf5a"), 2)
+        # handle lines: dark shadow first for contrast, then bright core line
+        shadow_pen = QPen(QColor(0, 0, 0, 200), 5)
+        painter.setPen(shadow_pen)
+        painter.drawLine(QPointF(low_x, rect.top()), QPointF(low_x, rect.bottom()))
+        painter.drawLine(QPointF(high_x, rect.top()), QPointF(high_x, rect.bottom()))
+
+        handle_pen = QPen(QColor("#ffcf5a"), 3)
         painter.setPen(handle_pen)
         painter.drawLine(QPointF(low_x, rect.top()), QPointF(low_x, rect.bottom()))
         painter.drawLine(QPointF(high_x, rect.top()), QPointF(high_x, rect.bottom()))
 
-        # small triangular grip at the bottom of each handle
-        grip_size = 5.0
+        # triangular grips at BOTH top and bottom of each handle, with dark outline
+        grip_size = 7.0
+        grip_color = QColor("#ffcf5a")
+        grip_outline = QPen(QColor(0, 0, 0, 220), 1.5)
         for hx in (low_x, high_x):
-            grip = QPainterPath()
-            grip.moveTo(hx, rect.bottom())
-            grip.lineTo(hx - grip_size, rect.bottom() + grip_size)
-            grip.lineTo(hx + grip_size, rect.bottom() + grip_size)
-            grip.closeSubpath()
-            painter.fillPath(grip, QColor("#ffcf5a"))
+            # bottom grip (pointing down into the bottom margin)
+            bottom_grip = QPainterPath()
+            bottom_grip.moveTo(hx, rect.bottom())
+            bottom_grip.lineTo(hx - grip_size, rect.bottom() + grip_size)
+            bottom_grip.lineTo(hx + grip_size, rect.bottom() + grip_size)
+            bottom_grip.closeSubpath()
+            painter.fillPath(bottom_grip, grip_color)
+            painter.setPen(grip_outline)
+            painter.drawPath(bottom_grip)
+
+            # top grip (pointing up into the top margin)
+            top_grip = QPainterPath()
+            top_grip.moveTo(hx, rect.top())
+            top_grip.lineTo(hx - grip_size, rect.top() - grip_size)
+            top_grip.lineTo(hx + grip_size, rect.top() - grip_size)
+            top_grip.closeSubpath()
+            painter.fillPath(top_grip, grip_color)
+            painter.setPen(grip_outline)
+            painter.drawPath(top_grip)
 
 
 class HistogramDock(QDockWidget):

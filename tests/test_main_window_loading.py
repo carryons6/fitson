@@ -60,6 +60,20 @@ class TestMainWindowLoading(unittest.TestCase):
         cls._app = QApplication.instance() or QApplication([])
 
     @staticmethod
+    def _grayscale_image(values: list[list[int]]) -> QImage:
+        array = np.asarray(values, dtype=np.uint8)
+        if array.ndim != 2:
+            raise ValueError("grayscale test image must be 2D")
+        image = QImage(
+            array.data,
+            int(array.shape[1]),
+            int(array.shape[0]),
+            int(array.strides[0]),
+            QImage.Format.Format_Grayscale8,
+        )
+        return image.copy()
+
+    @staticmethod
     def _assert_settings_write(settings_mock: Mock, key: str, value: object) -> None:
         writes = [call.args for call in settings_mock.setValue.call_args_list]
         assert (key, value) in writes, f"Missing settings write {(key, value)!r}; got {writes!r}"
@@ -796,6 +810,97 @@ class TestMainWindowLoading(unittest.TestCase):
         finally:
             window.deleteLater()
 
+    def test_build_composite_frame_image_tiles_loaded_frames(self) -> None:
+        window = MainWindow()
+        window._frames = [
+            FITSData(path="frame-0.fits", data=np.zeros((2, 2))),
+            FITSData(path="frame-1.fits", data=np.zeros((2, 2))),
+        ]
+        window._frame_images = [
+            self._grayscale_image([[10, 20], [30, 40]]),
+            self._grayscale_image([[50, 60], [70, 80]]),
+        ]
+        window._frame_layout_mode = "tiled"
+        try:
+            image = window._build_composite_frame_image()
+
+            self.assertEqual((image.width(), image.height()), (4, 2))
+            self.assertEqual(image.pixelColor(0, 0).red(), 10)
+            self.assertEqual(image.pixelColor(1, 1).red(), 40)
+            self.assertEqual(image.pixelColor(2, 0).red(), 50)
+            self.assertEqual(image.pixelColor(3, 1).red(), 80)
+        finally:
+            window.deleteLater()
+
+    def test_build_composite_frame_image_stacks_loaded_frames_vertically(self) -> None:
+        window = MainWindow()
+        window._frames = [
+            FITSData(path="frame-0.fits", data=np.zeros((2, 2))),
+            FITSData(path="frame-1.fits", data=np.zeros((2, 2))),
+        ]
+        window._frame_images = [
+            self._grayscale_image([[1, 2], [3, 4]]),
+            self._grayscale_image([[5, 6], [7, 8]]),
+        ]
+        window._frame_layout_mode = "vertical"
+        try:
+            image = window._build_composite_frame_image()
+
+            self.assertEqual((image.width(), image.height()), (2, 4))
+            self.assertEqual(image.pixelColor(0, 0).red(), 1)
+            self.assertEqual(image.pixelColor(1, 1).red(), 4)
+            self.assertEqual(image.pixelColor(0, 2).red(), 5)
+            self.assertEqual(image.pixelColor(1, 3).red(), 8)
+        finally:
+            window.deleteLater()
+
+    def test_update_status_from_cursor_samples_frame_under_tiled_composite_layout(self) -> None:
+        window = MainWindow()
+        window.app_status_bar = Mock()
+        window._frames = [
+            FITSData(path="frame-0.fits", data=np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32)),
+            FITSData(path="frame-1.fits", data=np.array([[9.0, 8.0], [7.0, 6.0]], dtype=np.float32)),
+        ]
+        window._frame_layout_mode = "tiled"
+        window.fits_service.current_data = window._frames[0]
+        try:
+            window.update_status_from_cursor(2.2, 0.4)
+
+            sample = window.app_status_bar.set_sample.call_args.args[0]
+            self.assertEqual(sample.x, 0)
+            self.assertEqual(sample.y, 0)
+            self.assertEqual(sample.value, 9.0)
+            self.assertTrue(sample.inside_image)
+        finally:
+            window.deleteLater()
+
+    def test_build_sep_enablement_state_disables_sep_for_composite_layout(self) -> None:
+        window = MainWindow()
+        window._frames = [FITSData(path="0.fits"), FITSData(path="1.fits")]
+        window._frame_layout_mode = "vertical"
+        window.fits_service.current_data = FITSData(path="0.fits", data=np.zeros((2, 2)))
+        try:
+            state = window.build_sep_enablement_state()
+
+            self.assertFalse(state.enabled)
+            self.assertIn("composite", state.reason.lower())
+        finally:
+            window.deleteLater()
+
+    def test_sync_catalog_views_hides_canvas_sources_in_composite_layout(self) -> None:
+        window = MainWindow()
+        window.canvas = Mock()
+        window._frames = [FITSData(path="0.fits"), FITSData(path="1.fits")]
+        window._frame_layout_mode = "tiled"
+        window.current_catalog = SourceCatalog(records=[SourceRecord(source_id=1, x=10.0, y=12.0)])
+        try:
+            window.sync_catalog_views()
+
+            window.canvas.clear_sources.assert_called_once_with()
+            window.canvas.draw_sources.assert_not_called()
+        finally:
+            window.deleteLater()
+
     def test_sync_current_canvas_image_state_updates_frame_player_render_state(self) -> None:
         window = MainWindow()
         window.canvas = Mock()
@@ -1042,6 +1147,60 @@ class TestMainWindowLoading(unittest.TestCase):
         finally:
             window.deleteLater()
 
+    def test_go_prev_frame_wraps_from_first_frame_to_last(self) -> None:
+        window = MainWindow()
+        window._frames = [FITSData(path="0.fits"), FITSData(path="1.fits"), FITSData(path="2.fits")]
+        window._current_frame_index = 0
+        try:
+            with patch.object(window, "_switch_frame") as switch_mock:
+                window._go_prev_frame()
+
+            switch_mock.assert_called_once_with(2)
+        finally:
+            window.deleteLater()
+
+    def test_go_prev_frame_pauses_playback_before_switching(self) -> None:
+        window = MainWindow()
+        window._frames = [FITSData(path="0.fits"), FITSData(path="1.fits"), FITSData(path="2.fits")]
+        window._current_frame_index = 0
+        window.frame_player_dock = Mock()
+        window.frame_player_dock.is_playing.return_value = True
+        try:
+            with patch.object(window, "_switch_frame") as switch_mock:
+                window._go_prev_frame()
+
+            window.frame_player_dock.stop_playback.assert_called_once_with()
+            switch_mock.assert_called_once_with(2)
+        finally:
+            window.deleteLater()
+
+    def test_go_next_frame_wraps_from_last_frame_to_first(self) -> None:
+        window = MainWindow()
+        window._frames = [FITSData(path="0.fits"), FITSData(path="1.fits"), FITSData(path="2.fits")]
+        window._current_frame_index = 2
+        try:
+            with patch.object(window, "_switch_frame") as switch_mock:
+                window._go_next_frame()
+
+            switch_mock.assert_called_once_with(0)
+        finally:
+            window.deleteLater()
+
+    def test_go_next_frame_pauses_playback_before_switching(self) -> None:
+        window = MainWindow()
+        window._frames = [FITSData(path="0.fits"), FITSData(path="1.fits"), FITSData(path="2.fits")]
+        window._current_frame_index = 2
+        window.frame_player_dock = Mock()
+        window.frame_player_dock.is_playing.return_value = True
+        try:
+            with patch.object(window, "_switch_frame") as switch_mock:
+                window._go_next_frame()
+
+            window.frame_player_dock.stop_playback.assert_called_once_with()
+            switch_mock.assert_called_once_with(0)
+        finally:
+            window.deleteLater()
+
     def test_build_table_rows_uses_visible_source_columns(self) -> None:
         window = MainWindow()
         window.source_table_dock = Mock(
@@ -1110,6 +1269,27 @@ class TestMainWindowLoading(unittest.TestCase):
         finally:
             window.deleteLater()
 
+    def test_create_view_actions_registers_wrapped_frame_navigation_shortcuts(self) -> None:
+        window = MainWindow()
+        try:
+            window.create_view_actions()
+
+            self.assertIn(window.action_prev_frame, window.actions())
+            self.assertIn(window.action_next_frame, window.actions())
+            self.assertEqual(
+                [shortcut.toString() for shortcut in window.action_prev_frame.shortcuts()],
+                ["Left", "A"],
+            )
+            self.assertEqual(
+                [shortcut.toString() for shortcut in window.action_next_frame.shortcuts()],
+                ["Right", "D"],
+            )
+            self.assertTrue(window.action_frame_layout_single.isCheckable())
+            self.assertTrue(window.action_frame_layout_tiled.isCheckable())
+            self.assertTrue(window.action_frame_layout_vertical.isCheckable())
+        finally:
+            window.deleteLater()
+
     def test_reopen_last_session_uses_persisted_paths_and_index(self) -> None:
         window = MainWindow()
         window._settings = Mock()
@@ -1128,6 +1308,28 @@ class TestMainWindowLoading(unittest.TestCase):
 
             self.assertEqual(window._pending_session_restore_frame_index, 1)
             open_mock.assert_called_once_with(["D:\\fits\\a.fits", "D:\\fits\\b.fits"], append=False)
+        finally:
+            window.deleteLater()
+
+    def test_persist_session_state_collapses_multiframe_cube_paths(self) -> None:
+        window = MainWindow()
+        window._settings = Mock()
+        window._frames = [
+            FITSData(path="D:\\fits\\cube.fits", frame_index=0, frame_count=3, source_group_id=5),
+            FITSData(path="D:\\fits\\cube.fits", frame_index=1, frame_count=3, source_group_id=5),
+            FITSData(path="D:\\fits\\cube.fits", frame_index=2, frame_count=3, source_group_id=5),
+            FITSData(path="D:\\fits\\other.fits", frame_index=0, frame_count=1, source_group_id=6),
+        ]
+        window._current_frame_index = 2
+        try:
+            window._persist_session_state()
+
+            self._assert_settings_write(
+                window._settings,
+                "session/last_paths",
+                ["D:\\fits\\cube.fits", "D:\\fits\\other.fits"],
+            )
+            self._assert_settings_write(window._settings, "session/current_index", 2)
         finally:
             window.deleteLater()
 
@@ -1161,19 +1363,31 @@ class TestMainWindowLoading(unittest.TestCase):
         finally:
             window.deleteLater()
 
-    def test_handle_marker_color_changed_updates_canvas_roi_color(self) -> None:
+    def test_handle_source_color_changed_updates_canvas_roi_color(self) -> None:
         window = MainWindow()
         window.canvas = Mock()
         window.marker_dock = Mock()
-        window.marker_dock.color.return_value = QColor("#00ff00")
-        window.marker_dock.line_width.return_value = 5
-        window.marker_dock.parse_coordinates.return_value = []
+        window.marker_dock.source_color.return_value = QColor("#00ff00")
+        window.marker_dock.source_line_width.return_value = 5
         try:
-            window._handle_marker_color_changed(QColor("#00ff00"))
+            window._handle_source_color_changed(QColor("#00ff00"))
 
             window.canvas.set_roi_color.assert_called_once()
             self.assertEqual(window.canvas.set_roi_color.call_args.args[0].name(), "#00ff00")
             window.canvas.set_source_overlay_style.assert_called_once()
+        finally:
+            window.deleteLater()
+
+    def test_handle_marker_color_changed_does_not_touch_roi_overlay(self) -> None:
+        window = MainWindow()
+        window.canvas = Mock()
+        window.marker_dock = Mock()
+        window.marker_dock.parse_coordinates.return_value = []
+        try:
+            window._handle_marker_color_changed(QColor("#00ff00"))
+
+            window.canvas.set_roi_color.assert_not_called()
+            window.canvas.set_source_overlay_style.assert_not_called()
         finally:
             window.deleteLater()
 
@@ -1428,18 +1642,30 @@ class TestMainWindowLoading(unittest.TestCase):
         finally:
             window.deleteLater()
 
-    def test_handle_marker_line_width_changed_updates_canvas_roi_width(self) -> None:
+    def test_handle_source_line_width_changed_updates_canvas_roi_width(self) -> None:
         window = MainWindow()
         window.canvas = Mock()
         window.marker_dock = Mock()
-        window.marker_dock.color.return_value = QColor("#ff0000")
-        window.marker_dock.line_width.return_value = 25
-        window.marker_dock.parse_coordinates.return_value = []
+        window.marker_dock.source_color.return_value = QColor("#ff0000")
+        window.marker_dock.source_line_width.return_value = 25
         try:
-            window._handle_marker_line_width_changed(25)
+            window._handle_source_line_width_changed(25)
 
             window.canvas.set_roi_line_width.assert_called_once_with(25)
             window.canvas.set_source_overlay_style.assert_called_once()
+        finally:
+            window.deleteLater()
+
+    def test_handle_marker_line_width_changed_does_not_touch_roi_overlay(self) -> None:
+        window = MainWindow()
+        window.canvas = Mock()
+        window.marker_dock = Mock()
+        window.marker_dock.parse_coordinates.return_value = []
+        try:
+            window._handle_marker_line_width_changed(7)
+
+            window.canvas.set_roi_line_width.assert_not_called()
+            window.canvas.set_source_overlay_style.assert_not_called()
         finally:
             window.deleteLater()
 
@@ -1458,12 +1684,12 @@ class TestMainWindowLoading(unittest.TestCase):
         finally:
             window.deleteLater()
 
-    def test_sync_marker_visual_style_applies_marker_defaults_to_canvas(self) -> None:
+    def test_sync_marker_visual_style_applies_source_defaults_to_canvas(self) -> None:
         window = MainWindow()
         window.canvas = Mock()
         window.marker_dock = Mock()
-        window.marker_dock.color.return_value = QColor("#123456")
-        window.marker_dock.line_width.return_value = 5
+        window.marker_dock.source_color.return_value = QColor("#123456")
+        window.marker_dock.source_line_width.return_value = 5
         try:
             window._sync_marker_visual_style()
 
