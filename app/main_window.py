@@ -117,6 +117,7 @@ class MainWindow(QMainWindow):
         self.action_actual_pixels: QAction | None = None
         self.action_zoom_in: QAction | None = None
         self.action_zoom_out: QAction | None = None
+        self.action_smooth_rendering: QAction | None = None
         self.action_run_sep: QAction | None = None
         self.action_show_markers: QAction | None = None
         self.action_append_frames: QAction | None = None
@@ -542,6 +543,8 @@ class MainWindow(QMainWindow):
             self.menu_view.addAction(self.action_zoom_in)
         if self.action_zoom_out is not None:
             self.menu_view.addAction(self.action_zoom_out)
+        if self.action_smooth_rendering is not None:
+            self.menu_view.addAction(self.action_smooth_rendering)
         if self.action_cycle_view_mode is not None:
             self.menu_view.addSeparator()
             self.menu_view.addAction(self.action_cycle_view_mode)
@@ -687,6 +690,10 @@ class MainWindow(QMainWindow):
         self.action_zoom_out.setShortcut(QKeySequence.StandardKey.ZoomOut)
         self.action_reset_workspace_layout = QAction("Reset Workspace Layout", self)
 
+        self.action_smooth_rendering = QAction("平滑渲染", self)
+        self.action_smooth_rendering.setCheckable(True)
+        self.action_smooth_rendering.setChecked(False)
+
         self.action_cycle_view_mode = QAction("切换视图模式", self)
         self.action_cycle_view_mode.setShortcut("Tab")
         self.addAction(self.action_cycle_view_mode)
@@ -823,6 +830,8 @@ class MainWindow(QMainWindow):
             self.action_zoom_in.triggered.connect(self.canvas.zoom_in)
         if self.action_zoom_out is not None and self.canvas is not None:
             self.action_zoom_out.triggered.connect(self.canvas.zoom_out)
+        if self.action_smooth_rendering is not None and self.canvas is not None:
+            self.action_smooth_rendering.toggled.connect(self.canvas.set_smooth_rendering)
         if self.action_reset_workspace_layout is not None:
             self.action_reset_workspace_layout.triggered.connect(self._reset_workspace_layout)
         if self.action_cycle_view_mode is not None:

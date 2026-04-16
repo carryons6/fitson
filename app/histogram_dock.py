@@ -4,7 +4,7 @@ from typing import Any
 
 import numpy as np
 from PySide6.QtCore import QPointF, QRectF, Signal, Qt
-from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen
+from PySide6.QtGui import QColor, QCursor, QPainter, QPainterPath, QPen, QMouseEvent
 from PySide6.QtWidgets import (
     QDockWidget,
     QDoubleSpinBox,
@@ -15,16 +15,23 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+_HANDLE_HIT_PX = 8
+
 
 class _HistogramView(QWidget):
     """Lightweight histogram preview drawn without extra plotting dependencies."""
+
+    range_dragged = Signal(float, float)
+    range_drag_finished = Signal(float, float)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._counts = np.zeros(0, dtype=np.int64)
         self._manual_low: float | None = None
         self._manual_high: float | None = None
+        self._dragging: str | None = None  # "low", "high", or None
         self.setMinimumHeight(140)
+        self.setMouseTracking(True)
 
     def set_histogram(self, counts: np.ndarray) -> None:
         self._counts = np.asarray(counts, dtype=np.int64)
@@ -39,14 +46,81 @@ class _HistogramView(QWidget):
         self._counts = np.zeros(0, dtype=np.int64)
         self._manual_low = None
         self._manual_high = None
+        self._dragging = None
         self.update()
+
+    def _chart_rect(self) -> QRectF:
+        return QRectF(self.rect().adjusted(8, 8, -8, -8))
+
+    def _ratio_to_x(self, ratio: float) -> float:
+        r = self._chart_rect()
+        return r.left() + min(max(ratio, 0.0), 1.0) * r.width()
+
+    def _x_to_ratio(self, x: float) -> float:
+        r = self._chart_rect()
+        if r.width() <= 0:
+            return 0.0
+        return min(max((x - r.left()) / r.width(), 0.0), 1.0)
+
+    def _hit_handle(self, x: float) -> str | None:
+        if self._manual_low is None or self._manual_high is None:
+            return None
+        low_x = self._ratio_to_x(self._manual_low)
+        high_x = self._ratio_to_x(self._manual_high)
+        dist_low = abs(x - low_x)
+        dist_high = abs(x - high_x)
+        if dist_low <= _HANDLE_HIT_PX and dist_low <= dist_high:
+            return "low"
+        if dist_high <= _HANDLE_HIT_PX:
+            return "high"
+        return None
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            handle = self._hit_handle(event.position().x())
+            if handle is not None:
+                self._dragging = handle
+                event.accept()
+                return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event: QMouseEvent) -> None:
+        if self._dragging is not None:
+            ratio = self._x_to_ratio(event.position().x())
+            if self._dragging == "low":
+                high = self._manual_high if self._manual_high is not None else 1.0
+                self._manual_low = min(ratio, high - 0.001)
+            else:
+                low = self._manual_low if self._manual_low is not None else 0.0
+                self._manual_high = max(ratio, low + 0.001)
+            self.update()
+            if self._manual_low is not None and self._manual_high is not None:
+                self.range_dragged.emit(self._manual_low, self._manual_high)
+            event.accept()
+            return
+
+        handle = self._hit_handle(event.position().x())
+        if handle is not None:
+            self.setCursor(QCursor(Qt.CursorShape.SplitHCursor))
+        else:
+            self.unsetCursor()
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:
+        if self._dragging is not None and event.button() == Qt.MouseButton.LeftButton:
+            self._dragging = None
+            if self._manual_low is not None and self._manual_high is not None:
+                self.range_drag_finished.emit(self._manual_low, self._manual_high)
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
 
     def paintEvent(self, event: Any) -> None:
         super().paintEvent(event)
 
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        rect = self.rect().adjusted(8, 8, -8, -8)
+        rect = self._chart_rect().toAlignedRect()
 
         painter.fillRect(rect, QColor("#101419"))
         painter.setPen(QPen(QColor("#2e3b4a"), 1))
@@ -86,13 +160,29 @@ class _HistogramView(QWidget):
         if self._manual_low is None or self._manual_high is None:
             return
 
-        manual_pen = QPen(QColor("#ffcf5a"), 1)
-        manual_pen.setStyle(Qt.PenStyle.DashLine)
-        painter.setPen(manual_pen)
-        left_x = rect.left() + min(max(self._manual_low, 0.0), 1.0) * width
-        right_x = rect.left() + min(max(self._manual_high, 0.0), 1.0) * width
-        painter.drawLine(QPointF(left_x, rect.top()), QPointF(left_x, rect.bottom()))
-        painter.drawLine(QPointF(right_x, rect.top()), QPointF(right_x, rect.bottom()))
+        low_x = self._ratio_to_x(self._manual_low)
+        high_x = self._ratio_to_x(self._manual_high)
+
+        # shaded regions outside the selected range
+        shade = QColor(0, 0, 0, 120)
+        painter.fillRect(QRectF(rect.left(), rect.top(), low_x - rect.left(), rect.height()), shade)
+        painter.fillRect(QRectF(high_x, rect.top(), rect.right() - high_x, rect.height()), shade)
+
+        # handle lines
+        handle_pen = QPen(QColor("#ffcf5a"), 2)
+        painter.setPen(handle_pen)
+        painter.drawLine(QPointF(low_x, rect.top()), QPointF(low_x, rect.bottom()))
+        painter.drawLine(QPointF(high_x, rect.top()), QPointF(high_x, rect.bottom()))
+
+        # small triangular grip at the bottom of each handle
+        grip_size = 5.0
+        for hx in (low_x, high_x):
+            grip = QPainterPath()
+            grip.moveTo(hx, rect.bottom())
+            grip.lineTo(hx - grip_size, rect.bottom() + grip_size)
+            grip.lineTo(hx + grip_size, rect.bottom() + grip_size)
+            grip.closeSubpath()
+            painter.fillPath(grip, QColor("#ffcf5a"))
 
 
 class HistogramDock(QDockWidget):
@@ -151,6 +241,8 @@ class HistogramDock(QDockWidget):
 
         self.apply_btn.clicked.connect(self._emit_manual_range)
         self.auto_btn.clicked.connect(self.auto_range_requested.emit)
+        self.histogram_view.range_dragged.connect(self._on_range_dragged)
+        self.histogram_view.range_drag_finished.connect(self._on_range_drag_finished)
 
     def set_histogram(
         self,
@@ -197,6 +289,29 @@ class HistogramDock(QDockWidget):
         self.low_spin.setValue(0.0)
         self.high_spin.setValue(0.0)
         self.status_label.clear()
+
+    def _from_ratio(self, ratio: float) -> float:
+        return self._data_min + ratio * (self._data_max - self._data_min)
+
+    def _on_range_dragged(self, low_ratio: float, high_ratio: float) -> None:
+        """Live-update spin boxes while dragging."""
+        low = self._from_ratio(low_ratio)
+        high = self._from_ratio(high_ratio)
+        self.low_spin.blockSignals(True)
+        self.high_spin.blockSignals(True)
+        self.low_spin.setValue(low)
+        self.high_spin.setValue(high)
+        self.low_spin.blockSignals(False)
+        self.high_spin.blockSignals(False)
+
+    def _on_range_drag_finished(self, low_ratio: float, high_ratio: float) -> None:
+        """Apply the range when the user releases the handle."""
+        low = self._from_ratio(low_ratio)
+        high = self._from_ratio(high_ratio)
+        if high <= low:
+            return
+        self.status_label.setText("Manual range applied.")
+        self.manual_range_applied.emit(low, high)
 
     def _emit_manual_range(self) -> None:
         low = float(self.low_spin.value())

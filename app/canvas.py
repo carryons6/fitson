@@ -4,10 +4,11 @@ import math
 from typing import Any
 
 from PySide6.QtCore import QPoint, QPointF, QRect, Qt, Signal
-from PySide6.QtGui import QBrush, QColor, QFont, QImage, QMouseEvent, QPen, QPixmap
+from PySide6.QtGui import QBrush, QColor, QFont, QImage, QMouseEvent, QPen, QPixmap, QTransform
 from PySide6.QtWidgets import (
     QFrame,
     QGraphicsEllipseItem,
+    QGraphicsItem,
     QGraphicsPixmapItem,
     QGraphicsRectItem,
     QGraphicsScene,
@@ -76,6 +77,8 @@ class ImageCanvas(QGraphicsView):
         self._scene.addItem(self._feedback_item)
         self._feedback_background_item.setZValue(9)
         self._feedback_item.setZValue(10)
+        self._feedback_item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations, True)
+        self._feedback_background_item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations, True)
         self._feedback_item.document().setDocumentMargin(0)
         self._feedback_item.setFont(QFont("Segoe UI", 12))
         self._feedback_item.setVisible(True)
@@ -100,6 +103,21 @@ class ImageCanvas(QGraphicsView):
     def scrollContentsBy(self, dx: int, dy: int) -> None:
         super().scrollContentsBy(dx, dy)
         self._layout_feedback_item()
+
+    def set_smooth_rendering(self, enabled: bool) -> None:
+        """Toggle smooth pixmap interpolation on the image item itself.
+
+        Uses QGraphicsPixmapItem.setTransformationMode so the hint lives on
+        the item, not the view, and works at every zoom level without
+        forcing any zoom change.
+        """
+        mode = (
+            Qt.TransformationMode.SmoothTransformation
+            if enabled
+            else Qt.TransformationMode.FastTransformation
+        )
+        self._pixmap_item.setTransformationMode(mode)
+        self.viewport().update()
 
     def set_magnifier_visible(self, visible: bool) -> None:
         self.magnifier.setVisible(visible)
@@ -431,7 +449,14 @@ class ImageCanvas(QGraphicsView):
         self._layout_feedback_item()
 
     def _layout_feedback_item(self) -> None:
-        """Center feedback text within the current viewport."""
+        """Center feedback text within the current viewport.
+
+        Both feedback items have ``ItemIgnoresTransformations``, so their
+        local (item) coordinates are in device pixels regardless of zoom.
+        We place the background at the viewport-center scene point with a
+        locally-centered rect, and make the text a child so it inherits
+        the same anchor automatically.
+        """
 
         if not self._feedback_item.isVisible() or not self._feedback_item.toPlainText().strip():
             self._feedback_background_item.setVisible(False)
@@ -441,15 +466,27 @@ class ImageCanvas(QGraphicsView):
         self._feedback_item.setTextWidth(text_width)
         bounds = self._feedback_item.boundingRect()
         scene_center = self.mapToScene(self.viewport().rect().center())
+
         padding_x = 18.0
         padding_y = 14.0
         bg_width = bounds.width() + padding_x * 2.0
         bg_height = bounds.height() + padding_y * 2.0
-        bg_x = scene_center.x() - bg_width / 2.0
-        bg_y = scene_center.y() - bg_height / 2.0
-        self._feedback_background_item.setRect(bg_x, bg_y, bg_width, bg_height)
+
+        # Background — anchor at viewport center, rect centered in local px
+        self._feedback_background_item.setPos(scene_center)
+        self._feedback_background_item.setRect(
+            -bg_width / 2.0, -bg_height / 2.0, bg_width, bg_height,
+        )
         self._feedback_background_item.setVisible(True)
-        self._feedback_item.setPos(bg_x + padding_x, bg_y + padding_y)
+
+        # Text — same scene anchor, offset so it sits inside the card
+        self._feedback_item.setPos(scene_center)
+        self._feedback_item.setTransform(
+            QTransform.fromTranslate(
+                -bg_width / 2.0 + padding_x,
+                -bg_height / 2.0 + padding_y,
+            )
+        )
 
     def _apply_feedback_style(self, status: str) -> None:
         """Apply high-contrast colors for canvas feedback cards."""

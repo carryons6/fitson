@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 1.4.2 - 2026-04-15
+
+### Added
+- Added a "平滑渲染" toggle in the View menu that sets smooth pixmap interpolation directly on the image item, working at any zoom level without forcing a zoom reset.
+- Added draggable low/high handles on the histogram view for direct contrast adjustment — drag the yellow lines to set the display range, with live spin-box sync and auto-apply on release.
+- Added shaded regions outside the selected range and triangular grip indicators on histogram handles for clearer visual feedback.
+
+### Fixed
+- Fixed canvas feedback text (loading/error/empty messages) scaling with the image zoom level by setting `ItemIgnoresTransformations` on the feedback items, so text stays a constant readable size at any zoom.
+
 ## 1.4.1 - 2026-04-15
 
 ### Fixed
