@@ -3,17 +3,31 @@ from __future__ import annotations
 from typing import Any
 
 import numpy as np
-from astropy.visualization import (
-    AsinhStretch,
-    LinearStretch,
-    LogStretch,
-    MinMaxInterval,
-    SqrtStretch,
-    ZScaleInterval,
-)
 
 from .contracts import RenderRequest, RenderResult
 from .fits_data import FITSData, HDUInfo
+
+
+def _astropy_visualization():
+    """Lazy import for astropy.visualization; deferred to first render call."""
+
+    from astropy.visualization import (
+        AsinhStretch,
+        LinearStretch,
+        LogStretch,
+        MinMaxInterval,
+        SqrtStretch,
+        ZScaleInterval,
+    )
+
+    return {
+        "AsinhStretch": AsinhStretch,
+        "LinearStretch": LinearStretch,
+        "LogStretch": LogStretch,
+        "MinMaxInterval": MinMaxInterval,
+        "SqrtStretch": SqrtStretch,
+        "ZScaleInterval": ZScaleInterval,
+    }
 
 
 class FITSService:
@@ -298,13 +312,6 @@ def render_preview_u8(
     return preview_image[:height, :width]
 
 
-_STRETCH_MAP: dict[str, type] = {
-    "Linear": LinearStretch,
-    "Log": LogStretch,
-    "Asinh": AsinhStretch,
-    "Sqrt": SqrtStretch,
-}
-
 _PERCENTILE_INTERVALS: dict[str, float] = {
     "99.5%": 99.5,
     "99%": 99.0,
@@ -314,15 +321,23 @@ _PERCENTILE_INTERVALS: dict[str, float] = {
 
 
 def _build_stretch(name: str) -> Any:
-    cls = _STRETCH_MAP.get(name, LinearStretch)
+    viz = _astropy_visualization()
+    stretch_map = {
+        "Linear": viz["LinearStretch"],
+        "Log": viz["LogStretch"],
+        "Asinh": viz["AsinhStretch"],
+        "Sqrt": viz["SqrtStretch"],
+    }
+    cls = stretch_map.get(name, viz["LinearStretch"])
     return cls()
 
 
 def _build_interval(name: str, *, manual_vmin: float | None = None, manual_vmax: float | None = None) -> Any:
+    viz = _astropy_visualization()
     if name == "ZScale":
-        return ZScaleInterval()
+        return viz["ZScaleInterval"]()
     if name == "MinMax":
-        return MinMaxInterval()
+        return viz["MinMaxInterval"]()
     if name == "Original":
         return _OriginalInterval()
     if name == "Manual":
@@ -334,7 +349,7 @@ def _build_interval(name: str, *, manual_vmin: float | None = None, manual_vmax:
         lo = (100.0 - pct) / 2.0
         hi = 100.0 - lo
         return _PercentileInterval(pct)
-    return ZScaleInterval()
+    return viz["ZScaleInterval"]()
 
 
 class _PercentileInterval:

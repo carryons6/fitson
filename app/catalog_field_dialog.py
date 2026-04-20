@@ -35,12 +35,12 @@ class CatalogFieldDialog(QDialog):
         self._checkboxes: dict[str, QCheckBox] = {}
 
         self.setObjectName("catalog_field_dialog")
-        self.setWindowTitle("Target Info Fields")
+        self.setWindowTitle(self.tr("Target Info Fields"))
         self.resize(420, 320)
 
         self.layout = QVBoxLayout(self)
         self.description_label = QLabel(
-            "Choose which fields should be shown for right-drag target extraction results.",
+            self.tr("Choose which fields should be shown for right-drag target extraction results."),
             self,
         )
         self.description_label.setWordWrap(True)
@@ -50,7 +50,7 @@ class CatalogFieldDialog(QDialog):
         self.checkbox_layout = QGridLayout(self.checkbox_host)
         self.checkbox_layout.setContentsMargins(0, 0, 0, 0)
 
-        self.reset_button = QPushButton("Reset Defaults", self)
+        self.reset_button = QPushButton(self.tr("Reset Defaults"), self)
         self.button_box = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel,
             self,
@@ -61,6 +61,13 @@ class CatalogFieldDialog(QDialog):
         self.layout.addWidget(self.checkbox_host)
         self.layout.addWidget(self.reset_button)
         self.layout.addWidget(self.button_box)
+
+        ok_button = self.button_box.button(QDialogButtonBox.StandardButton.Ok)
+        if ok_button is not None:
+            ok_button.setText(self.tr("OK"))
+        cancel_button = self.button_box.button(QDialogButtonBox.StandardButton.Cancel)
+        if cancel_button is not None:
+            cancel_button.setText(self.tr("Cancel"))
 
         self._build_checkboxes(columns)
         self.reset_button.clicked.connect(self.reset_defaults)
@@ -95,7 +102,7 @@ class CatalogFieldDialog(QDialog):
         """Create one checkbox per available catalog column."""
 
         for index, column in enumerate(columns):
-            checkbox = QCheckBox(column.title, self.checkbox_host)
+            checkbox = QCheckBox(self.tr(column.title), self.checkbox_host)
             checkbox.setChecked(column.visible)
             row = index // 2
             col = index % 2
@@ -106,6 +113,6 @@ class CatalogFieldDialog(QDialog):
         """Accept only when at least one field stays enabled."""
 
         if not any(checkbox.isChecked() for checkbox in self._checkboxes.values()):
-            self.validation_label.setText("Select at least one field.")
+            self.validation_label.setText(self.tr("Select at least one field."))
             return
         self.accept()

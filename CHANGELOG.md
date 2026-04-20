@@ -1,6 +1,40 @@
 # Changelog
 
-## Unreleased
+## 1.7.1 - 2026-04-20
+
+### Added
+- Added a structured FITS header viewer with per-HDU switching, scoped or regex search, raw-text fallback, and copy actions for header cards; column widths, view mode, and search options persist across sessions via `QSettings`.
+
+## 1.7.0 - 2026-04-20
+
+### Added
+- Added bilingual UI support (English / 简体中文) with a runtime language switcher persisted in `QSettings`; default language follows the system locale and falls back to English. Translations shipped as Qt `.qm` files under `resources/i18n/`.
+
+## 1.6.0 - 2026-04-20
+
+### Added
+- Added cancellation for SEP Extract: the status-bar Cancel button now terminates the running extraction subprocess, so crowded or large-image runs can be aborted without killing the app.
+- Added a SEP count-estimate pre-pass at a conservative 15σ threshold that computes source density (per Mpx) and extrapolates the expected count at the user-configured threshold, then surfaces a non-modal Continue/Cancel prompt in the status bar only for crowded or high-count fields.
+
+### Changed
+- Deferred heavy `astropy` (`io.fits`, `wcs`, `visualization`) and `sep` imports in `core/` to first use, reducing `MainWindow` cold-import time from ~780 ms to ~170 ms and end-to-end startup to roughly 300 ms.
+
+### Fixed
+- Fixed image drifting toward the bottom-right during multi-frame playback by skipping the `capture_view_state` / `restore_view_state` round-trip when the new frame has the same pixmap size as the current one; the sub-pixel scrollbar rounding in that round-trip was accumulating into a visible drift over many same-size frames.
+
+## 1.5.0 - 2026-04-16
+
+### Added
+- Added `File > Export Image` and `Export Raw Image` (PNG/EPS/PDF/FITS); annotated export bakes ROI/marker overlays via scene render.
+- Added separate marker styling for Imported Markers vs Detected Sources (ROI) with independent color/line-width persistence.
+
+### Changed
+- Histogram now targets the active interval's pixel range; the axis stays anchored while dragging Manual handles and resets on new data or auto-interval switch.
+- Larger, higher-contrast histogram handles with dual-sided triangular grips.
+- Tiled multi-frame layout uses a single horizontal row.
+
+### Fixed
+- Fixed `View > Fit` error by passing `aspectRatioMode` so tiled composites also fit.
 
 ## 1.4.2 - 2026-04-15
 

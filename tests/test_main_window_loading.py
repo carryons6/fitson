@@ -21,7 +21,7 @@ if str(REPO_PARENT) not in sys.path:
     sys.path.insert(0, str(REPO_PARENT))
 
 from astroview import __version__
-from astroview.app.contracts import TableColumnSpec
+from astroview.app.contracts import HeaderPayload, HeaderViewState, TableColumnSpec
 from astroview.app.main_window import MainWindow
 from astroview.app.update_check_worker import UpdateCheckResult
 from astroview.core.contracts import ROISelection
@@ -1038,6 +1038,26 @@ class TestMainWindowLoading(unittest.TestCase):
         finally:
             window.deleteLater()
 
+    def test_show_header_dialog_uses_structured_payloads_and_current_hdu(self) -> None:
+        window = MainWindow()
+        window.header_dialog = Mock()
+        window.fits_service.current_data = FITSData(path="demo.fits", hdu_index=2)
+        payloads = [HeaderPayload(hdu_index=2, name="SCI", kind="ImageHDU", raw_text="OBJECT = 'M31'")]
+        state = HeaderViewState(has_header=True, hdu_index=2, line_count=1)
+        try:
+            with patch.object(window, "build_header_view_state", return_value=state) as state_mock:
+                with patch.object(window, "_build_header_payloads", return_value=payloads) as payload_mock:
+                    window.show_header_dialog()
+
+            state_mock.assert_called_once_with()
+            payload_mock.assert_called_once_with()
+            window.header_dialog.set_view_state.assert_called_once_with(state)
+            window.header_dialog.set_header_payloads.assert_called_once_with(payloads, current_hdu_index=2)
+            window.header_dialog.show.assert_called_once_with()
+            window.header_dialog.raise_.assert_called_once_with()
+        finally:
+            window.deleteLater()
+
     def test_activate_frame_includes_version_in_window_title(self) -> None:
         window = MainWindow()
         window._frames = [FITSData(path="frame-0.fits")]
@@ -1342,6 +1362,23 @@ class TestMainWindowLoading(unittest.TestCase):
         finally:
             window.deleteLater()
 
+    def test_handle_language_changed_persists_setting_and_prompts_for_restart(self) -> None:
+        window = MainWindow()
+        window._settings = Mock()
+        try:
+            with patch("astroview.app.main_window.current_language", return_value="en"):
+                with patch("astroview.app.main_window.QMessageBox.information") as info_mock:
+                    window._handle_language_changed("zh_CN", True)
+
+            self._assert_settings_write(window._settings, "ui/language", "zh_CN")
+            info_mock.assert_called_once_with(
+                window,
+                "Language",
+                "Language change will take effect after restart.",
+            )
+        finally:
+            window.deleteLater()
+
     def test_handle_update_check_result_opens_release_page_when_confirmed(self) -> None:
         window = MainWindow()
         try:
@@ -1599,6 +1636,7 @@ class TestMainWindowLoading(unittest.TestCase):
                     worker_cls.return_value = Mock(
                         moveToThread=Mock(),
                         extraction_ready=_FakeSignal(),
+                        estimation_ready=_FakeSignal(),
                         extraction_error=_FakeSignal(),
                         finished=_FakeSignal(),
                         deleteLater=Mock(),
@@ -1606,10 +1644,10 @@ class TestMainWindowLoading(unittest.TestCase):
                     window._start_sep_extract(ROISelection(x0=2, y0=3, width=10, height=8))
 
             window.app_status_bar.set_activity.assert_called_once_with(
-                "Running SEP extraction on 10x8 ROI...",
+                "Estimating SEP source count on 10x8 ROI...",
                 progress_value=0,
                 progress_max=0,
-                cancellable=False,
+                cancellable=True,
             )
         finally:
             window.deleteLater()

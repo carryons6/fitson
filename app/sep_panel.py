@@ -36,9 +36,9 @@ class SEPParamsPanel(QWidget):
         self._field_widgets: dict[str, QWidget] = {}
         self.layout = QVBoxLayout(self)
         self.feedback_label = QLabel(self)
-        self.form_group = QGroupBox("SEP Parameters", self)
+        self.form_group = QGroupBox(self.tr("SEP Parameters"), self)
         self.form_layout = QFormLayout(self.form_group)
-        self.reset_button = QPushButton("Reset Defaults", self)
+        self.reset_button = QPushButton(self.tr("Reset Defaults"), self)
 
         self.setObjectName("sep_params_panel")
         self.layout.addWidget(self.feedback_label)
@@ -235,7 +235,7 @@ class SEPParamsPanel(QWidget):
         for spec in self._field_specs:
             widget = self._make_widget_for_spec(spec)
             self._field_widgets[spec.key] = widget
-            self.form_layout.addRow(spec.label, widget)
+            self.form_layout.addRow(self.tr(spec.label), widget)
         self.apply_params_to_form_state(self._params)
 
     def _make_widget_for_spec(self, spec: SEPFieldSpec) -> QWidget:
@@ -265,7 +265,7 @@ class SEPParamsPanel(QWidget):
                 widget.setSingleStep(float(spec.step))
             widget.setValue(float(spec.default_value))
             widget.valueChanged.connect(lambda _value, self=self: self.emit_params_changed())
-        widget.setToolTip(spec.tooltip)
+        widget.setToolTip(self.tr(spec.tooltip))
         return widget
 
     def _apply_panel_state(self) -> None:

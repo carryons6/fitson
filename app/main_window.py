@@ -9,6 +9,7 @@ import numpy as np
 from PySide6.QtCore import QByteArray, QMarginsF, QSizeF, Qt, QThread, QSettings, QTimer, QUrl
 from PySide6.QtGui import QAction, QActionGroup, QDesktopServices, QGuiApplication, QImage, QKeySequence, QPainter, QTransform
 from PySide6.QtWidgets import (
+    QApplication,
     QComboBox,
     QDockWidget,
     QFileDialog,
@@ -24,11 +25,13 @@ from PySide6.QtWidgets import (
 
 from .. import APP_NAME, APP_RELEASES_URL, __version__
 from ..core import FITSService, OpenFileRequest, PixelSample, ROISelection, SEPService, SourceCatalog
+from ..core.sep_service import SEPParameters
 from ..diagnostics import log_current_exception
 from .contracts import (
     CanvasImageState,
     CanvasOverlayState,
     ControlEnablementState,
+    HeaderPayload,
     HeaderViewState,
     RenderControlState,
     SEPPanelState,
@@ -44,7 +47,9 @@ from .frame_player_dock import FramePlayerDock
 from .frame_bkg_worker import FrameBkgWorker
 from .frame_render_worker import FrameRenderWorker
 from .header_dialog import HeaderDialog
+from .header_parser import parse_header_text
 from .histogram_dock import HistogramDock
+from .i18n import available_locales, current_language, language_display_name, load_preferred_language, save_preferred_language
 from .marker_dock import MarkerDock
 from .sep_extract_worker import SEPExtractWorker
 from .sep_panel import SEPParamsPanel
@@ -54,6 +59,14 @@ from .update_check_worker import UpdateCheckResult, UpdateCheckWorker
 
 
 logger = logging.getLogger(__name__)
+
+
+def _astropy_fits():
+    """Import astropy FITS lazily for optional header inspection in the UI layer."""
+
+    from astropy.io import fits
+
+    return fits
 
 
 @dataclass(slots=True)
@@ -86,6 +99,9 @@ class MainWindow(QMainWindow):
     DEFAULT_PREVIEW_PROFILE = "Balanced"
     SUPPORTED_FITS_SUFFIXES = frozenset({".fits", ".fit", ".fts"})
     WORKSPACE_LAYOUT_VERSION = 4
+    SEP_ESTIMATE_THRESHOLD_SIGMA = 15.0
+    SEP_LARGE_COUNT_WARNING = 5000
+    SEP_DENSE_FIELD_PER_MPX = 150
 
     def __init__(
         self,
@@ -114,12 +130,15 @@ class MainWindow(QMainWindow):
         self.menu_tools: Any = None
         self.menu_help: Any = None
         self.menu_recent_files: Any = None
+        self.menu_language: Any = None
 
         self.main_toolbar: Any = None
         self.stretch_selector: Any = None
         self.interval_selector: Any = None
         self.preview_profile_selector: Any = None
         self.magnifier_spinbox: Any = None
+        self.language_action_group: QActionGroup | None = None
+        self.language_actions: dict[str, QAction] = {}
 
         self.action_open_file: QAction | None = None
         self.action_export_catalog: QAction | None = None
@@ -190,6 +209,10 @@ class MainWindow(QMainWindow):
         self._sep_worker: SEPExtractWorker | None = None
         self._sep_request_id: int = 0
         self._active_sep_request_id: int | None = None
+        self._sep_is_estimate_phase: bool = False
+        self._sep_pending_extract_roi: ROISelection | None = None
+        self._sep_pending_launch_roi: ROISelection | None = None
+        self._sep_confirm_pending_roi: ROISelection | None = None
         self._update_check_thread: QThread | None = None
         self._update_check_worker: UpdateCheckWorker | None = None
         self._startup_request_applied = False
@@ -363,7 +386,7 @@ class MainWindow(QMainWindow):
         )
         self.source_table_dock.setMinimumWidth(360)
         self.sep_panel = SEPParamsPanel(self)
-        self.sep_panel_dock = QDockWidget("SEP Params", self)
+        self.sep_panel_dock = QDockWidget(self.tr("SEP Parameters"), self)
         self.sep_panel_dock.setObjectName("sep_panel_dock")
         self.sep_panel_dock.setWidget(self.sep_panel)
         self.sep_panel_dock.setMinimumWidth(260)
@@ -485,15 +508,15 @@ class MainWindow(QMainWindow):
 
         dock_btn = QToolButton(bar)
         dock_btn.setAutoRaise(True)
-        dock_btn.setToolTip("停靠 / 浮动")
-        dock_btn.setText("⧉")
+        dock_btn.setToolTip(self.tr("Dock / Float"))
+        dock_btn.setText("\u29c9")
         dock_btn.clicked.connect(lambda: dock.setFloating(not dock.isFloating()))
         layout.addWidget(dock_btn)
 
         close_btn = QToolButton(bar)
         close_btn.setAutoRaise(True)
-        close_btn.setToolTip("关闭")
-        close_btn.setText("✕")
+        close_btn.setToolTip(self.tr("Close"))
+        close_btn.setText("\u2715")
         close_btn.clicked.connect(dock.close)
         layout.addWidget(close_btn)
 
@@ -501,8 +524,10 @@ class MainWindow(QMainWindow):
         dock.windowTitleChanged.connect(title_label.setText)
 
         def refresh_dock_button(_floating: bool) -> None:
-            dock_btn.setText("⇲" if dock.isFloating() else "⧉")
-            dock_btn.setToolTip("停靠回主窗口" if dock.isFloating() else "浮动")
+            dock_btn.setText("\u21f2" if dock.isFloating() else "\u29c9")
+            dock_btn.setToolTip(
+                self.tr("Dock to Main Window") if dock.isFloating() else self.tr("Float")
+            )
 
         dock.topLevelChanged.connect(refresh_dock_button)
         refresh_dock_button(dock.isFloating())
@@ -536,14 +561,14 @@ class MainWindow(QMainWindow):
         """Create the top-level menus and place actions into them."""
 
         menu_bar = self.menuBar()
-        self.menu_file = menu_bar.addMenu("文件")
-        self.menu_view = menu_bar.addMenu("视图")
-        self.menu_tools = menu_bar.addMenu("工具")
-        self.menu_help = menu_bar.addMenu("帮助")
+        self.menu_file = menu_bar.addMenu(self.tr("File"))
+        self.menu_view = menu_bar.addMenu(self.tr("View"))
+        self.menu_tools = menu_bar.addMenu(self.tr("Tools"))
+        self.menu_help = menu_bar.addMenu(self.tr("Help"))
 
         if self.action_open_file is not None:
             self.menu_file.addAction(self.action_open_file)
-        self.menu_recent_files = self.menu_file.addMenu("Recent Files")
+        self.menu_recent_files = self.menu_file.addMenu(self.tr("Recent Files"))
         if self.action_reopen_last_session is not None:
             self.menu_file.addAction(self.action_reopen_last_session)
         if self.action_export_catalog is not None:
@@ -580,7 +605,7 @@ class MainWindow(QMainWindow):
             self.action_frame_layout_tiled is not None,
             self.action_frame_layout_vertical is not None,
         )):
-            layout_menu = self.menu_view.addMenu("多帧布局")
+            layout_menu = self.menu_view.addMenu(self.tr("Frame Layout"))
             for action in (
                 self.action_frame_layout_single,
                 self.action_frame_layout_tiled,
@@ -592,7 +617,7 @@ class MainWindow(QMainWindow):
             self.menu_view.addAction(self.action_toggle_magnifier)
         if self.orientation_actions:
             self.menu_view.addSeparator()
-            orient_menu = self.menu_view.addMenu("图像方向")
+            orient_menu = self.menu_view.addMenu(self.tr("Image Orientation"))
             for act in self.orientation_actions:
                 orient_menu.addAction(act)
 
@@ -607,6 +632,7 @@ class MainWindow(QMainWindow):
 
         self.menu_view.addSeparator()
         self._build_theme_menu(self.menu_view)
+        self._build_language_menu(self.menu_view)
         self.menu_view.addSeparator()
         if self.action_reset_workspace_layout is not None:
             self.menu_view.addAction(self.action_reset_workspace_layout)
@@ -623,15 +649,14 @@ class MainWindow(QMainWindow):
             self.menu_view.addAction(self.histogram_dock.toggleViewAction())
 
     def _build_theme_menu(self, parent_menu: Any) -> None:
-        """Add a '主题' submenu with Dark/Light options."""
+        """Add a theme submenu with Dark/Light options."""
         from .theme import AVAILABLE_THEMES, apply_theme, load_saved_theme, save_theme
-        from PySide6.QtWidgets import QApplication
 
-        theme_menu = parent_menu.addMenu("主题")
+        theme_menu = parent_menu.addMenu(self.tr("Theme"))
         group = QActionGroup(self)
         group.setExclusive(True)
         current = load_saved_theme()
-        labels = {"dark": "深色", "light": "浅色"}
+        labels = {"dark": self.tr("Dark"), "light": self.tr("Light")}
 
         def _make_handler(theme_name: str):
             def _handler(checked: bool) -> None:
@@ -651,10 +676,41 @@ class MainWindow(QMainWindow):
             group.addAction(action)
             theme_menu.addAction(action)
 
+    def _build_language_menu(self, parent_menu: Any) -> None:
+        self.menu_language = parent_menu.addMenu(self.tr("Language"))
+        self.language_action_group = QActionGroup(self)
+        self.language_action_group.setExclusive(True)
+        current_locale = load_preferred_language(self._settings)
+        for locale in available_locales():
+            action = QAction(language_display_name(locale), self)
+            action.setCheckable(True)
+            action.setChecked(locale == current_locale)
+            action.triggered.connect(
+                lambda checked, locale=locale: self._handle_language_changed(locale, checked)
+            )
+            self.language_action_group.addAction(action)
+            self.language_actions[locale] = action
+            self.menu_language.addAction(action)
+
+    def _handle_language_changed(self, locale: str, checked: bool) -> None:
+        if not checked:
+            return
+
+        selected_locale = save_preferred_language(locale, self._settings)
+        active_locale = current_language(QApplication.instance())
+        if selected_locale == active_locale:
+            return
+
+        QMessageBox.information(
+            self,
+            self.tr("Language"),
+            self.tr("Language change will take effect after restart."),
+        )
+
     def build_tool_bar(self) -> None:
         """Create the main toolbar and attach view/render controls."""
 
-        self.main_toolbar = QToolBar("Main Toolbar", self)
+        self.main_toolbar = QToolBar(self.tr("Main Toolbar"), self)
         self.main_toolbar.setObjectName("main_toolbar")
         self.addToolBar(self.main_toolbar)
 
@@ -670,17 +726,17 @@ class MainWindow(QMainWindow):
                 self.main_toolbar.addAction(action)
 
         self.main_toolbar.addSeparator()
-        self.main_toolbar.addWidget(QLabel("Stretch:", self))
+        self.main_toolbar.addWidget(QLabel(self.tr("Stretch:"), self))
         if self.stretch_selector is not None:
             self.main_toolbar.addWidget(self.stretch_selector)
-        self.main_toolbar.addWidget(QLabel("Interval:", self))
+        self.main_toolbar.addWidget(QLabel(self.tr("Interval:"), self))
         if self.interval_selector is not None:
             self.main_toolbar.addWidget(self.interval_selector)
-        self.main_toolbar.addWidget(QLabel("Preview:", self))
+        self.main_toolbar.addWidget(QLabel(self.tr("Preview:"), self))
         if self.preview_profile_selector is not None:
             self.main_toolbar.addWidget(self.preview_profile_selector)
         self.main_toolbar.addSeparator()
-        self.main_toolbar.addWidget(QLabel("放大镜:", self))
+        self.main_toolbar.addWidget(QLabel(self.tr("Magnifier:"), self))
         if self.magnifier_spinbox is not None:
             self.main_toolbar.addWidget(self.magnifier_spinbox)
         self.sync_render_controls()
@@ -696,21 +752,21 @@ class MainWindow(QMainWindow):
         - quit application
         """
 
-        self.action_open_file = QAction("Open", self)
+        self.action_open_file = QAction(self.tr("Open"), self)
         self.action_open_file.setShortcut(QKeySequence.StandardKey.Open)
-        self.action_export_catalog = QAction("Export CSV", self)
+        self.action_export_catalog = QAction(self.tr("Export CSV"), self)
         self.action_export_catalog.setShortcuts(["Ctrl+E", "Ctrl+Shift+E"])
-        self.action_export_image = QAction("Export Image...", self)
+        self.action_export_image = QAction(self.tr("Export Image..."), self)
         self.action_export_image.setShortcut("Ctrl+Shift+S")
-        self.action_export_raw_image = QAction("Export Raw Image...", self)
-        self.action_show_header = QAction("Show Header", self)
+        self.action_export_raw_image = QAction(self.tr("Export Raw Image..."), self)
+        self.action_show_header = QAction(self.tr("Show Header"), self)
         self.action_show_header.setShortcut("Ctrl+H")
-        self.action_append_frames = QAction("Append Frames...", self)
+        self.action_append_frames = QAction(self.tr("Append Frames..."), self)
         self.action_append_frames.setShortcut("Ctrl+Shift+O")
-        self.action_close_file = QAction("Close File", self)
+        self.action_close_file = QAction(self.tr("Close File"), self)
         self.action_close_file.setShortcut("Ctrl+W")
-        self.action_reopen_last_session = QAction("Reopen Last Session", self)
-        self.action_quit = QAction("Quit", self)
+        self.action_reopen_last_session = QAction(self.tr("Reopen Last Session"), self)
+        self.action_quit = QAction(self.tr("Quit"), self)
         self.action_quit.setShortcut(QKeySequence.StandardKey.Quit)
 
     def create_view_actions(self) -> None:
@@ -723,25 +779,25 @@ class MainWindow(QMainWindow):
         - zoom out
         """
 
-        self.action_fit_to_window = QAction("Fit", self)
+        self.action_fit_to_window = QAction(self.tr("Fit"), self)
         self.action_fit_to_window.setShortcut("F")
         self.action_actual_pixels = QAction("1:1", self)
         self.action_actual_pixels.setShortcut("1")
-        self.action_zoom_in = QAction("Zoom In", self)
+        self.action_zoom_in = QAction(self.tr("Zoom In"), self)
         self.action_zoom_in.setShortcut(QKeySequence.StandardKey.ZoomIn)
-        self.action_zoom_out = QAction("Zoom Out", self)
+        self.action_zoom_out = QAction(self.tr("Zoom Out"), self)
         self.action_zoom_out.setShortcut(QKeySequence.StandardKey.ZoomOut)
-        self.action_reset_workspace_layout = QAction("Reset Workspace Layout", self)
+        self.action_reset_workspace_layout = QAction(self.tr("Reset Workspace Layout"), self)
 
-        self.action_smooth_rendering = QAction("平滑渲染", self)
+        self.action_smooth_rendering = QAction(self.tr("Smooth Rendering"), self)
         self.action_smooth_rendering.setCheckable(True)
         self.action_smooth_rendering.setChecked(False)
 
-        self.action_cycle_view_mode = QAction("切换视图模式", self)
+        self.action_cycle_view_mode = QAction(self.tr("Cycle View Mode"), self)
         self.action_cycle_view_mode.setShortcut("Tab")
         self.addAction(self.action_cycle_view_mode)
 
-        self.action_toggle_magnifier = QAction("放大镜", self)
+        self.action_toggle_magnifier = QAction(self.tr("Magnifier"), self)
         self.action_toggle_magnifier.setShortcut("F1")
         self.action_toggle_magnifier.setCheckable(True)
         self.addAction(self.action_toggle_magnifier)
@@ -750,7 +806,7 @@ class MainWindow(QMainWindow):
         self.orientation_action_group.setExclusive(True)
         self.orientation_actions: list[QAction] = []
         for label, orientation in self._ORIENTATIONS:
-            act = QAction(label, self)
+            act = QAction(self.tr(label), self)
             act.setCheckable(True)
             if orientation == self._orientation:
                 act.setChecked(True)
@@ -758,21 +814,21 @@ class MainWindow(QMainWindow):
             self.orientation_action_group.addAction(act)
             self.orientation_actions.append(act)
 
-        self.action_prev_frame = QAction("Previous Frame", self)
+        self.action_prev_frame = QAction(self.tr("Previous Frame"), self)
         self.action_prev_frame.setShortcuts(["Left", "A"])
         self.addAction(self.action_prev_frame)
-        self.action_next_frame = QAction("Next Frame", self)
+        self.action_next_frame = QAction(self.tr("Next Frame"), self)
         self.action_next_frame.setShortcuts(["Right", "D"])
         self.addAction(self.action_next_frame)
 
         self.frame_layout_action_group = QActionGroup(self)
         self.frame_layout_action_group.setExclusive(True)
 
-        self.action_frame_layout_single = QAction("单帧显示", self)
+        self.action_frame_layout_single = QAction(self.tr("Single Frame View"), self)
         self.action_frame_layout_single.setCheckable(True)
-        self.action_frame_layout_tiled = QAction("多帧平铺", self)
+        self.action_frame_layout_tiled = QAction(self.tr("Tiled Frames"), self)
         self.action_frame_layout_tiled.setCheckable(True)
-        self.action_frame_layout_vertical = QAction("多帧竖排", self)
+        self.action_frame_layout_vertical = QAction(self.tr("Vertical Frames"), self)
         self.action_frame_layout_vertical.setCheckable(True)
 
         for action in (
@@ -793,11 +849,11 @@ class MainWindow(QMainWindow):
         - future MEF/HDU selector entry point
         """
 
-        self.action_run_sep = QAction("SEP Extract", self)
+        self.action_run_sep = QAction(self.tr("SEP Extract"), self)
         self.action_run_sep.setShortcut("Ctrl+R")
-        self.action_show_markers = QAction("Markers", self)
+        self.action_show_markers = QAction(self.tr("Markers"), self)
         self.action_show_markers.setShortcut("Ctrl+M")
-        self.action_target_info_fields = QAction("Target Info Fields...", self)
+        self.action_target_info_fields = QAction(self.tr("Target Info Fields..."), self)
 
         self.stretch_selector = QComboBox(self)
         self.stretch_selector.setObjectName("stretch_selector")
@@ -815,7 +871,7 @@ class MainWindow(QMainWindow):
     def create_help_actions(self) -> None:
         """Define help-oriented actions."""
 
-        self.action_check_updates = QAction("Check for Updates...", self)
+        self.action_check_updates = QAction(self.tr("Check for Updates..."), self)
 
     def bind_canvas_signals(self) -> None:
         """Bind `ImageCanvas` signals to window controller methods."""
@@ -851,6 +907,7 @@ class MainWindow(QMainWindow):
         if self.app_status_bar is None:
             return
         self.app_status_bar.cancel_requested.connect(self._handle_status_bar_cancel_requested)
+        self.app_status_bar.continue_requested.connect(self._handle_status_bar_continue_requested)
         self.app_status_bar.error_details_requested.connect(self._show_latest_error_details)
 
     def bind_toolbar_signals(self) -> None:
@@ -974,9 +1031,9 @@ class MainWindow(QMainWindow):
         if not path:
             paths, _ = QFileDialog.getOpenFileNames(
                 self,
-                "Open FITS File(s)",
+                self.tr("Open FITS File(s)"),
                 self._last_open_directory(),
-                "FITS Files (*.fits *.fit *.fts);;All Files (*)",
+                self.tr("FITS Files (*.fits *.fit *.fts);;All Files (*)"),
             )
             if not paths:
                 return
@@ -1212,7 +1269,7 @@ class MainWindow(QMainWindow):
         self.menu_recent_files.clear()
         recent_files = self._recent_files()
         if not recent_files:
-            placeholder = self.menu_recent_files.addAction("No Recent Files")
+            placeholder = self.menu_recent_files.addAction(self.tr("No Recent Files"))
             placeholder.setEnabled(False)
         else:
             for path in recent_files:
@@ -1280,7 +1337,7 @@ class MainWindow(QMainWindow):
 
         session_paths = self._last_session_paths()
         if not session_paths:
-            self.show_error("Reopen Session", "No previous session is available yet.")
+            self.show_error(self.tr("Reopen Session"), self.tr("No previous session is available yet."))
             return
 
         self._pending_session_restore_frame_index = self._settings.value(
@@ -1310,7 +1367,7 @@ class MainWindow(QMainWindow):
                 and self._current_frame_index in self._bkg_threads
             )
             if computing:
-                view_suffix = f"{view_suffix} 计算中..."
+                view_suffix = f"{view_suffix} {self.tr('Computing...')}"
             suffixes.append(view_suffix)
         if self._is_composite_frame_layout_active():
             layout_suffix = self._FRAME_LAYOUT_TITLE_SUFFIX.get(self._frame_layout_mode, "")
@@ -1330,7 +1387,7 @@ class MainWindow(QMainWindow):
         if self.action_check_updates is not None:
             self.action_check_updates.setEnabled(False)
         if self.app_status_bar is not None:
-            self.app_status_bar.showMessage("Checking for updates...")
+            self.app_status_bar.showMessage(self.tr("Checking for updates..."))
 
         self._update_check_thread = QThread(self)
         self._update_check_worker = UpdateCheckWorker(__version__)
@@ -1359,11 +1416,13 @@ class MainWindow(QMainWindow):
             self.app_status_bar.clearMessage()
 
         if result.status == "update_available":
-            latest = result.latest_version or "unknown"
+            latest = result.latest_version or self.tr("unknown")
             answer = QMessageBox.question(
                 self,
-                "Update Available",
-                f"A newer version ({latest}) is available.\nCurrent version: {result.current_version}\n\nOpen the releases page now?",
+                self.tr("Update Available"),
+                self.tr(
+                    "A newer version ({latest}) is available.\nCurrent version: {current}\n\nOpen the releases page now?"
+                ).format(latest=latest, current=result.current_version),
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.Yes,
             )
@@ -1372,14 +1431,18 @@ class MainWindow(QMainWindow):
             return
 
         if result.status == "up_to_date":
-            QMessageBox.information(self, "Check for Updates", result.detail)
+            QMessageBox.information(self, self.tr("Check for Updates"), result.detail)
             return
 
         if result.status == "unavailable":
-            QMessageBox.information(self, "Check for Updates", result.detail)
+            QMessageBox.information(self, self.tr("Check for Updates"), result.detail)
             return
 
-        QMessageBox.warning(self, "Update Check Failed", result.detail or "Unable to check for updates.")
+        QMessageBox.warning(
+            self,
+            self.tr("Update Check Failed"),
+            result.detail or self.tr("Unable to check for updates."),
+        )
 
 
     def _start_frame_load(
@@ -1559,7 +1622,7 @@ class MainWindow(QMainWindow):
 
         if index == self._current_frame_index:
             if self.app_status_bar is not None:
-                self.app_status_bar.showMessage("正在计算背景...", 0)
+                self.app_status_bar.showMessage(self.tr("Calculating background..."), 0)
             self._set_window_title(self._last_title_detail)
 
         thread.started.connect(worker.run)
@@ -1651,9 +1714,9 @@ class MainWindow(QMainWindow):
 
     _VIEW_MODE_ORDER = ("original", "background", "residual")
     _VIEW_MODE_LABELS = {
-        "original": "原始图像",
-        "background": "背景图 (BKG)",
-        "residual": "原图 - 背景 (Residual)",
+        "original": "Original Image",
+        "background": "Background (BKG)",
+        "residual": "Residual (Original - Background)",
     }
     _VIEW_MODE_TITLE_SUFFIX = {
         "original": "",
@@ -1662,14 +1725,14 @@ class MainWindow(QMainWindow):
     }
 
     _ORIENTATIONS: list[tuple[str, tuple[bool, bool, bool]]] = [
-        ("原始 (Identity)", (False, False, False)),
-        ("水平翻转", (True, False, False)),
-        ("垂直翻转", (False, True, False)),
-        ("旋转 180°", (True, True, False)),
-        ("转置", (False, False, True)),
-        ("旋转 90° CW", (False, True, True)),
-        ("旋转 90° CCW", (True, False, True)),
-        ("反对角转置", (True, True, True)),
+        ("Original (Identity)", (False, False, False)),
+        ("Horizontal Flip", (True, False, False)),
+        ("Vertical Flip", (False, True, False)),
+        ("Rotate 180°", (True, True, False)),
+        ("Transpose", (False, False, True)),
+        ("Rotate 90° CW", (False, True, True)),
+        ("Rotate 90° CCW", (True, False, True)),
+        ("Anti-diagonal Transpose", (True, True, True)),
     ]
 
     _ORIENTATION_SETTINGS_KEY = "view/orientation"
@@ -1975,9 +2038,9 @@ class MainWindow(QMainWindow):
         "residual": "RESIDUAL",
     }
     _FRAME_LAYOUT_LABELS = {
-        "single": "单帧显示",
-        "tiled": "多帧平铺",
-        "vertical": "多帧竖排",
+        "single": "Single Frame View",
+        "tiled": "Tiled Frames",
+        "vertical": "Vertical Frames",
     }
     _FRAME_LAYOUT_BADGE = {
         "single": "",
@@ -1995,7 +2058,7 @@ class MainWindow(QMainWindow):
 
         if not self._frames:
             if self.app_status_bar is not None:
-                self.app_status_bar.showMessage("未加载图像", 2000)
+                self.app_status_bar.showMessage(self.tr("No image loaded"), 2000)
             return
         order = self._VIEW_MODE_ORDER
         idx = order.index(self._view_mode)
@@ -2008,7 +2071,8 @@ class MainWindow(QMainWindow):
         self._refresh_view_mode_indicators()
         if self.app_status_bar is not None:
             self.app_status_bar.showMessage(
-                f"显示：{self._VIEW_MODE_LABELS[mode]}", 2000
+                self.tr("View: {label}").format(label=self.tr(self._VIEW_MODE_LABELS[mode])),
+                2000,
             )
         self._rerender_all_frames()
 
@@ -2027,7 +2091,10 @@ class MainWindow(QMainWindow):
         self.sync_sep_panel_state()
         self._schedule_next_composite_dirty_frame()
         if self.app_status_bar is not None:
-            self.app_status_bar.showMessage(f"布局：{self._FRAME_LAYOUT_LABELS[mode]}", 2000)
+            self.app_status_bar.showMessage(
+                self.tr("Layout: {label}").format(label=self.tr(self._FRAME_LAYOUT_LABELS[mode])),
+                2000,
+            )
 
     def _is_playback_active(self) -> bool:
         """Return whether the frame player is currently playing."""
@@ -2222,7 +2289,7 @@ class MainWindow(QMainWindow):
         self._frame_dirty[index] = False
         if self._is_composite_frame_layout_active() or self._current_frame_index == index:
             self._sync_current_canvas_image_state()
-        self.show_error("Render failed", detail)
+        self.show_error(self.tr("Render failed"), detail)
 
     def _set_loading_state(
         self,
@@ -2249,7 +2316,7 @@ class MainWindow(QMainWindow):
         if total <= 0:
             self._set_status_activity(
                 kind="load",
-                text="Loading FITS files...",
+                text=self.tr("Loading FITS files..."),
                 progress_value=0,
                 progress_max=0,
                 cancellable=True,
@@ -2260,9 +2327,16 @@ class MainWindow(QMainWindow):
         if current_path:
             filename = Path(current_path).name
         if filename:
-            text = f"Loading FITS {loaded}/{total}: {filename}"
+            text = self.tr("Loading FITS {loaded}/{total}: {filename}").format(
+                loaded=loaded,
+                total=total,
+                filename=filename,
+            )
         else:
-            text = f"Loading FITS {loaded}/{total}..."
+            text = self.tr("Loading FITS {loaded}/{total}...").format(
+                loaded=loaded,
+                total=total,
+            )
         self._set_status_activity(
             kind="load",
             text=text,
@@ -2315,11 +2389,46 @@ class MainWindow(QMainWindow):
             self._stop_active_frame_load(wait=False)
             self._set_status_activity(
                 kind="load",
-                text="Cancelling FITS load...",
+                text=self.tr("Cancelling FITS load..."),
                 progress_value=self._load_completed_count,
                 progress_max=self._load_total_count,
                 cancellable=False,
             )
+        elif self._status_activity_kind == "sep":
+            self._sep_pending_extract_roi = None
+            self._sep_pending_launch_roi = None
+            if self._sep_confirm_pending_roi is not None:
+                # User declined the large-count prompt; no worker is active.
+                self._sep_confirm_pending_roi = None
+                self._clear_status_activity(kind="sep")
+                if self.app_status_bar is not None:
+                    self.app_status_bar.showMessage(self.tr("SEP extraction cancelled."), 3000)
+                return
+            self._cancel_active_sep_extract(wait=False)
+            self._set_status_activity(
+                kind="sep",
+                text=self.tr("Cancelling SEP extraction..."),
+                progress_value=0,
+                progress_max=0,
+                cancellable=False,
+            )
+
+    def _handle_status_bar_continue_requested(self) -> None:
+        """Accept a non-modal confirmation prompt surfaced in the status bar."""
+
+        if self._status_activity_kind != "sep":
+            return
+        pending = self._sep_confirm_pending_roi
+        self._sep_confirm_pending_roi = None
+        if pending is None:
+            return
+        self._clear_status_activity(kind="sep")
+        if self._sep_thread is not None:
+            # Estimate thread may still be tearing down; chain the launch through
+            # _clear_sep_worker_refs so we don't clobber its references.
+            self._sep_pending_launch_roi = pending
+            return
+        self._start_sep_extract_full(pending)
 
     def _show_latest_error_details(self) -> None:
         """Open a dialog with the most recently stored error detail."""
@@ -2328,7 +2437,7 @@ class MainWindow(QMainWindow):
             return
         QMessageBox.warning(
             self,
-            self._latest_error_title or "Error",
+            self._latest_error_title or self.tr("Error"),
             self._latest_error_detail or self._latest_error_title,
         )
 
@@ -2356,7 +2465,7 @@ class MainWindow(QMainWindow):
         """Receive a file-load failure from the background worker."""
 
         self._load_error_count += 1
-        title = "Append failed" if self._load_append_mode else "Open failed"
+        title = self.tr("Append failed") if self._load_append_mode else self.tr("Open failed")
         self.show_error(title, f"{path}: {detail}")
 
     def _handle_frame_load_progress(self, completed: int, total: int, path: str) -> None:
@@ -2375,18 +2484,27 @@ class MainWindow(QMainWindow):
         if not self._frames:
             self._pending_session_restore_frame_index = None
             if self.app_status_bar is not None:
-                self.app_status_bar.showMessage("No FITS files were loaded.", 5000)
+                self.app_status_bar.showMessage(self.tr("No FITS files were loaded."), 5000)
             return
 
         if self.app_status_bar is not None:
             if self._load_error_count:
                 self.app_status_bar.showMessage(
-                    f"Loaded {success_count}/{self._load_total_count} FITS files ({self._load_error_count} failed).",
+                    self.tr("Loaded {success}/{total} FITS files ({failed} failed).").format(
+                        success=success_count,
+                        total=self._load_total_count,
+                        failed=self._load_error_count,
+                    ),
                     5000,
                 )
             else:
+                message_key = (
+                    "Loaded {count} FITS file."
+                    if success_count == 1
+                    else "Loaded {count} FITS files."
+                )
                 self.app_status_bar.showMessage(
-                    f"Loaded {success_count} FITS file{'s' if success_count != 1 else ''}.",
+                    self.tr(message_key).format(count=success_count),
                     3000,
                 )
         self._persist_session_state()
@@ -2430,7 +2548,10 @@ class MainWindow(QMainWindow):
 
         fits_paths = self._supported_fits_paths(paths)
         if not fits_paths:
-            self.show_error("Open failed", "Drop one or more FITS files (.fits, .fit, .fts).")
+            self.show_error(
+                self.tr("Open failed"),
+                self.tr("Drop one or more FITS files (.fits, .fit, .fts)."),
+            )
             return
         self._open_paths(fits_paths, append=False)
 
@@ -2567,11 +2688,13 @@ class MainWindow(QMainWindow):
             enablement = self.build_sep_enablement_state()
             self.action_run_sep.setEnabled(enablement.enabled)
             stale_hint = (
-                " Current source results are outdated; rerun SEP to refresh them."
+                f" {self.tr('Current source results are outdated; rerun SEP to refresh them.')}"
                 if self._catalog_results_stale and self.current_catalog is not None
                 else ""
             )
-            self.action_run_sep.setText("Rerun SEP Extract" if stale_hint else "SEP Extract")
+            self.action_run_sep.setText(
+                self.tr("Rerun SEP Extract") if stale_hint else self.tr("SEP Extract")
+            )
             self.action_run_sep.setToolTip(f"{enablement.reason}{stale_hint}".strip())
 
     def sync_render_controls(self) -> None:
@@ -2601,7 +2724,7 @@ class MainWindow(QMainWindow):
             self.preview_profile_selector.setCurrentText(state.current_preview_profile)
             self.preview_profile_selector.setEnabled(True)
             self.preview_profile_selector.setToolTip(
-                "Controls how aggressively AstroView renders preview stages before the full frame."
+                self.tr("Controls how aggressively AstroView renders preview stages before the full frame.")
             )
             self.preview_profile_selector.blockSignals(False)
         if self.action_export_catalog is not None:
@@ -2624,7 +2747,7 @@ class MainWindow(QMainWindow):
             current_interval=self.fits_service.current_interval,
             current_preview_profile=self._preview_profile_name,
             enabled=has_data,
-            disabled_reason="" if has_data else "No FITS image is currently loaded.",
+            disabled_reason="" if has_data else self.tr("No FITS image is currently loaded."),
         )
 
     def sync_catalog_views(self) -> None:
@@ -2663,7 +2786,7 @@ class MainWindow(QMainWindow):
         """Return the current source-table status note shown beside the row summary."""
 
         if self._catalog_results_stale and self.current_catalog is not None and len(self.current_catalog) > 0:
-            return "Results outdated. Press Ctrl+R to rerun SEP."
+            return self.tr("Results outdated. Press Ctrl+R to rerun SEP.")
         return ""
 
     def build_table_rows(self, catalog: SourceCatalog | None) -> list[TableRowViewModel]:
@@ -2711,8 +2834,8 @@ class MainWindow(QMainWindow):
         if self._is_composite_frame_layout_active() and any(self._frame_dirty) and not self._is_playback_active():
             feedback = ViewFeedbackState(
                 status="loading",
-                title="Rendering Composite View",
-                detail="Visible frame previews are shown while the remaining frames finish rendering.",
+                title=self.tr("Rendering Composite View"),
+                detail=self.tr("Visible frame previews are shown while the remaining frames finish rendering."),
                 visible=True,
             )
         elif self._is_frame_rendering(self._current_frame_index) and not self._is_playback_active():
@@ -2758,9 +2881,20 @@ class MainWindow(QMainWindow):
                 line_count=0,
                 feedback=self.build_no_header_feedback(),
             )
+        raw_text = current_data.header_as_text() if current_data.header is not None else ""
         return HeaderViewState(
-            has_header=current_data.header is not None,
-            line_count=0,
+            has_header=bool(raw_text),
+            hdu_index=0 if current_data.hdu_index is None else int(current_data.hdu_index),
+            available_hdus=[
+                (info.index, f"HDU {info.index}: {info.name or f'HDU {info.index}'}")
+                for info in current_data.available_hdus
+            ],
+            view_mode=(
+                "structured"
+                if self.header_dialog is None
+                else self.header_dialog.current_view_state().view_mode
+            ),
+            line_count=len(raw_text.splitlines()) if raw_text else 0,
             feedback=ViewFeedbackState(status="ready"),
         )
 
@@ -2780,16 +2914,16 @@ class MainWindow(QMainWindow):
         if self._is_composite_frame_layout_active():
             return ControlEnablementState(
                 enabled=False,
-                reason="SEP extraction is unavailable while frames are shown in a composite layout.",
+                reason=self.tr("SEP extraction is unavailable while frames are shown in a composite layout."),
             )
         if self._is_sep_extract_running():
             return ControlEnablementState(
                 enabled=False,
-                reason="SEP extraction is running in the background.",
+                reason=self.tr("SEP extraction is running in the background."),
             )
         return ControlEnablementState(
             enabled=has_image,
-            reason="" if has_image else "SEP extraction is unavailable until a FITS image is loaded.",
+            reason="" if has_image else self.tr("SEP extraction is unavailable until a FITS image is loaded."),
         )
 
     def build_empty_image_feedback(self) -> ViewFeedbackState:
@@ -2797,8 +2931,8 @@ class MainWindow(QMainWindow):
 
         return ViewFeedbackState(
             status="empty",
-            title="No Image Loaded",
-            detail=(
+            title=self.tr("No Image Loaded"),
+            detail=self.tr(
                 "Drop FITS files here or press Ctrl+O.\n"
                 "Wheel to zoom, drag to pan, and right-drag a ROI to run SEP."
             ),
@@ -2808,11 +2942,11 @@ class MainWindow(QMainWindow):
     def build_rendering_image_feedback(self, *, has_preview: bool) -> ViewFeedbackState:
         """Feedback shown while the current frame is rendering in the background."""
 
-        title = "Rendering Full Frame" if has_preview else "Rendering Preview"
+        title = self.tr("Rendering Full Frame") if has_preview else self.tr("Rendering Preview")
         detail = (
-            "Preview shown while the full-resolution render finishes."
+            self.tr("Preview shown while the full-resolution render finishes.")
             if has_preview
-            else "Preparing the first visible render for this frame."
+            else self.tr("Preparing the first visible render for this frame.")
         )
         return ViewFeedbackState(
             status="loading",
@@ -2826,8 +2960,8 @@ class MainWindow(QMainWindow):
 
         return ViewFeedbackState(
             status="empty",
-            title="No Sources",
-            detail="Run SEP on a ROI to populate source overlays and the source table.",
+            title=self.tr("No Sources"),
+            detail=self.tr("Run SEP on a ROI to populate source overlays and the source table."),
             visible=True,
         )
 
@@ -2836,8 +2970,8 @@ class MainWindow(QMainWindow):
 
         return ViewFeedbackState(
             status="loading",
-            title="Extracting Sources",
-            detail="SEP is running in the background for the selected region.",
+            title=self.tr("Extracting Sources"),
+            detail=self.tr("SEP is running in the background for the selected region."),
             visible=True,
         )
 
@@ -2846,8 +2980,8 @@ class MainWindow(QMainWindow):
 
         return ViewFeedbackState(
             status="empty",
-            title="No Header",
-            detail="Open a FITS file before viewing header cards.",
+            title=self.tr("No Header"),
+            detail=self.tr("Open a FITS file before viewing header cards."),
             visible=True,
         )
 
@@ -2856,7 +2990,7 @@ class MainWindow(QMainWindow):
 
         return ViewFeedbackState(
             status="disabled",
-            title="SEP Unavailable",
+            title=self.tr("SEP Unavailable"),
             detail=reason,
             visible=True,
         )
@@ -2871,7 +3005,7 @@ class MainWindow(QMainWindow):
 
         data = self.fits_service.current_data
         if data is None or data.data is None:
-            self.show_error("SEP", "No FITS image loaded.")
+            self.show_error(self.tr("SEP"), self.tr("No FITS image loaded."))
             return
 
         if self.source_table_dock is not None:
@@ -2996,10 +3130,16 @@ class MainWindow(QMainWindow):
         """Request shutdown for any active SEP worker thread."""
 
         thread = self._sep_thread
+        worker = self._sep_worker
         if thread is None or not thread.isRunning():
             self._active_sep_request_id = None
             return
 
+        if worker is not None:
+            try:
+                worker.cancel()
+            except Exception:
+                pass
         thread.requestInterruption()
         thread.quit()
         if wait:
@@ -3012,19 +3152,67 @@ class MainWindow(QMainWindow):
         self._sep_thread = None
         self._sep_worker = None
         self._active_sep_request_id = None
+        pending = self._sep_pending_launch_roi
+        if pending is not None:
+            self._sep_pending_launch_roi = None
+            self._start_sep_extract_full(pending)
 
     def _start_sep_extract(self, roi: ROISelection) -> None:
-        """Start asynchronous SEP extraction for the given image-space ROI."""
+        """Run a count-estimate pre-pass, then the full SEP extraction on confirm."""
+
+        prepared = self._prepare_sep_run(roi)
+        if prepared is None:
+            return
+        normalized_roi, subarray, params, wcs = prepared
+
+        self._sep_pending_extract_roi = normalized_roi
+        self._launch_sep_worker(
+            subarray=subarray,
+            roi=normalized_roi,
+            params=params,
+            wcs=wcs,
+            estimate_only=True,
+            status_text=self.tr("Estimating SEP source count on {width}x{height} ROI...").format(
+                width=normalized_roi.width,
+                height=normalized_roi.height,
+            ),
+        )
+
+    def _start_sep_extract_full(self, roi: ROISelection) -> None:
+        """Start the real SEP extraction without the estimate pre-pass."""
+
+        prepared = self._prepare_sep_run(roi)
+        if prepared is None:
+            return
+        normalized_roi, subarray, params, wcs = prepared
+
+        self._sep_pending_extract_roi = None
+        self._launch_sep_worker(
+            subarray=subarray,
+            roi=normalized_roi,
+            params=params,
+            wcs=wcs,
+            estimate_only=False,
+            status_text=self.tr("Running SEP extraction on {width}x{height} ROI...").format(
+                width=normalized_roi.width,
+                height=normalized_roi.height,
+            ),
+        )
+
+    def _prepare_sep_run(
+        self, roi: ROISelection
+    ) -> tuple[ROISelection, np.ndarray, SEPParameters, Any] | None:
+        """Validate state and clip the ROI; returns (roi, subarray, params, wcs)."""
 
         if self._is_sep_extract_running():
             if self.app_status_bar is not None:
-                self.app_status_bar.showMessage("SEP extraction is already running.", 3000)
-            return
+                self.app_status_bar.showMessage(self.tr("SEP extraction is already running."), 3000)
+            return None
 
         data = self.fits_service.current_data
         if data is None or data.data is None:
-            self.show_error("SEP", "No FITS image loaded.")
-            return
+            self.show_error(self.tr("SEP"), self.tr("No FITS image loaded."))
+            return None
 
         h, w = data.data.shape[:2]
         x0 = max(0, min(roi.x0, w))
@@ -3032,32 +3220,54 @@ class MainWindow(QMainWindow):
         x1 = max(x0, min(roi.x0 + roi.width, w))
         y1 = max(y0, min(roi.y0 + roi.height, h))
         if x1 <= x0 or y1 <= y0:
-            self.show_error("SEP", "Selected ROI is empty.")
-            return
+            self.show_error(self.tr("SEP"), self.tr("Selected ROI is empty."))
+            return None
 
         normalized_roi = ROISelection(x0=x0, y0=y0, width=x1 - x0, height=y1 - y0)
-        subarray = data.data[y0:y1, x0:x1]
+        source_slice = data.data[y0:y1, x0:x1]
+        if source_slice.dtype in (np.float32, np.float64):
+            subarray = np.ascontiguousarray(source_slice, dtype=source_slice.dtype)
+        else:
+            subarray = np.ascontiguousarray(source_slice, dtype=np.float32)
         params = self.sep_panel.params_from_form_state() if self.sep_panel else self.sep_service.params
+        return normalized_roi, subarray, params, (data.wcs if data.has_wcs else None)
+
+    def _launch_sep_worker(
+        self,
+        *,
+        subarray: np.ndarray,
+        roi: ROISelection,
+        params: SEPParameters,
+        wcs: Any,
+        estimate_only: bool,
+        status_text: str,
+    ) -> None:
+        """Spin up the SEP worker thread for either an estimate pass or full extract."""
 
         self._sep_request_id += 1
         request_id = self._sep_request_id
         self._active_sep_request_id = request_id
-        self.current_catalog = None
-        self._catalog_results_stale = False
+        self._sep_is_estimate_phase = estimate_only
+        if not estimate_only:
+            self.current_catalog = None
+            self._catalog_results_stale = False
         self._clear_latest_error()
 
         self._sep_thread = QThread(self)
         self._sep_worker = SEPExtractWorker(
             request_id=request_id,
             data_subarray=subarray,
-            roi=normalized_roi,
+            roi=roi,
             params=params,
-            wcs=data.wcs if data.has_wcs else None,
+            wcs=wcs,
+            estimate_only=estimate_only,
+            estimate_threshold=self.SEP_ESTIMATE_THRESHOLD_SIGMA if estimate_only else None,
         )
         self._sep_worker.moveToThread(self._sep_thread)
 
         self._sep_thread.started.connect(self._sep_worker.run)
         self._sep_worker.extraction_ready.connect(self._handle_sep_extraction_ready)
+        self._sep_worker.estimation_ready.connect(self._handle_sep_estimation_ready)
         self._sep_worker.extraction_error.connect(self._handle_sep_extraction_error)
         self._sep_worker.finished.connect(self._handle_sep_extraction_finished)
         self._sep_worker.finished.connect(self._sep_thread.quit)
@@ -3065,27 +3275,68 @@ class MainWindow(QMainWindow):
         self._sep_thread.finished.connect(self._sep_thread.deleteLater)
         self._sep_thread.finished.connect(self._clear_sep_worker_refs)
 
-        if self.source_table_dock is not None:
-            self.source_table_dock.show()
-            self.source_table_dock.set_row_view_models([])
-            self.source_table_dock.set_view_state(self.build_table_view_state())
-            self.source_table_dock.show_cutout_tab()
-            self.source_table_dock.raise_()
-        if self.sep_panel_dock is not None:
-            self.sep_panel_dock.show()
-        if self.canvas is not None:
-            self.canvas.clear_sources()
-            self.canvas.set_overlay_state(self.build_canvas_overlay_state())
+        if not estimate_only:
+            if self.source_table_dock is not None:
+                self.source_table_dock.show()
+                self.source_table_dock.set_row_view_models([])
+                self.source_table_dock.set_view_state(self.build_table_view_state())
+                self.source_table_dock.show_cutout_tab()
+                self.source_table_dock.raise_()
+            if self.sep_panel_dock is not None:
+                self.sep_panel_dock.show()
+            if self.canvas is not None:
+                self.canvas.clear_sources()
+                self.canvas.set_overlay_state(self.build_canvas_overlay_state())
         self._set_status_activity(
             kind="sep",
-            text=f"Running SEP extraction on {normalized_roi.width}x{normalized_roi.height} ROI...",
+            text=status_text,
             progress_value=0,
             progress_max=0,
-            cancellable=False,
+            cancellable=True,
         )
         self.sync_sep_panel_state()
         self.sync_render_controls()
         self._sep_thread.start()
+
+    def _handle_sep_estimation_ready(self, request_id: int, roi: ROISelection, count: int) -> None:
+        """Process a count-estimate pre-pass and decide whether to run the full extraction."""
+
+        if request_id != self._active_sep_request_id:
+            return
+        pending_roi = self._sep_pending_extract_roi
+        self._sep_pending_extract_roi = None
+        if pending_roi is None:
+            return
+
+        params = self.sep_panel.params_from_form_state() if self.sep_panel else self.sep_service.params
+        user_thresh = max(float(params.thresh), 0.1)
+        area_mpx = max((pending_roi.width * pending_roi.height) / 1_000_000.0, 1e-6)
+        density = count / area_mpx
+        # Rough Gaussian-tail extrapolation: source counts roughly scale with (estimate/real)^2.
+        extrapolation_factor = (self.SEP_ESTIMATE_THRESHOLD_SIGMA / user_thresh) ** 2
+        extrapolated = int(round(count * extrapolation_factor))
+
+        dense = density >= self.SEP_DENSE_FIELD_PER_MPX
+        large = extrapolated >= self.SEP_LARGE_COUNT_WARNING
+        if not (dense or large):
+            self._sep_pending_launch_roi = pending_roi
+            return
+
+        # Defer decision to the user via a non-modal status-bar prompt.
+        self._sep_confirm_pending_roi = pending_roi
+        if self.app_status_bar is not None:
+            crowded_hint = self.tr("crowded ") if dense else ""
+            prompt = self.tr(
+                "SEP: {crowded_hint}field — {count} sources at {sigma}σ ({density}/Mpx), ~{expected} expected at {user_sigma}σ. Continue?"
+            ).format(
+                crowded_hint=crowded_hint,
+                count=count,
+                sigma=f"{self.SEP_ESTIMATE_THRESHOLD_SIGMA:g}",
+                density=f"{density:.0f}",
+                expected=extrapolated,
+                user_sigma=f"{user_thresh:g}",
+            )
+            self.app_status_bar.set_prompt(prompt)
 
     def _handle_sep_extraction_ready(self, request_id: int, roi: ROISelection, catalog: SourceCatalog) -> None:
         """Accept a SEP extraction result if it still matches the latest request."""
@@ -3099,9 +3350,13 @@ class MainWindow(QMainWindow):
         if len(catalog) == 1:
             self.handle_source_clicked(0)
         if self.app_status_bar is not None:
+            message_key = (
+                "Extracted {count} source from ROI {width}x{height}."
+                if len(catalog) == 1
+                else "Extracted {count} sources from ROI {width}x{height}."
+            )
             self.app_status_bar.showMessage(
-                f"Extracted {len(catalog)} source{'s' if len(catalog) != 1 else ''} from ROI "
-                f"{roi.width}x{roi.height}.",
+                self.tr(message_key).format(count=len(catalog), width=roi.width, height=roi.height),
                 4000,
             )
 
@@ -3111,7 +3366,10 @@ class MainWindow(QMainWindow):
         if request_id != self._active_sep_request_id:
             return
 
-        self.show_error("SEP extraction failed", detail)
+        self._sep_pending_extract_roi = None
+        self._sep_pending_launch_roi = None
+        self._sep_confirm_pending_roi = None
+        self.show_error(self.tr("SEP extraction failed"), detail)
         if self.source_table_dock is not None:
             self.source_table_dock.set_view_state(self.build_table_view_state())
 
@@ -3119,7 +3377,8 @@ class MainWindow(QMainWindow):
         """Finalize SEP-extraction UI state when a worker exits."""
 
         if request_id == self._active_sep_request_id:
-            self._clear_status_activity(kind="sep")
+            if self._sep_confirm_pending_roi is None:
+                self._clear_status_activity(kind="sep")
             self._active_sep_request_id = None
             self.sync_sep_panel_state()
             if self.source_table_dock is not None:
@@ -3146,7 +3405,10 @@ class MainWindow(QMainWindow):
 
             if coord_type == "wcs":
                 if wcs is None:
-                    self.show_error("Markers", "No WCS available for coordinate conversion.")
+                    self.show_error(
+                        self.tr("Markers"),
+                        self.tr("No WCS available for coordinate conversion."),
+                    )
                     return
                 try:
                     from astropy.coordinates import SkyCoord
@@ -3155,7 +3417,10 @@ class MainWindow(QMainWindow):
                     px, py = wcs.world_to_pixel(sky)
                     pixel_coords.append((float(px), float(py)))
                 except Exception as e:
-                    self.show_error("Markers", f"WCS conversion failed: {e}")
+                    self.show_error(
+                        self.tr("Markers"),
+                        self.tr("WCS conversion failed: {detail}").format(detail=e),
+                    )
                     return
             else:
                 pixel_coords.append((v1, v2))
@@ -3241,19 +3506,28 @@ class MainWindow(QMainWindow):
         """
 
         if self.current_catalog is None or len(self.current_catalog) == 0:
-            self.show_error("Export", "No source catalog to export.")
+            self.show_error(self.tr("Export"), self.tr("No source catalog to export."))
             return
         path, _ = QFileDialog.getSaveFileName(
-            self, "Export Catalog", "catalog.csv", "CSV Files (*.csv);;All Files (*)"
+            self,
+            self.tr("Export Catalog"),
+            "catalog.csv",
+            self.tr("CSV Files (*.csv);;All Files (*)"),
         )
         if not path:
             return
         try:
             self.current_catalog.to_csv(path, columns=self._visible_source_table_columns())
             if self.app_status_bar is not None:
-                self.app_status_bar.showMessage(f"Exported {len(self.current_catalog)} sources to {path}", 3000)
+                self.app_status_bar.showMessage(
+                    self.tr("Exported {count} sources to {path}").format(
+                        count=len(self.current_catalog),
+                        path=path,
+                    ),
+                    3000,
+                )
         except Exception as e:
-            self.show_error("Export failed", str(e))
+            self.show_error(self.tr("Export failed"), str(e))
 
     def _can_export_image(self) -> bool:
         """Return whether the current view has any exportable image content."""
@@ -3278,22 +3552,22 @@ class MainWindow(QMainWindow):
         its original header preserved, ignoring annotations.
         """
 
-        self._run_image_export(with_annotations=True, title="Export Image")
+        self._run_image_export(with_annotations=True, title=self.tr("Export Image"))
 
     def export_raw_image(self) -> None:
         """Export only the underlying pixmap (no sources/markers) or raw FITS."""
 
-        self._run_image_export(with_annotations=False, title="Export Raw Image")
+        self._run_image_export(with_annotations=False, title=self.tr("Export Raw Image"))
 
     def _run_image_export(self, *, with_annotations: bool, title: str) -> None:
         if not self._can_export_image():
-            self.show_error(title, "No image is currently loaded.")
+            self.show_error(title, self.tr("No FITS image is currently loaded."))
             return
 
         default_stem = self._default_export_stem()
         initial = str(Path(default_stem + ".png"))
         path, selected_filter = QFileDialog.getSaveFileName(
-            self, title, initial, self._EXPORT_IMAGE_FILTERS
+            self, title, initial, self.tr(self._EXPORT_IMAGE_FILTERS)
         )
         if not path:
             return
@@ -3311,15 +3585,18 @@ class MainWindow(QMainWindow):
             elif fmt == "fits":
                 self._export_current_frame_to_fits(path)
             else:
-                self.show_error(title, f"Unsupported format: {fmt}")
+                self.show_error(title, self.tr("Unsupported format: {fmt}").format(fmt=fmt))
                 return
         except Exception as exc:
             log_current_exception(logger, "export_image failed")
-            self.show_error("Export failed", str(exc))
+            self.show_error(self.tr("Export failed"), str(exc))
             return
 
         if self.app_status_bar is not None:
-            self.app_status_bar.showMessage(f"Exported image to {path}", 3000)
+            self.app_status_bar.showMessage(
+                self.tr("Exported image to {path}").format(path=path),
+                3000,
+            )
 
     def _default_export_stem(self) -> str:
         """Return a sensible default filename stem for image export."""
@@ -3374,13 +3651,13 @@ class MainWindow(QMainWindow):
         """
 
         if self.canvas is None:
-            raise RuntimeError("Canvas is not available.")
+            raise RuntimeError(self.tr("Canvas is not available."))
         if with_annotations:
             rendered = self.canvas.render_scene_image()
             if rendered is not None:
                 return rendered
         if self.canvas.current_image is None:
-            raise RuntimeError("No image is currently displayed on the canvas.")
+            raise RuntimeError(self.tr("No image is currently displayed on the canvas."))
         return self.canvas.current_image
 
     def _export_visual_image_to_png(self, path: str, *, with_annotations: bool) -> None:
@@ -3452,21 +3729,96 @@ class MainWindow(QMainWindow):
 
         current = self.fits_service.current_data
         if current is None or current.data is None:
-            raise RuntimeError("No FITS data available for the current frame.")
+            raise RuntimeError(self.tr("No FITS data available for the current frame."))
         current.save_to(path, overwrite=True)
+
+    def _build_header_payloads(self) -> list[HeaderPayload]:
+        """Build header payloads for the current file without changing core services."""
+
+        current = self.fits_service.current_data
+        if current is None:
+            return []
+
+        path = current.path
+        if path:
+            payloads = self._read_header_payloads_from_file(path)
+            if payloads:
+                return payloads
+
+        raw_text = current.header_as_text() if current.header is not None else ""
+        if not raw_text:
+            return []
+
+        hdu_index = 0 if current.hdu_index is None else int(current.hdu_index)
+        return [
+            HeaderPayload(
+                hdu_index=hdu_index,
+                name=f"HDU {hdu_index}",
+                kind="Header",
+                shape=None,
+                cards=parse_header_text(raw_text),
+                raw_text=raw_text,
+            )
+        ]
+
+    def _read_header_payloads_from_file(self, path: str) -> list[HeaderPayload]:
+        """Read every HDU header from a FITS file for dialog display."""
+
+        try:
+            fits = _astropy_fits()
+            with fits.open(path, memmap=True) as hdul:
+                payloads: list[HeaderPayload] = []
+                for index, hdu in enumerate(hdul):
+                    header = getattr(hdu, "header", None)
+                    if header is None:
+                        continue
+                    raw_text = header.tostring(sep="\n")
+                    payloads.append(HeaderPayload(
+                        hdu_index=index,
+                        name=str(getattr(hdu, "name", "") or f"HDU {index}"),
+                        kind=type(hdu).__name__,
+                        shape=self._header_payload_shape_for_hdu(hdu),
+                        cards=parse_header_text(raw_text),
+                        raw_text=raw_text,
+                    ))
+                return payloads
+        except Exception:
+            logger.exception("Failed to inspect FITS headers for %s", path)
+            return []
+
+    def _header_payload_shape_for_hdu(self, hdu: Any) -> tuple[int, ...] | None:
+        """Extract shape metadata for one HDU without forcing pixel reads."""
+
+        shape = getattr(hdu, "shape", None)
+        if shape is None:
+            return None
+        try:
+            values = tuple(int(value) for value in shape)
+        except Exception:
+            return None
+        return values or None
 
     def show_header_dialog(self) -> None:
         """Open the FITS header viewer.
 
         Main flow:
-        `MainWindow.show_header_dialog()` -> `FITSService.header_text()`
-        -> `HeaderDialog.set_header_text()`.
+        `MainWindow.show_header_dialog()` -> `_build_header_payloads()`
+        -> `HeaderDialog.set_header_payloads()`.
         """
 
         if self.header_dialog is None:
             return
-        text = self.fits_service.header_text()
-        self.header_dialog.set_header_text(text)
+        state = self.build_header_view_state()
+        payloads = self._build_header_payloads()
+        self.header_dialog.set_view_state(state)
+        if payloads:
+            self.header_dialog.set_header_payloads(
+                payloads,
+                current_hdu_index=0 if self.fits_service.current_data is None else self.fits_service.current_data.hdu_index,
+            )
+        else:
+            self.header_dialog.clear()
+            self.header_dialog.set_view_state(state)
         self.header_dialog.show()
         self.header_dialog.raise_()
 
@@ -3479,7 +3831,12 @@ class MainWindow(QMainWindow):
 
         if self._is_composite_frame_layout_active():
             if self.app_status_bar is not None:
-                self.app_status_bar.showMessage("复合布局下无法直接框选 ROI。请切回单帧显示后再运行 SEP。", 3000)
+                self.app_status_bar.showMessage(
+                    self.tr(
+                        "Composite layout does not support direct ROI selection. Switch back to Single Frame View before running SEP."
+                    ),
+                    3000,
+                )
             return
 
         shape = self._current_original_shape()
@@ -3537,7 +3894,7 @@ class MainWindow(QMainWindow):
                 self._catalog_results_stale = True
                 if self.app_status_bar is not None:
                     self.app_status_bar.showMessage(
-                        "SEP settings changed. Current source results are outdated until rerun.",
+                        self.tr("SEP settings changed. Current source results are outdated until rerun."),
                         4000,
                     )
                 if self.source_table_dock is not None:
@@ -3794,7 +4151,7 @@ class MainWindow(QMainWindow):
         if substitute is None or substitute.data is None:
             self._dispatch_bkg_worker(idx)
             if self.source_table_dock is not None:
-                self.source_table_dock.clear_cutout_image("正在计算背景...")
+                self.source_table_dock.clear_cutout_image(self.tr("Calculating background..."))
             return None
 
         from ..core.fits_data import FITSData
@@ -3947,14 +4304,13 @@ class MainWindow(QMainWindow):
 
         if self.canvas is None:
             return
-        view_state = self.canvas.capture_view_state()
+
         if self._is_composite_frame_layout_active():
             image = self._build_composite_frame_image()
             if image is None:
                 self.canvas.clear_image()
                 return
-            self.canvas.set_image(image)
-            self.canvas.restore_view_state(view_state)
+            self._set_canvas_image_preserving_view(image)
             return
         idx = self._current_frame_index
         if 0 <= idx < len(self._frame_images):
@@ -3962,10 +4318,32 @@ class MainWindow(QMainWindow):
             if img is None:
                 self.canvas.clear_image()
                 return
-            self.canvas.set_image(self._orient_qimage(img))
-            self.canvas.restore_view_state(view_state)
+            self._set_canvas_image_preserving_view(self._orient_qimage(img))
         else:
             self.canvas.clear_image()
+
+    def _set_canvas_image_preserving_view(self, image: QImage) -> None:
+        """Swap the canvas image while keeping the user's pan/zoom stable.
+
+        When the new pixmap has the same dimensions as the current one the
+        scene rect and transform are unchanged, so we can skip the
+        ``capture_view_state`` / ``restore_view_state`` round-trip. That
+        round-trip introduces sub-pixel scrollbar rounding that accumulates
+        as a visible drift when playback swaps many same-size frames.
+        """
+
+        current_pixmap = self.canvas._pixmap_item.pixmap()
+        same_size = (
+            not current_pixmap.isNull()
+            and current_pixmap.width() == image.width()
+            and current_pixmap.height() == image.height()
+        )
+        if same_size:
+            self.canvas.set_image(image)
+            return
+        view_state = self.canvas.capture_view_state()
+        self.canvas.set_image(image)
+        self.canvas.restore_view_state(view_state)
 
     def _sync_current_canvas_image_state(self) -> None:
         """Refresh the current canvas feedback from render/load state."""
@@ -4085,9 +4463,9 @@ class MainWindow(QMainWindow):
 
         paths, _ = QFileDialog.getOpenFileNames(
             self,
-            "Append FITS Frame(s)",
+            self.tr("Append FITS Frame(s)"),
             self._last_open_directory(),
-            "FITS Files (*.fits *.fit *.fts);;All Files (*)",
+            self.tr("FITS Files (*.fits *.fit *.fts);;All Files (*)"),
         )
         if not paths:
             return

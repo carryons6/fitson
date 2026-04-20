@@ -16,7 +16,7 @@ class _FakeBackground:
         self.globalrms = globalrms
 
     def __array__(self, dtype=None):
-        return np.array(self.level, dtype=dtype)
+        return np.array(self.level, dtype=dtype or np.float32)
 
 
 class TestSEPService(unittest.TestCase):
@@ -59,7 +59,14 @@ class TestSEPService(unittest.TestCase):
 
     def test_extract_runs_sep_and_builds_catalog(self) -> None:
         service = SEPService()
-        params = SEPParameters(thresh=2.5, minarea=9, deblend_nthresh=8, deblend_cont=0.02)
+        params = SEPParameters(
+            thresh=2.5,
+            minarea=9,
+            deblend_nthresh=8,
+            deblend_cont=0.02,
+            bkg_box_size=48,
+            bkg_filter_size=5,
+        )
         data = np.array([[1, 2], [3, 4]], dtype=np.float32, order="F")
         fake_background = _FakeBackground(level=1.5, globalrms=0.25)
         sep_objects = {"x": np.array([1.0]), "y": np.array([2.0])}
@@ -77,9 +84,11 @@ class TestSEPService(unittest.TestCase):
 
         self.assertIs(result, catalog)
         background_mock.assert_called_once()
+        bkg_args, bkg_kwargs = background_mock.call_args
+        self.assertEqual(bkg_kwargs, {"bw": 48, "bh": 48, "fw": 5, "fh": 5})
         extract_args, extract_kwargs = extract_mock.call_args
         processed = extract_args[0]
-        self.assertEqual(processed.dtype, np.float64)
+        self.assertEqual(processed.dtype, np.float32)
         self.assertTrue(processed.flags["C_CONTIGUOUS"])
         self.assertTrue(np.allclose(processed, np.array([[-0.5, 0.5], [1.5, 2.5]])))
         self.assertEqual(extract_kwargs["thresh"], 2.5)

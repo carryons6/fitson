@@ -128,7 +128,7 @@ class _HistogramView(QWidget):
 
         if self._counts.size == 0 or rect.width() <= 0 or rect.height() <= 0:
             painter.setPen(QColor("#8ea0b5"))
-            painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, "No histogram")
+            painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, self.tr("No histogram"))
             return
 
         counts = np.log1p(self._counts.astype(np.float64))
@@ -212,8 +212,9 @@ class HistogramDock(QDockWidget):
     auto_range_requested = Signal()
 
     def __init__(self, parent: Any | None = None) -> None:
-        super().__init__("Histogram", parent)
+        super().__init__(parent)
         self.setObjectName("histogram_dock")
+        self.setWindowTitle(self.tr("Histogram"))
 
         self._data_min = 0.0
         self._data_max = 0.0
@@ -221,7 +222,7 @@ class HistogramDock(QDockWidget):
         content = QWidget(self)
         layout = QVBoxLayout(content)
 
-        self.range_label = QLabel("Range: -", content)
+        self.range_label = QLabel(self.tr("Range: -"), content)
         self.range_label.setWordWrap(True)
         self.histogram_view = _HistogramView(content)
         layout.addWidget(self.range_label)
@@ -237,17 +238,17 @@ class HistogramDock(QDockWidget):
             spin.setRange(-1.0e18, 1.0e18)
             spin.setKeyboardTracking(False)
             spin.setSingleStep(0.1)
-        low_layout.addWidget(QLabel("Low:", low_row))
+        low_layout.addWidget(QLabel(self.tr("Low:"), low_row))
         low_layout.addWidget(self.low_spin, 1)
-        low_layout.addWidget(QLabel("High:", low_row))
+        low_layout.addWidget(QLabel(self.tr("High:"), low_row))
         low_layout.addWidget(self.high_spin, 1)
         layout.addWidget(low_row)
 
         button_row = QWidget(content)
         button_layout = QHBoxLayout(button_row)
         button_layout.setContentsMargins(0, 0, 0, 0)
-        self.apply_btn = QPushButton("Apply Manual Range", button_row)
-        self.auto_btn = QPushButton("Use Auto Interval", button_row)
+        self.apply_btn = QPushButton(self.tr("Apply Manual Range"), button_row)
+        self.auto_btn = QPushButton(self.tr("Use Auto Interval"), button_row)
         button_layout.addWidget(self.apply_btn)
         button_layout.addWidget(self.auto_btn)
         layout.addWidget(button_row)
@@ -276,9 +277,10 @@ class HistogramDock(QDockWidget):
 
         self._data_min = float(min_value)
         self._data_max = float(max_value)
-        self.range_label.setText(
-            f"Range: {self._data_min:.6f} .. {self._data_max:.6f}"
-        )
+        self.range_label.setText(self.tr("Range: {low:.6f} .. {high:.6f}").format(
+            low=self._data_min,
+            high=self._data_max,
+        ))
         self.histogram_view.set_histogram(counts)
 
         low_value = self._data_min
@@ -304,7 +306,7 @@ class HistogramDock(QDockWidget):
 
         self._data_min = 0.0
         self._data_max = 0.0
-        self.range_label.setText("Range: -")
+        self.range_label.setText(self.tr("Range: -"))
         self.histogram_view.clear()
         self.low_spin.setValue(0.0)
         self.high_spin.setValue(0.0)
@@ -330,17 +332,17 @@ class HistogramDock(QDockWidget):
         high = self._from_ratio(high_ratio)
         if high <= low:
             return
-        self.status_label.setText("Manual range applied.")
+        self.status_label.setText(self.tr("Manual range applied."))
         self.manual_range_applied.emit(low, high)
 
     def _emit_manual_range(self) -> None:
         low = float(self.low_spin.value())
         high = float(self.high_spin.value())
         if high <= low:
-            self.status_label.setText("High must be greater than low.")
+            self.status_label.setText(self.tr("High must be greater than low."))
             return
 
-        self.status_label.setText("Manual range applied.")
+        self.status_label.setText(self.tr("Manual range applied."))
         self.histogram_view.set_manual_range(self._to_ratio(low), self._to_ratio(high))
         self.manual_range_applied.emit(low, high)
 

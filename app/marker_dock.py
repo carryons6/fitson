@@ -36,8 +36,9 @@ class MarkerDock(QDockWidget):
     source_line_width_changed = Signal(int)
 
     def __init__(self, parent: Any | None = None) -> None:
-        super().__init__("Markers", parent)
+        super().__init__(parent)
         self.setObjectName("marker_dock")
+        self.setWindowTitle(self.tr("Markers"))
 
         self._color = QColor(255, 0, 0)
         self._source_color = QColor(255, 0, 0)
@@ -46,7 +47,7 @@ class MarkerDock(QDockWidget):
         layout = QVBoxLayout(content)
 
         # --- Imported-marker parameters ---
-        param_group = QGroupBox("Imported Markers", content)
+        param_group = QGroupBox(self.tr("Imported Markers"), content)
         param_form = QFormLayout(param_group)
 
         self.radius_spin = QDoubleSpinBox(param_group)
@@ -54,13 +55,13 @@ class MarkerDock(QDockWidget):
         self.radius_spin.setValue(20.0)
         self.radius_spin.setSingleStep(1.0)
         self.radius_spin.setSuffix(" px")
-        param_form.addRow("Radius:", self.radius_spin)
+        param_form.addRow(self.tr("Radius:"), self.radius_spin)
 
         self.line_width_spin = QSpinBox(param_group)
         self.line_width_spin.setRange(1, 25)
         self.line_width_spin.setValue(5)
         self.line_width_spin.valueChanged.connect(self.line_width_changed.emit)
-        param_form.addRow("Line width:", self.line_width_spin)
+        param_form.addRow(self.tr("Line width:"), self.line_width_spin)
 
         color_row = QWidget(param_group)
         color_layout = QHBoxLayout(color_row)
@@ -68,24 +69,24 @@ class MarkerDock(QDockWidget):
         self.color_preview = QLabel(color_row)
         self.color_preview.setFixedSize(24, 24)
         self._update_color_preview()
-        color_btn = QPushButton("Choose...", color_row)
+        color_btn = QPushButton(self.tr("Choose..."), color_row)
         color_btn.clicked.connect(self._pick_color)
         color_layout.addWidget(self.color_preview)
         color_layout.addWidget(color_btn)
         color_layout.addStretch()
-        param_form.addRow("Color:", color_row)
+        param_form.addRow(self.tr("Color:"), color_row)
 
         layout.addWidget(param_group)
 
         # --- ROI / detected source parameters ---
-        source_group = QGroupBox("Detected Sources (ROI)", content)
+        source_group = QGroupBox(self.tr("Detected Sources (ROI)"), content)
         source_form = QFormLayout(source_group)
 
         self.source_line_width_spin = QSpinBox(source_group)
         self.source_line_width_spin.setRange(1, 25)
         self.source_line_width_spin.setValue(5)
         self.source_line_width_spin.valueChanged.connect(self.source_line_width_changed.emit)
-        source_form.addRow("Line width:", self.source_line_width_spin)
+        source_form.addRow(self.tr("Line width:"), self.source_line_width_spin)
 
         source_color_row = QWidget(source_group)
         source_color_layout = QHBoxLayout(source_color_row)
@@ -93,31 +94,31 @@ class MarkerDock(QDockWidget):
         self.source_color_preview = QLabel(source_color_row)
         self.source_color_preview.setFixedSize(24, 24)
         self._update_source_color_preview()
-        source_color_btn = QPushButton("Choose...", source_color_row)
+        source_color_btn = QPushButton(self.tr("Choose..."), source_color_row)
         source_color_btn.clicked.connect(self._pick_source_color)
         source_color_layout.addWidget(self.source_color_preview)
         source_color_layout.addWidget(source_color_btn)
         source_color_layout.addStretch()
-        source_form.addRow("Color:", source_color_row)
+        source_form.addRow(self.tr("Color:"), source_color_row)
 
         layout.addWidget(source_group)
 
         # --- Single coordinate add ---
-        add_group = QGroupBox("Add Coordinate", content)
+        add_group = QGroupBox(self.tr("Add Coordinate"), content)
         add_form = QFormLayout(add_group)
 
         self.coord_type = QComboBox(add_group)
-        self.coord_type.addItems(["Pixel (x, y)", "WCS (ra, dec)"])
+        self.coord_type.addItems([self.tr("Pixel (x, y)"), self.tr("WCS (ra, dec)")])
         self.coord_type.currentIndexChanged.connect(self._on_coord_type_changed)
-        add_form.addRow("Type:", self.coord_type)
+        add_form.addRow(self.tr("Type:"), self.coord_type)
 
-        self.x_label = QLabel("X:")
+        self.x_label = QLabel(self.tr("X:"))
         self.x_spin = QDoubleSpinBox(add_group)
         self.x_spin.setRange(-1e6, 1e6)
         self.x_spin.setDecimals(6)
         add_form.addRow(self.x_label, self.x_spin)
 
-        self.y_label = QLabel("Y:")
+        self.y_label = QLabel(self.tr("Y:"))
         self.y_spin = QDoubleSpinBox(add_group)
         self.y_spin.setRange(-1e6, 1e6)
         self.y_spin.setDecimals(6)
@@ -126,8 +127,8 @@ class MarkerDock(QDockWidget):
         add_btn_row = QWidget(add_group)
         add_btn_layout = QHBoxLayout(add_btn_row)
         add_btn_layout.setContentsMargins(0, 0, 0, 0)
-        self.add_btn = QPushButton("Add", add_btn_row)
-        self.add_apply_btn = QPushButton("Add && Apply", add_btn_row)
+        self.add_btn = QPushButton(self.tr("Add"), add_btn_row)
+        self.add_apply_btn = QPushButton(self.tr("Add && Apply"), add_btn_row)
         add_btn_layout.addWidget(self.add_btn)
         add_btn_layout.addWidget(self.add_apply_btn)
         add_form.addRow(add_btn_row)
@@ -137,18 +138,18 @@ class MarkerDock(QDockWidget):
         layout.addWidget(add_group)
 
         # --- Batch coordinate input ---
-        coord_label = QLabel("Batch (one per line: x, y):", content)
+        coord_label = QLabel(self.tr("Batch (one per line: x, y):"), content)
         layout.addWidget(coord_label)
 
         self.coord_input = QPlainTextEdit(content)
-        self.coord_input.setPlaceholderText(
+        self.coord_input.setPlaceholderText(self.tr(
             "# Pixel: x, y\n"
             "512, 512\n"
             "100.5, 200.3\n"
             "# WCS: ra, dec (degrees)\n"
             "w 180.0, 45.0\n"
             "w 179.5, 44.8"
-        )
+        ))
         layout.addWidget(self.coord_input)
 
         self.status_label = QLabel("", content)
@@ -159,8 +160,8 @@ class MarkerDock(QDockWidget):
         btn_row = QWidget(content)
         btn_layout = QHBoxLayout(btn_row)
         btn_layout.setContentsMargins(0, 0, 0, 0)
-        self.apply_btn = QPushButton("Apply", btn_row)
-        self.clear_btn = QPushButton("Clear", btn_row)
+        self.apply_btn = QPushButton(self.tr("Apply"), btn_row)
+        self.clear_btn = QPushButton(self.tr("Clear"), btn_row)
         btn_layout.addWidget(self.apply_btn)
         btn_layout.addWidget(self.clear_btn)
         layout.addWidget(btn_row)
@@ -227,30 +228,49 @@ class MarkerDock(QDockWidget):
                 line = line[2:].strip()
             parts = line.split(",")
             if len(parts) != 2:
-                errors.append(f"Line {line_number}: expected two comma-separated values.")
+                errors.append(
+                    self.tr("Line {line_number}: expected two comma-separated values.").format(
+                        line_number=line_number
+                    )
+                )
                 continue
             try:
                 v1, v2 = float(parts[0].strip()), float(parts[1].strip())
                 coords.append((coord_type, v1, v2))
             except ValueError:
-                errors.append(f"Line {line_number}: values must be numeric.")
+                errors.append(
+                    self.tr("Line {line_number}: values must be numeric.").format(
+                        line_number=line_number
+                    )
+                )
         return coords, errors
 
     def _on_apply(self) -> None:
         entries, errors = self.parse_coordinates_with_feedback()
         if not entries:
             if errors:
-                self.status_label.setText("No valid coordinates found. " + " ".join(errors[:3]))
+                self.status_label.setText(
+                    f"{self.tr('No valid coordinates found.')} {' '.join(errors[:3])}"
+                )
             else:
-                self.status_label.setText("No valid coordinates found.")
+                self.status_label.setText(self.tr("No valid coordinates found."))
             return
         if errors:
-            self.status_label.setText(
-                f"{len(entries)} marker(s). Skipped {len(errors)} invalid line(s): "
-                + ", ".join(error.split(":")[0] for error in errors[:5])
+            line_refs = ", ".join(
+                error.split(":", 1)[0].split("：", 1)[0]
+                for error in errors[:5]
             )
+            self.status_label.setText(self.tr(
+                "{count} marker(s). Skipped {errors} invalid line(s): {lines}"
+            ).format(
+                count=len(entries),
+                errors=len(errors),
+                lines=line_refs,
+            ))
         else:
-            self.status_label.setText(f"{len(entries)} marker(s)")
+            self.status_label.setText(
+                self.tr("{count} marker(s)").format(count=len(entries))
+            )
         self.markers_updated.emit(entries)
 
     def _on_add_single(self) -> None:
@@ -273,29 +293,29 @@ class MarkerDock(QDockWidget):
     def _on_clear(self) -> None:
         self.coord_input.clear()
         self.markers_updated.emit([])
-        self.status_label.setText("Cleared.")
+        self.status_label.setText(self.tr("Cleared."))
 
     def _on_coord_type_changed(self, index: int) -> None:
         if index == 1:
-            self.x_label.setText("RA (deg):")
-            self.y_label.setText("Dec (deg):")
+            self.x_label.setText(self.tr("RA (deg):"))
+            self.y_label.setText(self.tr("Dec (deg):"))
             self.x_spin.setRange(-360, 360)
             self.y_spin.setRange(-90, 90)
         else:
-            self.x_label.setText("X:")
-            self.y_label.setText("Y:")
+            self.x_label.setText(self.tr("X:"))
+            self.y_label.setText(self.tr("Y:"))
             self.x_spin.setRange(-1e6, 1e6)
             self.y_spin.setRange(-1e6, 1e6)
 
     def _pick_color(self) -> None:
-        color = QColorDialog.getColor(self._color, self, "Marker Color")
+        color = QColorDialog.getColor(self._color, self, self.tr("Marker Color"))
         if color.isValid():
             self._color = color
             self._update_color_preview()
             self.color_changed.emit(self.color())
 
     def _pick_source_color(self) -> None:
-        color = QColorDialog.getColor(self._source_color, self, "Source Overlay Color")
+        color = QColorDialog.getColor(self._source_color, self, self.tr("Source Overlay Color"))
         if color.isValid():
             self._source_color = color
             self._update_source_color_preview()

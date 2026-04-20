@@ -25,14 +25,15 @@ class FramePlayerDock(QDockWidget):
     playback_stopped = Signal()  # emitted when playback stops
 
     def __init__(self, parent: Any | None = None) -> None:
-        super().__init__("Frame Player", parent)
+        super().__init__(parent)
         self.setObjectName("frame_player_dock")
+        self.setWindowTitle(self.tr("Frame Player"))
 
         self._frame_count = 0
         self._playing = False
         self._rendering_current_frame = False
         self._awaiting_current_frame_preview = False
-        self._base_info_text = "No frames loaded."
+        self._base_info_text = self.tr("No frames loaded.")
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._advance_frame)
 
@@ -44,7 +45,7 @@ class FramePlayerDock(QDockWidget):
         slider_layout = QHBoxLayout(slider_row)
         slider_layout.setContentsMargins(0, 0, 0, 0)
 
-        self.frame_label = QLabel("Frame:", slider_row)
+        self.frame_label = QLabel(self.tr("Frame:"), slider_row)
         self.frame_slider = QSlider(Qt.Orientation.Horizontal, slider_row)
         self.frame_slider.setMinimum(0)
         self.frame_slider.setMaximum(0)
@@ -66,7 +67,7 @@ class FramePlayerDock(QDockWidget):
 
         self.first_btn = QPushButton("|<", ctrl_row)
         self.prev_btn = QPushButton("<", ctrl_row)
-        self.play_btn = QPushButton("Play", ctrl_row)
+        self.play_btn = QPushButton(self.tr("Play"), ctrl_row)
         self.next_btn = QPushButton(">", ctrl_row)
         self.last_btn = QPushButton(">|", ctrl_row)
 
@@ -87,19 +88,19 @@ class FramePlayerDock(QDockWidget):
         param_layout = QHBoxLayout(param_row)
         param_layout.setContentsMargins(0, 0, 0, 0)
 
-        param_layout.addWidget(QLabel("FPS:", param_row))
+        param_layout.addWidget(QLabel(self.tr("FPS:"), param_row))
         self.fps_spin = QDoubleSpinBox(param_row)
         self.fps_spin.setRange(0.1, 60.0)
         self.fps_spin.setValue(5.0)
         self.fps_spin.setSingleStep(0.5)
         param_layout.addWidget(self.fps_spin)
 
-        self.loop_btn = QPushButton("Loop", param_row)
+        self.loop_btn = QPushButton(self.tr("Loop"), param_row)
         self.loop_btn.setCheckable(True)
         self.loop_btn.setChecked(True)
         param_layout.addWidget(self.loop_btn)
 
-        self.bounce_btn = QPushButton("Bounce", param_row)
+        self.bounce_btn = QPushButton(self.tr("Bounce"), param_row)
         self.bounce_btn.setCheckable(True)
         self.bounce_btn.setChecked(False)
         param_layout.addWidget(self.bounce_btn)
@@ -144,9 +145,9 @@ class FramePlayerDock(QDockWidget):
         self.set_current_frame(min(self.current_frame(), max_idx))
         self.total_label.setText(f"/ {count}")
         if count > 0:
-            self._base_info_text = f"{count} frame(s) loaded."
+            self._base_info_text = self.tr("{count} frame(s) loaded.").format(count=count)
         else:
-            self._base_info_text = "No frames loaded."
+            self._base_info_text = self.tr("No frames loaded.")
         self._refresh_info_label()
 
     def set_render_state(self, is_rendering: bool, *, has_preview: bool) -> None:
@@ -164,10 +165,10 @@ class FramePlayerDock(QDockWidget):
             return
 
         if self._awaiting_current_frame_preview:
-            suffix = " Waiting for preview..."
+            suffix = self.tr("Waiting for preview...")
         else:
-            suffix = " Rendering full frame..."
-        self.info_label.setText(f"{self._base_info_text}{suffix}")
+            suffix = self.tr("Rendering full frame...")
+        self.info_label.setText(f"{self._base_info_text} {suffix}")
 
     def current_frame(self) -> int:
         return self.frame_slider.value()
@@ -206,7 +207,7 @@ class FramePlayerDock(QDockWidget):
             return
         self._playing = True
         self._direction = 1
-        self.play_btn.setText("Pause")
+        self.play_btn.setText(self.tr("Pause"))
         self._update_timer_interval()
         self._timer.start()
         self.playback_started.emit()
@@ -224,7 +225,7 @@ class FramePlayerDock(QDockWidget):
     def _stop_playback(self) -> None:
         self._playing = False
         self._timer.stop()
-        self.play_btn.setText("Play")
+        self.play_btn.setText(self.tr("Play"))
         self.playback_stopped.emit()
 
     def _update_timer_interval(self) -> None:

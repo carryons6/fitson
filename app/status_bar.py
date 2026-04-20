@@ -17,6 +17,7 @@ class AppStatusBar(QStatusBar):
     """
 
     cancel_requested = Signal()
+    continue_requested = Signal()
     error_details_requested = Signal()
 
     def __init__(self, parent: Any | None = None) -> None:
@@ -31,23 +32,26 @@ class AppStatusBar(QStatusBar):
         self.activity_progress = QProgressBar(self)
         self.activity_progress.setFixedWidth(180)
         self.activity_progress.setTextVisible(False)
-        self.activity_cancel_btn = QPushButton("Cancel", self)
+        self.activity_cancel_btn = QPushButton(self.tr("Cancel"), self)
         self.activity_cancel_btn.clicked.connect(self.cancel_requested.emit)
+        self.activity_continue_btn = QPushButton(self.tr("Continue"), self)
+        self.activity_continue_btn.clicked.connect(self.continue_requested.emit)
 
         self.error_label = QLabel("", self)
-        self.error_button = QPushButton("Details", self)
+        self.error_button = QPushButton(self.tr("Details"), self)
         self.error_button.clicked.connect(self.error_details_requested.emit)
 
-        self.pixel_label = QLabel("Pixel: (-, -)", self)
-        self.value_label = QLabel("Value: -", self)
-        self.world_label = QLabel("RA/Dec: - / -", self)
+        self.pixel_label = QLabel(self.tr("Pixel: (-, -)"), self)
+        self.value_label = QLabel(self.tr("Value: -"), self)
+        self.world_label = QLabel(self.tr("RA/Dec: - / -"), self)
         self.frame_label = QLabel("", self)
         self.view_mode_label = QLabel("", self)
-        self.zoom_label = QLabel("Zoom: 100%", self)
+        self.zoom_label = QLabel(self.tr("Zoom: 100%"), self)
 
         for widget in (
             self.activity_label,
             self.activity_progress,
+            self.activity_continue_btn,
             self.activity_cancel_btn,
             self.error_label,
             self.error_button,
@@ -73,21 +77,25 @@ class AppStatusBar(QStatusBar):
         x_text = "-" if x is None else str(x)
         y_text = "-" if y is None else str(y)
         value_text = "-" if value is None else f"{value:.3f}"
-        self.pixel_label.setText(f"Pixel: ({x_text}, {y_text})")
-        self.value_label.setText(f"Value: {value_text}")
+        self.pixel_label.setText(
+            self.tr("Pixel: ({x}, {y})").format(x=x_text, y=y_text)
+        )
+        self.value_label.setText(self.tr("Value: {value}").format(value=value_text))
 
     def set_world_info(self, ra: str | None, dec: str | None) -> None:
         """Update RA/Dec display text."""
 
         ra_text = ra or "-"
         dec_text = dec or "-"
-        self.world_label.setText(f"RA/Dec: {ra_text} / {dec_text}")
+        self.world_label.setText(
+            self.tr("RA/Dec: {ra} / {dec}").format(ra=ra_text, dec=dec_text)
+        )
 
     def set_zoom_info(self, zoom_factor: float | None) -> None:
         """Update the zoom display text."""
 
         percent = 100.0 if zoom_factor is None else zoom_factor * 100.0
-        self.zoom_label.setText(f"Zoom: {percent:.0f}%")
+        self.zoom_label.setText(self.tr("Zoom: {percent}%").format(percent=f"{percent:.0f}"))
 
     def set_sample(self, sample: PixelSample) -> None:
         """Apply a full cursor sample payload to the status bar."""
@@ -127,6 +135,29 @@ class AppStatusBar(QStatusBar):
                 self.activity_progress.setValue(min(current_value, max_value))
             self.activity_progress.setVisible(True)
         self.activity_cancel_btn.setVisible(cancellable)
+        self.activity_continue_btn.setVisible(False)
+
+    def set_prompt(
+        self,
+        text: str,
+        *,
+        continue_label: str | None = None,
+        cancel_label: str | None = None,
+    ) -> None:
+        """Show a non-modal Continue/Cancel prompt inline with the activity slot."""
+
+        self.activity_label.setText(text)
+        self.activity_label.setVisible(bool(text))
+        self.activity_progress.setVisible(False)
+        if continue_label is None:
+            continue_label = self.tr("Continue")
+        if cancel_label is None:
+            cancel_label = self.tr("Cancel")
+        self.activity_continue_btn.setText(continue_label)
+        self.activity_continue_btn.setVisible(True)
+        self.activity_continue_btn.setDefault(True)
+        self.activity_cancel_btn.setText(cancel_label)
+        self.activity_cancel_btn.setVisible(True)
 
     def clear_activity(self) -> None:
         """Hide the persistent task indicator widgets."""
@@ -135,7 +166,10 @@ class AppStatusBar(QStatusBar):
         self.activity_label.setVisible(False)
         self.activity_progress.reset()
         self.activity_progress.setVisible(False)
+        self.activity_cancel_btn.setText(self.tr("Cancel"))
         self.activity_cancel_btn.setVisible(False)
+        self.activity_continue_btn.setText(self.tr("Continue"))
+        self.activity_continue_btn.setVisible(False)
 
     def show_error_indicator(self, title: str, detail: str) -> None:
         """Expose the latest error inline with an optional details affordance."""
@@ -179,7 +213,9 @@ class AppStatusBar(QStatusBar):
         if total <= 1:
             self.frame_label.setText("")
         else:
-            self.frame_label.setText(f"Frame: {current + 1}/{total}")
+            self.frame_label.setText(
+                self.tr("Frame: {current}/{total}").format(current=current + 1, total=total)
+            )
 
     def clear_data(self) -> None:
         """Reset all displayed status values."""

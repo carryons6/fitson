@@ -11,6 +11,7 @@ from PySide6.QtWidgets import QApplication
 
 from . import APP_NAME, __version__
 from .app import MainWindow
+from .app.i18n import install_translator
 from .app.theme import apply_theme, load_saved_theme
 from .core import OpenFileRequest
 from .diagnostics import install_exception_hooks, log_shutdown, log_startup
@@ -64,6 +65,7 @@ def main() -> int:
     log_startup(__name__, __version__, sys.argv)
 
     app = QApplication(sys.argv)
+    install_translator(app)
     apply_theme(app, load_saved_theme())
 
     icon_path = _resource_path() / "icons" / "main_icon.png"

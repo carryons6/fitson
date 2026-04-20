@@ -125,7 +125,7 @@ class UpdateCheckWorker(QObject):
                     status="unavailable",
                     current_version=self.current_version,
                     release_url=release_url,
-                    detail="No published release or tag information is available yet.",
+                    detail=self.tr("No published release or tag information is available yet."),
                 )
             elif compare_versions(self.current_version, latest_version) < 0:
                 result = UpdateCheckResult(
@@ -133,7 +133,9 @@ class UpdateCheckWorker(QObject):
                     current_version=self.current_version,
                     latest_version=latest_version,
                     release_url=release_url,
-                    detail=f"A newer version ({latest_version}) is available.",
+                    detail=self.tr("A newer version ({version}) is available.").format(
+                        version=latest_version
+                    ),
                 )
             else:
                 result = UpdateCheckResult(
@@ -141,7 +143,9 @@ class UpdateCheckWorker(QObject):
                     current_version=self.current_version,
                     latest_version=latest_version,
                     release_url=release_url,
-                    detail=f"You are running the latest version ({self.current_version}).",
+                    detail=self.tr("You are running the latest version ({version}).").format(
+                        version=self.current_version
+                    ),
                 )
         except Exception as exc:
             logger.warning("Update check failed: %s", exc)

@@ -4,10 +4,27 @@ from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
-import sep
 
 from .contracts import ROISelection
 from .source_catalog import SourceCatalog
+
+
+def _sep_module():
+    """Lazy import of the ``sep`` extension; deferred until extraction runs."""
+
+    import sep as _sep
+
+    return _sep
+
+
+def __getattr__(name: str):
+    """Expose ``sep`` lazily so ``patch('core.sep_service.sep.*')`` keeps working."""
+
+    if name == "sep":
+        sep = _sep_module()
+        globals()["sep"] = sep
+        return sep
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 @dataclass(slots=True)
@@ -83,6 +100,7 @@ class SEPService:
         arr = np.ascontiguousarray(data, dtype=np.float64)
         bw = max(1, int(p.bkg_box_size))
         fw = max(1, int(p.bkg_filter_size))
+        sep = _sep_module()
         bkg = sep.Background(arr, bw=bw, bh=bw, fw=fw, fh=fw)
         background = np.asarray(bkg.back(), dtype=np.float32)
         residual = (arr - background).astype(np.float32)
@@ -108,8 +126,18 @@ class SEPService:
         p = params or self.params
         self.validate_params(p)
 
-        data = np.ascontiguousarray(data_subarray, dtype=np.float64)
-        bkg = sep.Background(data)
+        if (
+            data_subarray.dtype in (np.float32, np.float64)
+            and data_subarray.flags["C_CONTIGUOUS"]
+        ):
+            data = data_subarray
+        else:
+            data = np.ascontiguousarray(data_subarray, dtype=np.float32)
+
+        bw = max(1, int(p.bkg_box_size))
+        fw = max(1, int(p.bkg_filter_size))
+        sep = _sep_module()
+        bkg = sep.Background(data, bw=bw, bh=bw, fw=fw, fh=fw)
         data_sub = data - bkg
 
         objects, segmentation_map = sep.extract(

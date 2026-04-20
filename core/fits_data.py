@@ -5,11 +5,45 @@ from typing import Any
 import warnings
 
 import numpy as np
-from astropy.io import fits
-from astropy.wcs import WCS
-from astropy.wcs.wcs import FITSFixedWarning
 
 from .contracts import PixelSample
+
+
+def _astropy_fits():
+    """Import `astropy.io.fits` lazily to keep module import cheap at startup."""
+
+    from astropy.io import fits
+
+    return fits
+
+
+def _astropy_wcs_types():
+    """Return ``(WCS, FITSFixedWarning)`` via a single deferred import."""
+
+    from astropy.wcs import WCS
+    from astropy.wcs.wcs import FITSFixedWarning
+
+    return WCS, FITSFixedWarning
+
+
+def __getattr__(name: str):
+    """Expose lazily-imported astropy attributes for ``patch()`` / introspection.
+
+    Without this, attribute access like ``core.fits_data.fits`` or
+    ``core.fits_data.WCS`` would fail because those names are no longer bound
+    at module level. Importing on demand keeps the startup cost deferred.
+    """
+
+    if name == "fits":
+        fits = _astropy_fits()
+        globals()["fits"] = fits
+        return fits
+    if name in ("WCS", "FITSFixedWarning"):
+        WCS, FITSFixedWarning = _astropy_wcs_types()
+        globals()["WCS"] = WCS
+        globals()["FITSFixedWarning"] = FITSFixedWarning
+        return globals()[name]
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 @dataclass(slots=True)
@@ -113,6 +147,7 @@ class FITSData:
 
         if self.data is None:
             raise ValueError("No image data available to save.")
+        fits = _astropy_fits()
         hdu = fits.PrimaryHDU(data=np.asarray(self.data), header=self.header)
         hdu.writeto(path, overwrite=overwrite)
 
@@ -143,7 +178,7 @@ class FITSData:
         )
 
 
-def _scan_image_hdus(hdul: fits.HDUList) -> list[HDUInfo]:
+def _scan_image_hdus(hdul: Any) -> list[HDUInfo]:
     """Scan an HDU list and return metadata for HDUs that contain image data."""
 
     result: list[HDUInfo] = []
@@ -178,6 +213,7 @@ class _LoadedHDUData:
 def _load_hdu_data(path: str, hdu_index: int | None = None) -> _LoadedHDUData:
     """Load one HDU from disk and return the raw image payload plus metadata."""
 
+    fits = _astropy_fits()
     hdul = fits.open(path, memmap=True)
     available = _scan_image_hdus(hdul)
 
@@ -263,7 +299,7 @@ def _build_frame(
     )
 
 
-def _read_hdu_data(path: str, hdu_index: int, hdul: fits.HDUList) -> np.ndarray | None:
+def _read_hdu_data(path: str, hdu_index: int, hdul: Any) -> np.ndarray | None:
     """Read one image HDU, retrying without memmap for scaled integer FITS data."""
 
     try:
@@ -271,6 +307,7 @@ def _read_hdu_data(path: str, hdu_index: int, hdul: fits.HDUList) -> np.ndarray 
     except ValueError as exc:
         if not _should_retry_without_memmap(exc, hdul[hdu_index].header):
             raise
+        fits = _astropy_fits()
         with fits.open(path, memmap=False) as fallback_hdul:
             data = fallback_hdul[hdu_index].data
 
@@ -295,6 +332,7 @@ def _build_frame_wcs(header: Any) -> tuple[Any, bool]:
     """Build a WCS object suitable for per-frame 2D interaction."""
 
     try:
+        WCS, FITSFixedWarning = _astropy_wcs_types()
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", FITSFixedWarning)
             full_wcs = WCS(header)
@@ -311,6 +349,7 @@ def _build_frame_wcs(header: Any) -> tuple[Any, bool]:
 def _is_image_hdu(hdu: Any) -> bool:
     """Return whether an HDU can expose image-like pixel data."""
 
+    fits = _astropy_fits()
     comp_image_hdu = getattr(fits, "CompImageHDU", ())
     return isinstance(hdu, (fits.PrimaryHDU, fits.ImageHDU, comp_image_hdu))
 

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 
 @dataclass(slots=True)
@@ -85,8 +85,36 @@ class HeaderFilterState:
     """Filter state applied to the header viewer."""
 
     query: str = ""
+    scope: Literal["any", "key", "value", "comment"] = "any"
     case_sensitive: bool = False
+    use_regex: bool = False
     match_count: int = 0
+    current_match: int = 0
+
+
+@dataclass(slots=True)
+class HeaderCard:
+    """One structured FITS header row used by the dialog table model."""
+
+    index: int = 0
+    key: str = ""
+    value: str = ""
+    comment: str = ""
+    kind: Literal["keyword", "comment", "history", "hierarch", "continue", "blank"] = "keyword"
+    raw_text: str = ""
+    raw_lines: tuple[int, ...] = ()
+
+
+@dataclass(slots=True)
+class HeaderPayload:
+    """Structured and raw header content for one HDU."""
+
+    hdu_index: int = 0
+    name: str = ""
+    kind: str = ""
+    shape: tuple[int, ...] | None = None
+    cards: list[HeaderCard] = field(default_factory=list)
+    raw_text: str = ""
 
 
 @dataclass(slots=True)
@@ -94,6 +122,9 @@ class HeaderViewState:
     """Composite state for the FITS header dialog."""
 
     has_header: bool = False
+    hdu_index: int = 0
+    available_hdus: list[tuple[int, str]] = field(default_factory=list)
+    view_mode: Literal["structured", "raw"] = "structured"
     line_count: int = 0
     feedback: ViewFeedbackState = field(default_factory=ViewFeedbackState)
 
