@@ -1,5 +1,36 @@
 from __future__ import annotations
 
+import os
+import sys
+
+
+def _register_frozen_dll_directories() -> None:
+    # PyInstaller spawn children re-import this module to locate `_subprocess_entry`.
+    # On Windows that re-import must succeed before numpy loads, so make the bundled
+    # BLAS/MKL DLLs discoverable via `os.add_dll_directory` ahead of `import numpy`.
+    if not getattr(sys, "frozen", False):
+        return
+    if not hasattr(os, "add_dll_directory"):
+        return
+    meipass = getattr(sys, "_MEIPASS", None)
+    if not meipass:
+        return
+    candidates = [
+        meipass,
+        os.path.join(meipass, "Library", "bin"),
+        os.path.join(meipass, "numpy.libs"),
+        os.path.join(meipass, "numpy", ".libs"),
+    ]
+    for path in candidates:
+        if os.path.isdir(path):
+            try:
+                os.add_dll_directory(path)
+            except OSError:
+                pass
+
+
+_register_frozen_dll_directories()
+
 import dataclasses
 import multiprocessing
 from multiprocessing import shared_memory

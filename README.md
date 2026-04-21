@@ -72,6 +72,9 @@ conda env create -f environment.yml
 conda activate astroview
 ```
 
+`environment.yml` pins `libblas` to the OpenBLAS variant so Windows PyInstaller
+builds do not pull in the much larger MKL runtime set.
+
 ## Usage
 
 You can launch AstroView from either the parent directory of `astroview/` or from the repository root itself:
@@ -104,6 +107,9 @@ Windows bundle and installer:
 python -m pip install pyinstaller
 .\scripts\build_windows.ps1
 ```
+
+For the smallest Windows installer, build from an environment created via
+`environment.yml`, which keeps NumPy on the OpenBLAS runtime.
 
 ## Architecture
 

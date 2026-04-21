@@ -1,14 +1,16 @@
 from __future__ import annotations
 
 import argparse
+import importlib
 import os
+import sys
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-import sys
+from PySide6.QtWidgets import QApplication
 
 REPO_PARENT = Path(__file__).resolve().parents[2]
 if str(REPO_PARENT) not in sys.path:
@@ -18,6 +20,18 @@ from astroview import main as main_module
 
 
 class TestMainEntry(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls._app = QApplication.instance() or QApplication([])
+
+    def test_package_main_module_does_not_run_app_on_import(self) -> None:
+        sys.modules.pop("astroview.__main__", None)
+
+        with patch("astroview.main.main") as main_mock:
+            importlib.import_module("astroview.__main__")
+
+        main_mock.assert_not_called()
+
     def test_main_defers_startup_file_open_until_after_window_show(self) -> None:
         parser = Mock()
         parser.parse_args.return_value = argparse.Namespace(path="demo.fits", hdu=None)
@@ -34,7 +48,9 @@ class TestMainEntry(unittest.TestCase):
                                 with patch.object(main_module, "install_exception_hooks", return_value=Path("astroview.log")):
                                     with patch.object(main_module, "log_startup"):
                                         with patch.object(main_module, "log_shutdown"):
-                                            result = main_module.main()
+                                            with patch.object(main_module, "apply_theme"):
+                                                with patch.object(main_module, "load_saved_theme", return_value="light"):
+                                                    result = main_module.main()
 
         self.assertEqual(result, 0)
         install_translator_mock.assert_called_once_with(app)

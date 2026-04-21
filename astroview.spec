@@ -37,6 +37,26 @@ if numpy_hook_dir.is_dir():
 
 qt_bin = env_dir / "Library" / "bin"
 qt_shiboken_dir = env_dir / "Library" / "shiboken6"
+blas_shim_dlls = [
+    "libcblas.dll",
+    "libblas.dll",
+    "liblapack.dll",
+    "liblapacke.dll",
+]
+openblas_dll_patterns = [
+    "openblas*.dll",
+    "libopenblas*.dll",
+]
+mkl_runtime_dlls = [
+    "mkl_rt.2.dll",
+    "mkl_core.2.dll",
+    "mkl_intel_thread.2.dll",
+    "mkl_def.2.dll",
+    "mkl_avx2.2.dll",
+    "mkl_vml_avx2.2.dll",
+    "mkl_vml_def.2.dll",
+    "mkl_vml_cmpt.2.dll",
+]
 
 binaries = []
 if python3_dll.is_file():
@@ -55,22 +75,44 @@ def _append_binary_glob_if_exists(source_dir: Path, pattern: str, dest: str = ".
             binaries.append((str(dll_path), dest))
 
 
+def _binary_contains_ascii_tokens(dll_path: Path, tokens: tuple[bytes, ...]) -> bool:
+    if not dll_path.is_file():
+        return False
+    content = dll_path.read_bytes()
+    return any(token in content for token in tokens)
+
+
+def _collect_blas_runtime_binaries(source_dir: Path) -> str:
+    # Conda BLAS shims forward to the real backend via exported ASCII names, so
+    # PyInstaller cannot discover the backend DLLs automatically.
+    for dll_name in blas_shim_dlls:
+        _append_binary_if_exists(source_dir, dll_name)
+
+    shim_paths = [source_dir / dll_name for dll_name in blas_shim_dlls]
+    if any(
+        _binary_contains_ascii_tokens(shim_path, (b"openblas.dll", b"openblas"))
+        for shim_path in shim_paths
+    ):
+        for pattern in openblas_dll_patterns:
+            _append_binary_glob_if_exists(source_dir, pattern)
+        return "openblas"
+
+    if any(
+        _binary_contains_ascii_tokens(shim_path, (b"mkl_rt", b"mkl_core", b"mkl_vml"))
+        for shim_path in shim_paths
+    ):
+        for dll_name in mkl_runtime_dlls:
+            _append_binary_if_exists(source_dir, dll_name)
+        return "mkl"
+
+    return "unknown"
+
+
 _append_binary_if_exists(python_dlls_dir, "_ssl.pyd")
 
-# NumPy in conda depends on libcblas.dll which forwards all exports to MKL.
-# Collect libcblas and the minimal MKL runtime set that numpy actually loads.
-for dll_name in [
-    "libcblas.dll",
-    "mkl_rt.2.dll",
-    "mkl_core.2.dll",
-    "mkl_intel_thread.2.dll",
-    "mkl_def.2.dll",
-    "mkl_avx2.2.dll",
-    "mkl_vml_avx2.2.dll",
-    "mkl_vml_def.2.dll",
-    "mkl_vml_cmpt.2.dll",
-]:
-    _append_binary_if_exists(qt_bin, dll_name)
+# Conda BLAS uses forwarding shims (libcblas/libblas/liblapack); collect only
+# the runtime backend actually referenced by those shims.
+blas_backend = _collect_blas_runtime_binaries(qt_bin)
 
 
 # PySide6 / Shiboken runtime DLLs. Prefer package-local DLLs because the exact

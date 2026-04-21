@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 1.7.3 - 2026-04-21
+
+### Changed
+- Changed Windows packaging to prefer the OpenBLAS runtime and auto-detect the active BLAS backend during bundling, shrinking the installer from roughly 101 MB to about 47 MB.
+
+### Fixed
+- Fixed `python -m astroview` launched from inside the package directory spawning a second empty window during ROI SEP extraction on Windows by guarding the package entry point for multiprocessing spawn children.
+
 ## 1.7.2 - 2026-04-21
 
 ### Fixed
