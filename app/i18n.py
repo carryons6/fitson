@@ -368,9 +368,11 @@ class AstroViewTranslator(QTranslator):
         n: int = -1,
     ) -> str:
         del context, disambiguation, n
-        if self.locale == DEFAULT_LOCALE or not source_text:
+        if not source_text:
             return ""
-        return _TRANSLATIONS.get(self.locale, {}).get(source_text, "")
+        if self.locale == DEFAULT_LOCALE:
+            return source_text
+        return _TRANSLATIONS.get(self.locale, {}).get(source_text, source_text)
 
 
 def install_translator(app: Any, locale: str | None = None, settings: QSettings | None = None) -> str:

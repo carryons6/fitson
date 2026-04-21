@@ -567,13 +567,17 @@ class TestMainWindowLoading(unittest.TestCase):
         try:
             with patch.object(window, "_stop_active_frame_load") as stop_load_mock:
                 with patch.object(window, "_cancel_active_frame_renders") as cancel_renders_mock:
-                    with patch.object(window, "saveGeometry", return_value=QByteArray(b"g")):
-                        with patch.object(window, "saveState", return_value=QByteArray(b"s")):
-                            with patch("PySide6.QtWidgets.QMainWindow.closeEvent") as super_close_mock:
-                                window.closeEvent(event)
+                    with patch.object(window, "_cancel_bkg_workers") as cancel_bkg_mock:
+                        with patch.object(window, "_cancel_active_sep_extract") as cancel_sep_mock:
+                            with patch.object(window, "saveGeometry", return_value=QByteArray(b"g")):
+                                with patch.object(window, "saveState", return_value=QByteArray(b"s")):
+                                    with patch("PySide6.QtWidgets.QMainWindow.closeEvent") as super_close_mock:
+                                        window.closeEvent(event)
 
             stop_load_mock.assert_called_once_with(wait=True)
             cancel_renders_mock.assert_called_once_with(wait=True)
+            cancel_bkg_mock.assert_called_once_with(wait=True)
+            cancel_sep_mock.assert_called_once_with(wait=True)
             self._assert_settings_write(window._settings, "window/geometry", QByteArray(b"g"))
             self._assert_settings_write(window._settings, "window/state", QByteArray(b"s"))
             self._assert_settings_write(
@@ -1626,7 +1630,7 @@ class TestMainWindowLoading(unittest.TestCase):
         finally:
             window.deleteLater()
 
-    def test_start_sep_extract_shows_busy_status_activity(self) -> None:
+    def test_start_sep_extract_runs_small_roi_without_estimate_prepass(self) -> None:
         window = MainWindow()
         window.app_status_bar = Mock()
         window.fits_service.current_data = FITSData(path="frame.fits", data=np.zeros((20, 30)))
@@ -1644,7 +1648,33 @@ class TestMainWindowLoading(unittest.TestCase):
                     window._start_sep_extract(ROISelection(x0=2, y0=3, width=10, height=8))
 
             window.app_status_bar.set_activity.assert_called_once_with(
-                "Estimating SEP source count on 10x8 ROI...",
+                "Running SEP extraction on 10x8 ROI...",
+                progress_value=0,
+                progress_max=0,
+                cancellable=True,
+            )
+        finally:
+            window.deleteLater()
+
+    def test_start_sep_extract_keeps_estimate_prepass_for_large_roi(self) -> None:
+        window = MainWindow()
+        window.app_status_bar = Mock()
+        window.fits_service.current_data = FITSData(path="frame.fits", data=np.zeros((1200, 1200)))
+        try:
+            with patch("astroview.app.main_window.QThread", _FakeThread):
+                with patch("astroview.app.main_window.SEPExtractWorker") as worker_cls:
+                    worker_cls.return_value = Mock(
+                        moveToThread=Mock(),
+                        extraction_ready=_FakeSignal(),
+                        estimation_ready=_FakeSignal(),
+                        extraction_error=_FakeSignal(),
+                        finished=_FakeSignal(),
+                        deleteLater=Mock(),
+                    )
+                    window._start_sep_extract(ROISelection(x0=0, y0=0, width=1200, height=1200))
+
+            window.app_status_bar.set_activity.assert_called_once_with(
+                "Estimating SEP source count on 1200x1200 ROI...",
                 progress_value=0,
                 progress_max=0,
                 cancellable=True,

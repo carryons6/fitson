@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+## 1.7.2 - 2026-04-21
+
+### Fixed
+- Fixed ROI SEP extraction feeling much slower than before by skipping the count-estimate pre-pass for normal-sized selections and reducing Windows subprocess handoff overhead.
+- Fixed SEP cancellation staying unresponsive and app shutdown hanging after Cancel by tightening worker subprocess teardown for aborted ROI extractions.
+- Fixed `Tools > Target Info Fields...` showing blank field labels in Chinese when a field name did not have an explicit translation entry.
+
 ## 1.7.1 - 2026-04-20
 
 ### Added

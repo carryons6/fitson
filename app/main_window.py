@@ -102,6 +102,7 @@ class MainWindow(QMainWindow):
     SEP_ESTIMATE_THRESHOLD_SIGMA = 15.0
     SEP_LARGE_COUNT_WARNING = 5000
     SEP_DENSE_FIELD_PER_MPX = 150
+    SEP_ESTIMATE_MIN_PIXELS = 1_000_000
 
     def __init__(
         self,
@@ -3165,6 +3166,21 @@ class MainWindow(QMainWindow):
             return
         normalized_roi, subarray, params, wcs = prepared
 
+        if not self._should_run_sep_estimate(normalized_roi):
+            self._sep_pending_extract_roi = None
+            self._launch_sep_worker(
+                subarray=subarray,
+                roi=normalized_roi,
+                params=params,
+                wcs=wcs,
+                estimate_only=False,
+                status_text=self.tr("Running SEP extraction on {width}x{height} ROI...").format(
+                    width=normalized_roi.width,
+                    height=normalized_roi.height,
+                ),
+            )
+            return
+
         self._sep_pending_extract_roi = normalized_roi
         self._launch_sep_worker(
             subarray=subarray,
@@ -3225,12 +3241,13 @@ class MainWindow(QMainWindow):
 
         normalized_roi = ROISelection(x0=x0, y0=y0, width=x1 - x0, height=y1 - y0)
         source_slice = data.data[y0:y1, x0:x1]
-        if source_slice.dtype in (np.float32, np.float64):
-            subarray = np.ascontiguousarray(source_slice, dtype=source_slice.dtype)
-        else:
-            subarray = np.ascontiguousarray(source_slice, dtype=np.float32)
         params = self.sep_panel.params_from_form_state() if self.sep_panel else self.sep_service.params
-        return normalized_roi, subarray, params, (data.wcs if data.has_wcs else None)
+        return normalized_roi, source_slice, params, (data.wcs if data.has_wcs else None)
+
+    def _should_run_sep_estimate(self, roi: ROISelection) -> bool:
+        """Only run the estimate pre-pass for large ROIs where the warning matters."""
+
+        return (roi.width * roi.height) >= self.SEP_ESTIMATE_MIN_PIXELS
 
     def _launch_sep_worker(
         self,
