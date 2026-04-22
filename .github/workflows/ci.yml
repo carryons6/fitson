@@ -9,13 +9,18 @@ on:
 jobs:
   tests:
     runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: astroview
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: astroview
       - uses: conda-incubator/setup-miniconda@v3
         with:
           activate-environment: astroview
           auto-activate-base: false
-          environment-file: environment.yml
+          environment-file: astroview/environment.yml
           miniforge-variant: Miniforge3
       - name: Run unittest suite
         shell: powershell
