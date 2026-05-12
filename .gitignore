@@ -88,3 +88,9 @@ zqy.py
 
 # test files
 test/
+
+# MSIX store packaging (kept out of the public repo)
+docs/store-msix.md
+packaging/
+scripts/build_msix_store.ps1
+scripts/capture_store_screenshots.py

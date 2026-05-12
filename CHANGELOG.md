@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+## 1.7.4 - 2026-05-11
+
+### Changed
+- Reduced first-image load time by skipping preview render stages whose dimension is at or below the load-stage preview, so a freshly loaded frame goes straight from the load-time preview to the full-resolution render instead of being redrawn at intermediate resolutions.
+- Sped up frame rendering by computing the display interval (e.g. ZScale `vmin`/`vmax`) once per frame and reusing it across the preview and full-resolution passes, removing redundant interval estimation work.
+
+### Fixed
+- Fixed packaged Windows ROI SEP extraction failing with `SEP subprocess exited without posting a result` by calling `multiprocessing.freeze_support()` before importing the GUI entry point in the PyInstaller bootstrap script.
+- Fixed source-tree imports when the checkout directory is not named `astroview`, so tests and PyInstaller can resolve the local package from folders such as `fitson`.
+- Fixed PyInstaller analysis missing `astroview.main` and the application package modules by building through a temporary `astroview` source-package alias.
+- Added `pyinstaller` to the Conda environment spec so `scripts/build_windows.ps1` has the build tool it invokes.
+
 ## 1.7.3 - 2026-04-21
 
 ### Changed

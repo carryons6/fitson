@@ -279,6 +279,38 @@ def render_image_u8(
     return service.render().image_u8
 
 
+def compute_interval_limits(
+    data: FITSData,
+    interval_name: str,
+    *,
+    manual_limits: tuple[float, float] | None = None,
+) -> tuple[float, float] | None:
+    """Compute display ``(vmin, vmax)`` once so multiple render passes can reuse them.
+
+    Used by render pipelines that want to apply the same brightness mapping
+    across a preview stage and the eventual full-resolution render, avoiding
+    redundant interval estimation (e.g. ZScale sigma-clipping) per stage.
+    Returns ``None`` if the data is empty or the limits are not usable.
+    """
+
+    if data is None or data.data is None:
+        return None
+
+    interval = _build_interval(
+        interval_name,
+        manual_vmin=None if manual_limits is None else manual_limits[0],
+        manual_vmax=None if manual_limits is None else manual_limits[1],
+    )
+    sample = data.data if interval_name == "Original" else _subsample(data.data)
+    try:
+        vmin, vmax = interval.get_limits(sample)
+    except Exception:
+        return None
+    if not (np.isfinite(vmin) and np.isfinite(vmax)) or vmax <= vmin:
+        return None
+    return float(vmin), float(vmax)
+
+
 def render_preview_u8(
     data: FITSData,
     stretch_name: str,

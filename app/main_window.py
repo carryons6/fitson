@@ -181,6 +181,11 @@ class MainWindow(QMainWindow):
         self._frame_dirty: list[bool] = []
         self._frame_bkg_cache: list[FITSData | None] = []
         self._frame_residual_cache: list[FITSData | None] = []
+        # Resolution of the preview already shown for each frame under the
+        # current stretch/interval/view-mode. Used by `_schedule_frame_render`
+        # to skip preview stages whose dimension is <= the cached preview,
+        # eliminating the redundant 1024 / 2048 passes after a fresh load.
+        self._frame_cached_preview_dim: list[int] = []
         self._view_mode: str = "original"  # "original" | "background" | "residual"
         self._frame_layout_mode: str = "single"  # "single" | "tiled" | "vertical"
         self._last_title_detail: str | None = None
@@ -1646,6 +1651,8 @@ class MainWindow(QMainWindow):
         self._frame_residual_cache[index] = dataclasses.replace(original, data=residual)
         if self._view_mode != "original":
             self._frame_dirty[index] = True
+            if 0 <= index < len(self._frame_cached_preview_dim):
+                self._frame_cached_preview_dim[index] = 0
             self._schedule_frame_render(index)
         if index == self._current_frame_index and self.source_table_dock is not None:
             mode = self.source_table_dock.current_cutout_mode()
@@ -1709,6 +1716,8 @@ class MainWindow(QMainWindow):
         self._latest_render_request_by_index.clear()
         for i in target_indices:
             self._frame_dirty[i] = True
+            if 0 <= i < len(self._frame_cached_preview_dim):
+                self._frame_cached_preview_dim[i] = 0
         self._sync_current_canvas_image_state()
         if self._current_frame_index in target_indices:
             self._ensure_frame_rendered(self._current_frame_index)
@@ -2200,6 +2209,13 @@ class MainWindow(QMainWindow):
 
         use_preview_only = playing and not playback_bg
 
+        cached_dim = 0
+        if 0 <= index < len(self._frame_cached_preview_dim):
+            cached_dim = self._frame_cached_preview_dim[index]
+        preview_dimensions = tuple(
+            d for d in self._preview_render_dimensions() if d > cached_dim
+        )
+
         thread = QThread(self)
         worker = FrameRenderWorker(
             request_id=request_id,
@@ -2208,7 +2224,7 @@ class MainWindow(QMainWindow):
             data=self._render_data_for_index(index),
             stretch_name=self.fits_service.current_stretch,
             interval_name=self.fits_service.current_interval,
-            preview_dimensions=self._preview_render_dimensions(),
+            preview_dimensions=preview_dimensions,
             manual_limits=self.fits_service.manual_interval_limits,
             preview_only=use_preview_only,
         )
@@ -2448,11 +2464,14 @@ class MainWindow(QMainWindow):
         self._frames.append(data)
         if preview_image_u8 is not None:
             self._frame_images.append(self._qimage_from_u8(preview_image_u8))
+            cached_dim = self._preview_load_dimension()
         else:
             self._frame_images.append(None)
+            cached_dim = 0
         self._frame_dirty.append(True)
         self._frame_bkg_cache.append(None)
         self._frame_residual_cache.append(None)
+        self._frame_cached_preview_dim.append(cached_dim)
 
         if len(self._frames) == 1:
             self._activate_frame(0)
@@ -2618,6 +2637,7 @@ class MainWindow(QMainWindow):
         self._frame_dirty.clear()
         self._frame_bkg_cache.clear()
         self._frame_residual_cache.clear()
+        self._frame_cached_preview_dim.clear()
         self._next_source_group_id = 0
         if self._view_mode != "original":
             self._view_mode = "original"
@@ -4225,6 +4245,8 @@ class MainWindow(QMainWindow):
         self._latest_render_request_by_index.clear()
         for i in range(len(self._frames)):
             self._frame_dirty[i] = True
+            if 0 <= i < len(self._frame_cached_preview_dim):
+                self._frame_cached_preview_dim[i] = 0
         self._sync_current_canvas_image_state()
         self._ensure_frame_rendered(self._current_frame_index)
         if self._is_playback_active():

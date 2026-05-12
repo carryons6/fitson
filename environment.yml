@@ -7,6 +7,7 @@ dependencies:
   - astropy>=5.3
   - numpy>=1.24
   - sep>=1.2
+  - pyinstaller>=6
   # Keep the Windows bundle on the lighter OpenBLAS runtime instead of MKL.
   - libblas=*=*openblas
   - pip

@@ -3,7 +3,7 @@ from __future__ import annotations
 from PySide6.QtCore import QObject, QThread, Signal, Slot
 
 from ..core.fits_data import FITSData
-from ..core.fits_service import render_image_u8, render_preview_u8
+from ..core.fits_service import compute_interval_limits, render_image_u8, render_preview_u8
 
 
 class FrameRenderWorker(QObject):
@@ -43,13 +43,15 @@ class FrameRenderWorker(QObject):
         thread = QThread.currentThread()
 
         try:
+            effective_interval, effective_manual_limits = self._resolve_shared_limits()
+
             for max_dimension in self.preview_dimensions:
                 preview = render_preview_u8(
                     self.data,
                     self.stretch_name,
-                    self.interval_name,
+                    effective_interval,
                     max_dimension=max_dimension,
-                    manual_limits=self.manual_limits,
+                    manual_limits=effective_manual_limits,
                 )
                 if preview is not None:
                     self.preview_ready.emit(self.request_id, self.generation, self.frame_index, preview)
@@ -62,8 +64,8 @@ class FrameRenderWorker(QObject):
             image_u8 = render_image_u8(
                 self.data,
                 self.stretch_name,
-                self.interval_name,
-                manual_limits=self.manual_limits,
+                effective_interval,
+                manual_limits=effective_manual_limits,
             )
             if thread.isInterruptionRequested():
                 return
@@ -72,3 +74,24 @@ class FrameRenderWorker(QObject):
             self.render_error.emit(self.request_id, self.generation, self.frame_index, str(exc))
         finally:
             self.finished.emit(self.request_id)
+
+    def _resolve_shared_limits(self) -> tuple[str, tuple[float, float] | None]:
+        """Compute interval limits once so preview and full render share them.
+
+        For non-Manual intervals (e.g. ZScale) the limits would otherwise be
+        recomputed independently per render stage. By precomputing them and
+        switching downstream calls to ``"Manual"`` we avoid that redundant
+        work and also guarantee the preview and final image align visually.
+        """
+
+        if self.interval_name == "Manual":
+            return self.interval_name, self.manual_limits
+
+        shared = compute_interval_limits(
+            self.data,
+            self.interval_name,
+            manual_limits=self.manual_limits,
+        )
+        if shared is None:
+            return self.interval_name, self.manual_limits
+        return "Manual", shared

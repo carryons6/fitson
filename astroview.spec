@@ -1,4 +1,5 @@
 from pathlib import Path
+import shutil
 import sys
 import sysconfig
 
@@ -199,6 +200,35 @@ if version_file.is_file():
 app_version = version_file.read_text(encoding="utf-8").strip() if version_file.is_file() else "0.0.0"
 
 
+def _prepare_source_package_alias() -> Path:
+    """Expose this checkout as an `astroview` package for PyInstaller analysis."""
+
+    alias_parent = spec_dir / "build" / "package_alias"
+    alias_package = alias_parent / "astroview"
+    if alias_package.exists():
+        shutil.rmtree(alias_package)
+    alias_package.mkdir(parents=True, exist_ok=True)
+
+    for filename in [
+        "__init__.py",
+        "__main__.py",
+        "main.py",
+        "diagnostics.py",
+        "version.py",
+        "VERSION",
+    ]:
+        shutil.copy2(package_dir / filename, alias_package / filename)
+
+    ignore = shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo")
+    for dirname in ["app", "core"]:
+        shutil.copytree(package_dir / dirname, alias_package / dirname, ignore=ignore)
+
+    return alias_parent
+
+
+package_alias_parent = _prepare_source_package_alias()
+
+
 def _parse_windows_version(version_text: str) -> tuple[int, int, int, int]:
     parts = [int(part) for part in version_text.split(".") if part.strip()]
     while len(parts) < 4:
@@ -244,6 +274,7 @@ def _build_windows_version_info(version_text: str) -> versioninfo.VSVersionInfo:
 windows_version_info = _build_windows_version_info(app_version)
 
 hiddenimports = [
+    "astroview.main",
     "sep",
     "numpy._core._multiarray_tests",
     "secrets",
@@ -254,7 +285,7 @@ hiddenimports = [
 
 a = Analysis(
     [str(package_dir / "astroview_bootstrap.py")],
-    pathex=[str(workspace_dir)],
+    pathex=[str(package_alias_parent), str(package_dir), str(workspace_dir)],
     binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,

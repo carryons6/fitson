@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import argparse
 import importlib
+import importlib.abc
+import importlib.util
 import os
 import sys
+import types
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -31,6 +34,73 @@ class TestMainEntry(unittest.TestCase):
             importlib.import_module("astroview.__main__")
 
         main_mock.assert_not_called()
+
+    def test_pyinstaller_bootstrap_freeze_support_runs_before_gui_import(self) -> None:
+        calls: list[str] = []
+
+        class FakeMainLoader(importlib.abc.MetaPathFinder, importlib.abc.Loader):
+            def find_spec(
+                self,
+                fullname: str,
+                path: object = None,
+                target: object = None,
+            ) -> object:
+                if fullname == "astroview.main":
+                    return importlib.util.spec_from_loader(fullname, self)
+                return None
+
+            def create_module(self, spec: object) -> types.ModuleType:
+                name = getattr(spec, "name", "astroview.main")
+                return types.ModuleType(str(name))
+
+            def exec_module(self, module: types.ModuleType) -> None:
+                calls.append("import_main")
+
+                def fake_main() -> int:
+                    calls.append("main")
+                    return 17
+
+                module.main = fake_main
+
+        fake_package = types.ModuleType("astroview")
+        fake_package.__path__ = []
+        finder = FakeMainLoader()
+        bootstrap_path = Path(__file__).resolve().parents[1] / "astroview_bootstrap.py"
+        bootstrap_spec = importlib.util.spec_from_file_location(
+            "_astroview_bootstrap_order_test",
+            bootstrap_path,
+        )
+        self.assertIsNotNone(bootstrap_spec)
+        self.assertIsNotNone(bootstrap_spec.loader)
+        bootstrap_module = importlib.util.module_from_spec(bootstrap_spec)
+        old_package = sys.modules.get("astroview")
+        old_main = sys.modules.pop("astroview.main", None)
+
+        def fake_freeze_support() -> None:
+            calls.append("freeze_support")
+
+        sys.modules["astroview"] = fake_package
+        sys.meta_path.insert(0, finder)
+        try:
+            bootstrap_spec.loader.exec_module(bootstrap_module)
+            with patch.object(
+                bootstrap_module.multiprocessing,
+                "freeze_support",
+                side_effect=fake_freeze_support,
+            ):
+                result = bootstrap_module._run()
+        finally:
+            sys.meta_path.remove(finder)
+            sys.modules.pop("astroview.main", None)
+            if old_main is not None:
+                sys.modules["astroview.main"] = old_main
+            if old_package is not None:
+                sys.modules["astroview"] = old_package
+            else:
+                sys.modules.pop("astroview", None)
+
+        self.assertEqual(result, 17)
+        self.assertEqual(calls, ["freeze_support", "import_main", "main"])
 
     def test_main_defers_startup_file_open_until_after_window_show(self) -> None:
         parser = Mock()
