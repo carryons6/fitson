@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
+import traceback
 from pathlib import Path
 
 from PySide6.QtGui import QIcon
@@ -30,7 +32,50 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="AstroView application entry point.")
     parser.add_argument("path", nargs="?", help="Optional FITS file path.")
     parser.add_argument("--hdu", type=int, default=None, help="Optional HDU index.")
+    parser.add_argument("--smoke-test", action="store_true", help=argparse.SUPPRESS)
     return parser
+
+
+def _write_smoke_report(message: str) -> None:
+    """Best-effort report for the windowed frozen executable's build check."""
+
+    report_path = os.environ.get("ASTROVIEW_SMOKE_REPORT")
+    if not report_path:
+        return
+    try:
+        Path(report_path).write_text(message.rstrip() + "\n", encoding="utf-8")
+    except OSError:
+        # The process exit code remains authoritative when the report location
+        # itself is not writable.
+        pass
+
+
+def run_smoke_test() -> int:
+    """Exercise frozen GUI and scientific dependencies without opening a window."""
+
+    try:
+        import numpy as np
+        import sep
+        from astropy.io import fits
+
+        app = QApplication.instance() or QApplication([APP_NAME, "--smoke-test"])
+        apply_theme(app, "light")
+
+        icon_path = _resource_path() / "icons" / "main_icon.png"
+        if not icon_path.is_file():
+            raise FileNotFoundError(f"Bundled application icon is missing: {icon_path}")
+        app.setWindowIcon(QIcon(str(icon_path)))
+
+        sample = np.zeros((16, 16), dtype=np.float32)
+        fits.PrimaryHDU(data=sample).verify("exception")
+        sep.extract(sample, 1.0)
+        app.processEvents()
+    except Exception:
+        _write_smoke_report("FAILED\n" + traceback.format_exc())
+        return 1
+
+    _write_smoke_report(f"OK {APP_NAME} {__version__}")
+    return 0
 
 
 def build_startup_request(args: argparse.Namespace) -> OpenFileRequest | None:
@@ -60,6 +105,9 @@ def main() -> int:
 
     parser = build_arg_parser()
     args = parser.parse_args()
+
+    if getattr(args, "smoke_test", False):
+        return run_smoke_test()
 
     log_path = install_exception_hooks(APP_NAME)
     log_startup(__name__, __version__, sys.argv)

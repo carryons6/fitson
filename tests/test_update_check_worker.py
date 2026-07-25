@@ -98,6 +98,41 @@ class TestUpdateCheckWorker(unittest.TestCase):
         self.assertEqual(results[0].status, "update_available")
         self.assertEqual(results[0].latest_version, latest_version)
 
+    def test_cancelled_worker_suppresses_network_and_result_but_still_finishes(self) -> None:
+        results = []
+        finished = []
+        worker = UpdateCheckWorker(__version__)
+        worker.result_ready.connect(results.append)
+        worker.finished.connect(lambda: finished.append(True))
+        worker.cancel()
+
+        with patch("astroview.app.update_check_worker.fetch_latest_version_info") as fetch_mock:
+            worker.run()
+
+        fetch_mock.assert_not_called()
+        self.assertEqual(results, [])
+        self.assertEqual(finished, [True])
+
+    def test_cancellation_during_fetch_suppresses_late_result(self) -> None:
+        results = []
+        finished = []
+        worker = UpdateCheckWorker(__version__)
+        worker.result_ready.connect(results.append)
+        worker.finished.connect(lambda: finished.append(True))
+
+        def cancel_during_fetch():
+            worker.cancel()
+            return __version__, "https://example.com/release"
+
+        with patch(
+            "astroview.app.update_check_worker.fetch_latest_version_info",
+            side_effect=cancel_during_fetch,
+        ):
+            worker.run()
+
+        self.assertEqual(results, [])
+        self.assertEqual(finished, [True])
+
 
 if __name__ == "__main__":
     unittest.main()

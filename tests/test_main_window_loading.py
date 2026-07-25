@@ -1,15 +1,18 @@
 from __future__ import annotations
 
+import gzip
 import os
+import threading
 import time
 import unittest
+from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import numpy as np
-from PySide6.QtCore import QByteArray, Qt
+from PySide6.QtCore import QByteArray, QObject, QThread, Signal, Slot, Qt
 from PySide6.QtGui import QColor, QImage
 from PySide6.QtWidgets import QApplication, QMessageBox
 
@@ -22,7 +25,13 @@ if str(REPO_PARENT) not in sys.path:
 
 from astroview import __version__
 from astroview.app.contracts import HeaderPayload, HeaderViewState, TableColumnSpec
-from astroview.app.main_window import MainWindow
+from astroview.app.main_window import (
+    MainWindow,
+    _FrameBkgThreadFinishRelay,
+    _FrameRenderThreadFinishRelay,
+    _LoadSignalRelay,
+    _UpdateCheckSignalRelay,
+)
 from astroview.app.update_check_worker import UpdateCheckResult
 from astroview.core.contracts import ROISelection
 from astroview.core.sep_service import SEPParameters
@@ -52,6 +61,36 @@ class _FakeThread:
 
     def deleteLater(self) -> None:
         return None
+
+
+class _ThreadLoadEmitter(QObject):
+    file_loaded = Signal(object, object)
+    finished = Signal()
+
+    @Slot()
+    def run(self) -> None:
+        self.file_loaded.emit(FITSData(path="threaded.fits"), None)
+        self.finished.emit()
+
+
+class _ThreadUpdateEmitter(QObject):
+    result_ready = Signal(object)
+    finished = Signal()
+
+    @Slot()
+    def run(self) -> None:
+        self.result_ready.emit(
+            UpdateCheckResult(status="up_to_date", current_version=__version__)
+        )
+        self.finished.emit()
+
+
+class _ThreadFinishEmitter(QObject):
+    finished = Signal()
+
+    @Slot()
+    def run(self) -> None:
+        self.finished.emit()
 
 
 class TestMainWindowLoading(unittest.TestCase):
@@ -569,15 +608,17 @@ class TestMainWindowLoading(unittest.TestCase):
                 with patch.object(window, "_cancel_active_frame_renders") as cancel_renders_mock:
                     with patch.object(window, "_cancel_bkg_workers") as cancel_bkg_mock:
                         with patch.object(window, "_cancel_active_sep_extract") as cancel_sep_mock:
-                            with patch.object(window, "saveGeometry", return_value=QByteArray(b"g")):
-                                with patch.object(window, "saveState", return_value=QByteArray(b"s")):
-                                    with patch("PySide6.QtWidgets.QMainWindow.closeEvent") as super_close_mock:
-                                        window.closeEvent(event)
+                            with patch.object(window, "_stop_update_check") as stop_update_mock:
+                                with patch.object(window, "saveGeometry", return_value=QByteArray(b"g")):
+                                    with patch.object(window, "saveState", return_value=QByteArray(b"s")):
+                                        with patch("PySide6.QtWidgets.QMainWindow.closeEvent") as super_close_mock:
+                                            window.closeEvent(event)
 
-            stop_load_mock.assert_called_once_with(wait=True)
-            cancel_renders_mock.assert_called_once_with(wait=True)
-            cancel_bkg_mock.assert_called_once_with(wait=True)
-            cancel_sep_mock.assert_called_once_with(wait=True)
+            stop_load_mock.assert_called_once_with(wait=False)
+            cancel_renders_mock.assert_called_once_with(wait=False)
+            cancel_bkg_mock.assert_called_once_with(wait=False)
+            cancel_sep_mock.assert_called_once_with(wait=False)
+            stop_update_mock.assert_called_once_with(wait=False)
             self._assert_settings_write(window._settings, "window/geometry", QByteArray(b"g"))
             self._assert_settings_write(window._settings, "window/state", QByteArray(b"s"))
             self._assert_settings_write(
@@ -644,6 +685,191 @@ class TestMainWindowLoading(unittest.TestCase):
         finally:
             window.deleteLater()
 
+    def test_close_event_defers_destruction_while_a_worker_thread_is_running(self) -> None:
+        window = MainWindow()
+        event = Mock()
+        thread = Mock()
+        thread.isRunning.return_value = True
+        worker = Mock()
+        window._load_thread = thread
+        window._load_worker = worker
+        window._active_load_request_id = 1
+        try:
+            with patch.object(window, "_persist_window_state") as persist_mock:
+                with patch("PySide6.QtWidgets.QMainWindow.closeEvent") as super_close_mock:
+                    window.closeEvent(event)
+
+            event.ignore.assert_called_once_with()
+            persist_mock.assert_not_called()
+            super_close_mock.assert_not_called()
+            thread.requestInterruption.assert_called_once_with()
+            thread.quit.assert_called_once_with()
+            thread.terminate.assert_not_called()
+            self.assertTrue(window._close_pending)
+
+            thread.isRunning.return_value = False
+            with patch.object(window, "close") as close_mock:
+                window._retry_pending_close()
+            close_mock.assert_called_once_with()
+            self.assertFalse(window._close_pending)
+        finally:
+            window._load_thread = None
+            window._load_worker = None
+            window._active_load_request_id = None
+            window.deleteLater()
+
+    def test_render_thread_cleanup_does_not_spawn_followup_work_while_closing(self) -> None:
+        window = MainWindow()
+        window._is_closing = True
+        window._render_threads[3] = Mock()
+        window._render_workers[3] = Mock()
+        window._render_request_index_by_id[3] = 0
+        try:
+            with patch.object(window, "_pump_playback_render_queue") as pump_mock:
+                with patch.object(window, "_schedule_next_composite_dirty_frame") as schedule_mock:
+                    window._handle_frame_render_thread_finished(3)
+
+            pump_mock.assert_not_called()
+            schedule_mock.assert_not_called()
+            self.assertNotIn(3, window._render_threads)
+        finally:
+            window.deleteLater()
+
+    def test_stale_load_callbacks_cannot_mutate_or_clear_a_new_request(self) -> None:
+        window = MainWindow()
+        old_thread = Mock()
+        old_worker = Mock()
+        new_thread = Mock()
+        new_worker = Mock()
+        window._active_load_request_id = 2
+        window._load_thread = new_thread
+        window._load_worker = new_worker
+        try:
+            with patch.object(window, "_handle_loaded_frame") as loaded_mock:
+                with patch.object(window, "_finish_frame_load") as finish_mock:
+                    window._handle_loaded_frame_for_request(
+                        1,
+                        old_worker,
+                        FITSData(path="stale.fits"),
+                        None,
+                    )
+                    window._finish_frame_load_for_request(1, old_worker)
+                    window._clear_load_worker_refs(1, old_thread, old_worker)
+
+            loaded_mock.assert_not_called()
+            finish_mock.assert_not_called()
+            self.assertIs(window._load_thread, new_thread)
+            self.assertIs(window._load_worker, new_worker)
+            self.assertEqual(window._active_load_request_id, 2)
+        finally:
+            window._load_thread = None
+            window._load_worker = None
+            window.deleteLater()
+
+    def test_load_signal_relay_runs_main_window_handler_on_gui_thread(self) -> None:
+        window = MainWindow()
+        thread = QThread()
+        worker = _ThreadLoadEmitter()
+        worker.moveToThread(thread)
+        relay = _LoadSignalRelay(window, 1, thread, worker)
+        window._active_load_request_id = 1
+        window._load_thread = thread
+        window._load_worker = worker
+        window._load_results_enabled = True
+        handler_threads: list[QThread] = []
+        try:
+            thread.started.connect(worker.run)
+            worker.file_loaded.connect(relay.handle_loaded)
+            worker.finished.connect(worker.deleteLater)
+            worker.finished.connect(thread.quit)
+            thread.finished.connect(relay.deleteLater)
+
+            with patch.object(
+                window,
+                "_handle_loaded_frame",
+                side_effect=lambda _data, _preview: handler_threads.append(QThread.currentThread()),
+            ):
+                thread.start()
+                self._wait_until(lambda: bool(handler_threads) and not thread.isRunning())
+
+            self.assertIs(handler_threads[0], window.thread())
+        finally:
+            if thread.isRunning():
+                thread.requestInterruption()
+                thread.quit()
+                thread.wait(3000)
+            window._load_thread = None
+            window._load_worker = None
+            window._active_load_request_id = None
+            thread.deleteLater()
+            window.deleteLater()
+
+    def test_render_thread_finish_relay_runs_cleanup_on_gui_thread(self) -> None:
+        window = MainWindow()
+        thread = QThread()
+        emitter = _ThreadFinishEmitter()
+        emitter.moveToThread(thread)
+        relay = _FrameRenderThreadFinishRelay(window, 3, 0)
+        cleanup_threads: list[QThread] = []
+        try:
+            thread.started.connect(emitter.run)
+            emitter.finished.connect(thread.quit)
+            emitter.finished.connect(emitter.deleteLater)
+            thread.finished.connect(relay.handle_thread_finished)
+            thread.finished.connect(relay.deleteLater)
+
+            with patch.object(
+                window,
+                "_handle_frame_render_thread_finished",
+                side_effect=lambda *_args: cleanup_threads.append(QThread.currentThread()),
+            ):
+                thread.start()
+                self._wait_until(
+                    lambda: bool(cleanup_threads) and not thread.isRunning()
+                )
+
+            self.assertIs(cleanup_threads[0], window.thread())
+        finally:
+            if thread.isRunning():
+                thread.requestInterruption()
+                thread.quit()
+                thread.wait(3000)
+            thread.deleteLater()
+            window.deleteLater()
+
+    def test_bkg_thread_finish_relay_runs_cleanup_on_gui_thread(self) -> None:
+        window = MainWindow()
+        thread = QThread()
+        emitter = _ThreadFinishEmitter()
+        emitter.moveToThread(thread)
+        relay = _FrameBkgThreadFinishRelay(window, 0, 4, thread, Mock())
+        cleanup_threads: list[QThread] = []
+        try:
+            thread.started.connect(emitter.run)
+            emitter.finished.connect(thread.quit)
+            emitter.finished.connect(emitter.deleteLater)
+            thread.finished.connect(relay.handle_thread_finished)
+            thread.finished.connect(relay.deleteLater)
+
+            with patch.object(
+                window,
+                "_handle_bkg_thread_finished",
+                side_effect=lambda *_args: cleanup_threads.append(QThread.currentThread()),
+            ):
+                thread.start()
+                self._wait_until(
+                    lambda: bool(cleanup_threads) and not thread.isRunning()
+                )
+
+            self.assertIs(cleanup_threads[0], window.thread())
+        finally:
+            if thread.isRunning():
+                thread.requestInterruption()
+                thread.quit()
+                thread.wait(3000)
+            thread.deleteLater()
+            window.deleteLater()
+
     def test_set_loading_state_updates_status_bar_activity(self) -> None:
         window = MainWindow()
         window.app_status_bar = Mock()
@@ -674,6 +900,445 @@ class TestMainWindowLoading(unittest.TestCase):
 
             schedule_mock.assert_called_once_with(0)
         finally:
+            window.deleteLater()
+
+    def test_activate_frame_atomically_clears_previous_sep_catalog_and_pending_launch(self) -> None:
+        window = MainWindow()
+        first = FITSData(path="first.fits", data=np.zeros((2, 2)))
+        second = FITSData(path="second.fits", data=np.ones((2, 2)))
+        window._frames = [first, second]
+        window._frame_images = [None, None]
+        window._frame_dirty = [False, False]
+        window._frame_bkg_cache = [None, None]
+        window._frame_residual_cache = [None, None]
+        window._frame_cached_preview_dim = [0, 0]
+        window._current_frame_index = 0
+        window.fits_service.current_data = first
+        window.current_catalog = SourceCatalog(
+            records=[SourceRecord(source_id=1, x=1.0, y=1.0)]
+        )
+        window.canvas = Mock()
+        window.source_table_dock = Mock()
+        pending_roi = ROISelection(x0=0, y0=0, width=2, height=2)
+        window._sep_pending_launch_roi = window._pending_sep_action(pending_roi)
+        window._sep_confirm_pending_roi = window._pending_sep_action(pending_roi)
+        try:
+            with patch.object(window, "_show_current_frame_image"):
+                with patch.object(window, "_refresh_histogram_view"):
+                    with patch.object(window, "_persist_session_state"):
+                        window._activate_frame(1)
+
+            self.assertIsNone(window.current_catalog)
+            self.assertIsNone(window._sep_pending_launch_roi)
+            self.assertIsNone(window._sep_confirm_pending_roi)
+            window.canvas.clear_sources.assert_called_once_with()
+            window.source_table_dock.clear_catalog.assert_called_once_with()
+        finally:
+            window.deleteLater()
+
+    def test_cancelled_sep_estimate_cannot_launch_full_extract_during_thread_cleanup(self) -> None:
+        window = MainWindow()
+        frame = FITSData(path="frame.fits", data=np.zeros((2, 2)))
+        window._frames = [frame]
+        window.fits_service.current_data = frame
+        window._current_frame_index = 0
+        window._active_sep_request_id = 5
+        window._active_sep_context_generation = window._sep_context_generation
+        window._active_sep_frame_index = 0
+        thread = Mock()
+        thread.isRunning.return_value = True
+        worker = Mock()
+        window._sep_thread = thread
+        window._sep_worker = worker
+        window._sep_pending_launch_roi = window._pending_sep_action(
+            ROISelection(x0=0, y0=0, width=2, height=2)
+        )
+        try:
+            with patch.object(window, "_start_sep_extract_full") as start_mock:
+                window._cancel_active_sep_extract(wait=False)
+                window._clear_sep_worker_refs(5, thread, worker)
+
+            start_mock.assert_not_called()
+            self.assertIsNone(window._sep_pending_launch_roi)
+            self.assertIsNone(window._sep_thread)
+            worker.cancel.assert_called_once_with()
+        finally:
+            window.deleteLater()
+
+    def test_cancelled_sep_request_rejects_already_queued_result(self) -> None:
+        window = MainWindow()
+        frame = FITSData(path="frame.fits", data=np.zeros((2, 2)))
+        window._frames = [frame]
+        window.fits_service.current_data = frame
+        window._current_frame_index = 0
+        window._active_sep_request_id = 6
+        window._active_sep_context_generation = window._sep_context_generation
+        window._active_sep_frame_index = 0
+        thread = Mock()
+        thread.isRunning.return_value = True
+        worker = Mock()
+        window._sep_thread = thread
+        window._sep_worker = worker
+        catalog = SourceCatalog(records=[SourceRecord(source_id=1, x=1.0, y=1.0)])
+        try:
+            with patch.object(window, "set_current_catalog") as set_catalog_mock:
+                window._cancel_active_sep_extract(wait=False)
+                window._handle_sep_extraction_ready(
+                    6,
+                    ROISelection(x0=0, y0=0, width=2, height=2),
+                    catalog,
+                )
+
+            set_catalog_mock.assert_not_called()
+            self.assertIsNone(window.current_catalog)
+            self.assertFalse(window._sep_request_matches_current_context(6))
+        finally:
+            window._sep_thread = None
+            window._sep_worker = None
+            window._active_sep_request_id = None
+            window.deleteLater()
+
+    def test_sep_result_from_previous_frame_is_ignored_during_fast_switch(self) -> None:
+        window = MainWindow()
+        first = FITSData(path="first.fits", data=np.zeros((2, 2)))
+        second = FITSData(path="second.fits", data=np.ones((2, 2)))
+        window._frames = [first, second]
+        window._current_frame_index = 1
+        window.fits_service.current_data = second
+        window._sep_context_generation = 2
+        window._active_sep_request_id = 9
+        window._active_sep_context_generation = 1
+        window._active_sep_frame_index = 0
+        catalog = SourceCatalog(records=[SourceRecord(source_id=1, x=1.0, y=1.0)])
+        try:
+            with patch.object(window, "sync_catalog_views") as sync_mock:
+                window._handle_sep_extraction_ready(
+                    9,
+                    ROISelection(x0=0, y0=0, width=2, height=2),
+                    catalog,
+                )
+
+            self.assertIsNone(window.current_catalog)
+            sync_mock.assert_not_called()
+        finally:
+            window.deleteLater()
+
+    def test_bkg_result_survives_unrelated_render_generation_change(self) -> None:
+        window = MainWindow()
+        original = FITSData(path="frame.fits", data=np.zeros((2, 2)))
+        background = np.ones((2, 2), dtype=np.float32)
+        residual = np.full((2, 2), 2.0, dtype=np.float32)
+        window._frames = [original]
+        window._frame_images = [None]
+        window._frame_dirty = [True]
+        window._frame_bkg_cache = [None]
+        window._frame_residual_cache = [None]
+        window._frame_cached_preview_dim = [0]
+        window._view_mode = "background"
+        window._bkg_generation = 3
+        window._render_generation = 99
+        try:
+            with patch.object(window, "_schedule_frame_render") as schedule_mock:
+                window._handle_bkg_ready(0, 3, background, residual)
+
+            np.testing.assert_array_equal(window._frame_bkg_cache[0].data, background)
+            np.testing.assert_array_equal(window._frame_residual_cache[0].data, residual)
+            schedule_mock.assert_called_once_with(0)
+        finally:
+            window.deleteLater()
+
+    def test_stale_bkg_completion_redispatches_under_current_generation(self) -> None:
+        window = MainWindow()
+        frame = FITSData(path="frame.fits", data=np.zeros((2, 2)))
+        window._frames = [frame]
+        window._frame_images = [None]
+        window._frame_dirty = [True]
+        window._frame_bkg_cache = [None]
+        window._frame_residual_cache = [None]
+        window._frame_cached_preview_dim = [0]
+        window._view_mode = "background"
+        window._bkg_generation = 8
+        thread = Mock()
+        worker = Mock()
+        worker.generation = 7
+        window._bkg_threads[0] = thread
+        window._bkg_workers[0] = worker
+        try:
+            with patch.object(window, "_ensure_frame_rendered") as ensure_mock:
+                window._handle_bkg_thread_finished(0, 7, thread, worker)
+
+            self.assertNotIn(0, window._bkg_threads)
+            self.assertNotIn(0, window._bkg_workers)
+            ensure_mock.assert_called_once_with(0)
+        finally:
+            window.deleteLater()
+
+    def test_stale_bkg_completion_redispatches_for_source_cutout_in_original_view(self) -> None:
+        window = MainWindow()
+        frame = FITSData(path="frame.fits", data=np.zeros((2, 2)))
+        window._frames = [frame]
+        window._frame_bkg_cache = [None]
+        window._frame_residual_cache = [None]
+        window._view_mode = "original"
+        window._current_frame_index = 0
+        window._bkg_generation = 8
+        window.source_table_dock = Mock()
+        window.source_table_dock.current_cutout_mode.return_value = "Background"
+        thread = Mock()
+        worker = Mock()
+        worker.generation = 7
+        window._bkg_threads[0] = thread
+        window._bkg_workers[0] = worker
+        try:
+            with patch.object(window, "_dispatch_bkg_worker") as dispatch_mock:
+                window._handle_bkg_thread_finished(0, 7, thread, worker)
+
+            dispatch_mock.assert_called_once_with(0)
+        finally:
+            window.deleteLater()
+
+    def test_current_bkg_error_ends_render_feedback_without_retry_loop(self) -> None:
+        window = MainWindow()
+        frame = FITSData(path="frame.fits", data=np.zeros((2, 2)))
+        window._frames = [frame]
+        window._frame_dirty = [True]
+        window._frame_bkg_cache = [None]
+        window._frame_residual_cache = [None]
+        window._view_mode = "background"
+        window._current_frame_index = 0
+        window._bkg_generation = 4
+        thread = Mock()
+        worker = Mock()
+        worker.generation = 4
+        window._bkg_threads[0] = thread
+        window._bkg_workers[0] = worker
+        try:
+            with patch.object(window, "show_error") as error_mock:
+                with patch.object(window, "_dispatch_bkg_worker") as dispatch_mock:
+                    window._handle_bkg_error(0, 4, "synthetic failure")
+                    window._handle_bkg_thread_finished(0, 4, thread, worker)
+
+            self.assertFalse(window._is_frame_rendering(0))
+            error_mock.assert_called_once_with(
+                "Background calculation failed", "synthetic failure"
+            )
+            dispatch_mock.assert_not_called()
+        finally:
+            window.deleteLater()
+
+    def test_current_bkg_error_replaces_cutout_loading_message(self) -> None:
+        window = MainWindow()
+        frame = FITSData(path="frame.fits", data=np.zeros((2, 2)))
+        window._frames = [frame]
+        window._frame_dirty = [False]
+        window._frame_bkg_cache = [None]
+        window._frame_residual_cache = [None]
+        window._view_mode = "original"
+        window._current_frame_index = 0
+        window._bkg_generation = 4
+        window.source_table_dock = Mock()
+        window.source_table_dock.current_cutout_mode.return_value = "Residual"
+        try:
+            with patch.object(window, "show_error"):
+                window._handle_bkg_error(0, 4, "synthetic failure")
+
+            window.source_table_dock.clear_cutout_image.assert_called_once_with(
+                "Background unavailable: synthetic failure"
+            )
+        finally:
+            window.deleteLater()
+
+    def test_cancel_bkg_workers_timeout_keeps_running_thread_tracked(self) -> None:
+        window = MainWindow()
+        thread = Mock()
+        thread.isRunning.return_value = True
+        thread.wait.return_value = False
+        worker = Mock()
+        worker.generation = 4
+        window._bkg_threads[0] = thread
+        window._bkg_workers[0] = worker
+        try:
+            stopped = window._cancel_bkg_workers(wait=True)
+
+            worker.cancel.assert_called_once_with()
+            self.assertFalse(stopped)
+            thread.wait.assert_called_once_with(window.BACKGROUND_THREAD_WAIT_MS)
+            thread.terminate.assert_not_called()
+            self.assertIs(window._bkg_threads[0], thread)
+            self.assertIs(window._bkg_workers[0], worker)
+        finally:
+            window._bkg_threads.clear()
+            window._bkg_workers.clear()
+            window.deleteLater()
+
+    def test_rapid_frame_switches_share_one_global_live_bkg_worker(self) -> None:
+        frames = [
+            FITSData(
+                path=f"frame-{index}.fits",
+                data=np.full((8, 8), index, dtype=np.float32),
+            )
+            for index in range(5)
+        ]
+        window = MainWindow()
+        window.canvas = Mock()
+        window.fits_service.current_data = frames[0]
+        window._frames = frames
+        window._frame_images = [None] * len(frames)
+        window._frame_dirty = [True] * len(frames)
+        window._frame_bkg_cache = [None] * len(frames)
+        window._frame_residual_cache = [None] * len(frames)
+        window._frame_cached_preview_dim = [0] * len(frames)
+        window._current_frame_index = 0
+        window._view_mode = "background"
+        first_compute_entered = threading.Event()
+        release_first_compute = threading.Event()
+        compute_call_count = 0
+        compute_lock = threading.Lock()
+
+        def blocking_background(data, _params):
+            nonlocal compute_call_count
+            with compute_lock:
+                compute_call_count += 1
+                call_number = compute_call_count
+            if call_number == 1:
+                first_compute_entered.set()
+                release_first_compute.wait(5)
+            background = np.full_like(data, call_number, dtype=np.float32)
+            residual = np.asarray(data, dtype=np.float32) - background
+            return background, residual, np.zeros_like(background)
+
+        def dispatch_if_missing(index: int, *, playback_bg: bool = False) -> None:
+            del playback_bg
+            if not window._frame_bkg_cached(index):
+                window._dispatch_bkg_worker(index)
+
+        try:
+            with patch.object(
+                window.sep_service,
+                "compute_background",
+                side_effect=blocking_background,
+            ):
+                with patch.object(
+                    window,
+                    "_schedule_frame_render",
+                    side_effect=dispatch_if_missing,
+                ):
+                    window._dispatch_bkg_worker(0)
+                    self._wait_until(first_compute_entered.is_set)
+
+                    for index in range(1, len(frames)):
+                        window._current_frame_index = index
+                        window.fits_service.current_data = frames[index]
+                        window._dispatch_bkg_worker(index)
+                        self.assertEqual(len(window._bkg_threads), 1)
+
+                    self.assertIsNotNone(window._pending_bkg_current)
+                    self.assertEqual(window._pending_bkg_current[0], 4)
+                    with compute_lock:
+                        self.assertEqual(compute_call_count, 1)
+
+                    release_first_compute.set()
+                    self._wait_until(
+                        lambda: (
+                            not window._bkg_threads
+                            and window._frame_bkg_cache[4] is not None
+                        ),
+                        timeout=5.0,
+                    )
+
+            with compute_lock:
+                self.assertEqual(compute_call_count, 2)
+            self.assertIsNone(window._frame_bkg_cache[0])
+            self.assertIsNotNone(window._frame_bkg_cache[4])
+            self.assertIsNone(window._pending_bkg_current)
+        finally:
+            release_first_compute.set()
+            window._is_closing = True
+            window._cancel_bkg_workers(wait=True)
+            window.deleteLater()
+
+    def test_playback_bkg_request_returns_to_queue_while_global_slot_is_busy(self) -> None:
+        frames = [
+            FITSData(path=f"frame-{index}.fits", data=np.zeros((2, 2)))
+            for index in range(2)
+        ]
+        window = MainWindow()
+        window.frame_player_dock = Mock()
+        window.frame_player_dock.is_playing.return_value = True
+        window.fits_service.current_data = frames[0]
+        window._frames = frames
+        window._frame_images = [None, None]
+        window._frame_dirty = [True, True]
+        window._frame_bkg_cache = [None, None]
+        window._frame_residual_cache = [None, None]
+        window._frame_cached_preview_dim = [0, 0]
+        window._current_frame_index = 0
+        window._view_mode = "background"
+        window._playback_render_queue = [1]
+        thread = Mock()
+        thread.isRunning.return_value = True
+        worker = Mock()
+        worker.generation = window._bkg_generation
+        window._bkg_threads[0] = thread
+        window._bkg_workers[0] = worker
+        try:
+            with patch.object(window, "_launch_bkg_worker") as launch_mock:
+                window._pump_playback_render_queue()
+
+            launch_mock.assert_not_called()
+            self.assertEqual(window._playback_render_queue, [1])
+            self.assertEqual(list(window._bkg_threads), [0])
+            worker.cancel.assert_not_called()
+        finally:
+            window._bkg_threads.clear()
+            window._bkg_workers.clear()
+            window.deleteLater()
+
+    def test_composite_bkg_demand_resumes_after_global_slot_cleanup(self) -> None:
+        frames = [
+            FITSData(path=f"frame-{index}.fits", data=np.zeros((2, 2)))
+            for index in range(2)
+        ]
+        window = MainWindow()
+        window.fits_service.current_data = frames[0]
+        window._frames = frames
+        window._frame_dirty = [True, True]
+        window._frame_bkg_cache = [None, None]
+        window._frame_residual_cache = [None, None]
+        window._current_frame_index = 0
+        window._view_mode = "background"
+        window._frame_layout_mode = "tiled"
+        thread = Mock()
+        thread.isRunning.return_value = True
+        worker = Mock()
+        worker.generation = window._bkg_generation
+        window._bkg_threads[0] = thread
+        window._bkg_workers[0] = worker
+        try:
+            with patch.object(window, "_launch_bkg_worker") as launch_mock:
+                window._dispatch_bkg_worker(1)
+
+            launch_mock.assert_not_called()
+            self.assertTrue(window._frame_dirty[1])
+            self.assertEqual(list(window._bkg_threads), [0])
+
+            thread.isRunning.return_value = False
+            with patch.object(
+                window,
+                "_schedule_next_composite_dirty_frame",
+            ) as schedule_mock:
+                window._handle_bkg_thread_finished(
+                    0,
+                    worker.generation,
+                    thread,
+                    worker,
+                )
+
+            schedule_mock.assert_called_once_with()
+            self.assertEqual(window._bkg_threads, {})
+        finally:
+            window._bkg_threads.clear()
+            window._bkg_workers.clear()
             window.deleteLater()
 
     def test_start_frame_load_uses_preview_profile_dimension(self) -> None:
@@ -721,6 +1386,88 @@ class TestMainWindowLoading(unittest.TestCase):
             close_mock.assert_not_called()
             self.assertEqual(worker_cls.call_args.kwargs["preview_max_dimension"], 2048)
         finally:
+            window.deleteLater()
+
+    def test_repeated_frame_load_requests_keep_only_latest_pending_request(self) -> None:
+        window = MainWindow()
+        thread = Mock()
+        thread.isRunning.return_value = True
+        worker = Mock()
+        window._load_thread = thread
+        window._load_worker = worker
+        window._active_load_request_id = 1
+        window._load_results_enabled = True
+        try:
+            with patch.object(window, "_launch_frame_load") as launch_mock:
+                with patch.object(window, "_set_loading_state"):
+                    window._start_frame_load(["second.fits"], append=False)
+                    window._start_frame_load(["latest.fits"], hdu_index=2, append=True)
+
+                launch_mock.assert_not_called()
+                self.assertEqual(window._pending_frame_load.paths, ("latest.fits",))
+                self.assertEqual(window._pending_frame_load.hdu_index, 2)
+                self.assertTrue(window._pending_frame_load.append)
+
+                thread.isRunning.return_value = False
+                window._handle_load_thread_finished(1, thread, worker)
+
+            launch_mock.assert_called_once()
+            queued = launch_mock.call_args.args[0]
+            self.assertEqual(queued.paths, ("latest.fits",))
+        finally:
+            window._load_thread = None
+            window._load_worker = None
+            window.deleteLater()
+
+    def test_nonrunning_loader_cleanup_launches_newest_request_only_once(self) -> None:
+        window = MainWindow()
+        thread = Mock()
+        thread.isRunning.return_value = False
+        worker = Mock()
+        window._load_thread = thread
+        window._load_worker = worker
+        window._active_load_request_id = 1
+        window._pending_frame_load = SimpleNamespace(
+            paths=("older-pending.fits",), hdu_index=None, append=False
+        )
+        try:
+            with patch.object(window, "_launch_frame_load") as launch_mock:
+                window._start_frame_load(["newest.fits"], append=False)
+
+            launch_mock.assert_called_once()
+            queued = launch_mock.call_args.args[0]
+            self.assertEqual(queued.paths, ("newest.fits",))
+        finally:
+            window._load_thread = None
+            window._load_worker = None
+            window.deleteLater()
+
+    def test_cancelled_frame_load_rejects_already_queued_callbacks(self) -> None:
+        window = MainWindow()
+        thread = Mock()
+        thread.isRunning.return_value = True
+        worker = Mock()
+        window._load_thread = thread
+        window._load_worker = worker
+        window._active_load_request_id = 4
+        window._load_results_enabled = True
+        window._status_activity_kind = "load"
+        try:
+            with patch.object(window, "_handle_loaded_frame") as loaded_mock:
+                window._handle_status_bar_cancel_requested()
+                window._handle_loaded_frame_for_request(
+                    4,
+                    worker,
+                    FITSData(path="queued.fits"),
+                    None,
+                )
+
+            loaded_mock.assert_not_called()
+            self.assertFalse(window._is_current_load_request(4, worker))
+            self.assertIs(window._load_thread, thread)
+        finally:
+            window._load_thread = None
+            window._load_worker = None
             window.deleteLater()
 
     def test_handle_frame_preview_rendered_updates_current_image(self) -> None:
@@ -1004,6 +1751,325 @@ class TestMainWindowLoading(unittest.TestCase):
             window._cancel_active_frame_renders(wait=True)
             window.deleteLater()
 
+    def test_repeated_rerender_coalesces_to_one_live_worker_per_frame(self) -> None:
+        frame = FITSData(path="frame-0.fits", data=np.zeros((8, 8), dtype=np.float32))
+        window = MainWindow()
+        window.canvas = Mock()
+        window.fits_service.current_data = frame
+        window._frames = [frame]
+        window._frame_images = [None]
+        window._frame_dirty = [True]
+        window._frame_bkg_cache = [None]
+        window._frame_residual_cache = [None]
+        window._frame_cached_preview_dim = [0]
+        window._current_frame_index = 0
+        first_compute_entered = threading.Event()
+        release_first_compute = threading.Event()
+        compute_call_count = 0
+        compute_lock = threading.Lock()
+
+        def blocking_limits(*_args, **_kwargs):
+            nonlocal compute_call_count
+            with compute_lock:
+                compute_call_count += 1
+                call_number = compute_call_count
+            if call_number == 1:
+                first_compute_entered.set()
+                release_first_compute.wait(5)
+            return (0.0, 1.0)
+
+        try:
+            with patch(
+                "astroview.app.frame_render_worker.compute_interval_limits",
+                side_effect=blocking_limits,
+            ):
+                with patch(
+                    "astroview.app.frame_render_worker.render_preview_u8",
+                    return_value=None,
+                ):
+                    with patch(
+                        "astroview.app.frame_render_worker.render_image_u8",
+                        return_value="latest-full-render",
+                    ):
+                        with patch.object(
+                            window,
+                            "_qimage_from_u8",
+                            side_effect=lambda image: image,
+                        ):
+                            with patch.object(window, "_show_current_frame_image"):
+                                window._schedule_frame_render(0)
+                                self._wait_until(first_compute_entered.is_set)
+
+                                for _ in range(5):
+                                    window._rerender_all_frames()
+
+                                self.assertEqual(len(window._render_threads), 1)
+                                self.assertEqual(
+                                    len(window._active_render_request_by_index),
+                                    1,
+                                )
+                                self.assertEqual(
+                                    window._pending_render_intent,
+                                    (0, window._render_generation, False),
+                                )
+                                with compute_lock:
+                                    self.assertEqual(compute_call_count, 1)
+
+                                release_first_compute.set()
+                                self._wait_until(
+                                    lambda: (
+                                        not window._render_threads
+                                        and window._frame_dirty == [False]
+                                    ),
+                                    timeout=5.0,
+                                )
+
+            with compute_lock:
+                self.assertEqual(compute_call_count, 2)
+            self.assertEqual(window._frame_images, ["latest-full-render"])
+            self.assertEqual(window._active_render_request_by_index, {})
+            self.assertIsNone(window._pending_render_intent)
+        finally:
+            release_first_compute.set()
+            window._cancel_active_frame_renders(wait=True)
+            window.deleteLater()
+
+    def test_rapid_frame_switches_share_one_global_live_render_worker(self) -> None:
+        frames = [
+            FITSData(path=f"frame-{index}.fits", data=np.zeros((8, 8), dtype=np.float32))
+            for index in range(5)
+        ]
+        window = MainWindow()
+        window.canvas = Mock()
+        window.fits_service.current_data = frames[0]
+        window._frames = frames
+        window._frame_images = [None] * len(frames)
+        window._frame_dirty = [True] * len(frames)
+        window._frame_bkg_cache = [None] * len(frames)
+        window._frame_residual_cache = [None] * len(frames)
+        window._frame_cached_preview_dim = [0] * len(frames)
+        first_compute_entered = threading.Event()
+        release_first_compute = threading.Event()
+        compute_call_count = 0
+        compute_lock = threading.Lock()
+
+        def blocking_limits(*_args, **_kwargs):
+            nonlocal compute_call_count
+            with compute_lock:
+                compute_call_count += 1
+                call_number = compute_call_count
+            if call_number == 1:
+                first_compute_entered.set()
+                release_first_compute.wait(5)
+            return (0.0, 1.0)
+
+        try:
+            with patch(
+                "astroview.app.frame_render_worker.compute_interval_limits",
+                side_effect=blocking_limits,
+            ):
+                with patch(
+                    "astroview.app.frame_render_worker.render_preview_u8",
+                    return_value=None,
+                ):
+                    with patch(
+                        "astroview.app.frame_render_worker.render_image_u8",
+                        return_value="latest-frame-render",
+                    ):
+                        with patch.object(
+                            window,
+                            "_qimage_from_u8",
+                            side_effect=lambda image: image,
+                        ):
+                            with patch.object(window, "_show_current_frame_image"):
+                                window._current_frame_index = 0
+                                window._schedule_frame_render(0)
+                                self._wait_until(first_compute_entered.is_set)
+
+                                for index in range(1, len(frames)):
+                                    window._current_frame_index = index
+                                    window.fits_service.current_data = frames[index]
+                                    window._schedule_frame_render(index)
+                                    self.assertEqual(len(window._render_threads), 1)
+
+                                self.assertEqual(
+                                    window._pending_render_intent,
+                                    (4, window._render_generation, False),
+                                )
+                                with compute_lock:
+                                    self.assertEqual(compute_call_count, 1)
+
+                                release_first_compute.set()
+                                self._wait_until(
+                                    lambda: (
+                                        not window._render_threads
+                                        and window._frame_dirty[4] is False
+                                    ),
+                                    timeout=5.0,
+                                )
+
+            with compute_lock:
+                self.assertEqual(compute_call_count, 2)
+            self.assertEqual(window._frame_images[4], "latest-frame-render")
+            self.assertIsNone(window._pending_render_intent)
+        finally:
+            release_first_compute.set()
+            window._cancel_active_frame_renders(wait=True)
+            window.deleteLater()
+
+    def test_playback_queue_uses_global_render_slot_serially(self) -> None:
+        frames = [
+            FITSData(path=f"frame-{index}.fits", data=np.zeros((8, 8), dtype=np.float32))
+            for index in range(3)
+        ]
+        window = MainWindow()
+        window.canvas = Mock()
+        window.frame_player_dock = Mock()
+        window.frame_player_dock.is_playing.return_value = True
+        window.fits_service.current_data = frames[0]
+        window._frames = frames
+        window._frame_images = [None] * len(frames)
+        window._frame_dirty = [True] * len(frames)
+        window._frame_bkg_cache = [None] * len(frames)
+        window._frame_residual_cache = [None] * len(frames)
+        window._frame_cached_preview_dim = [0] * len(frames)
+        window._current_frame_index = 0
+        entered = [threading.Event() for _ in frames]
+        releases = [threading.Event() for _ in frames]
+        rendered_paths: list[str] = []
+        call_lock = threading.Lock()
+
+        def staged_limits(data, *_args, **_kwargs):
+            with call_lock:
+                call_index = len(rendered_paths)
+                rendered_paths.append(data.path)
+            entered[call_index].set()
+            releases[call_index].wait(5)
+            return (0.0, 1.0)
+
+        try:
+            with patch(
+                "astroview.app.frame_render_worker.compute_interval_limits",
+                side_effect=staged_limits,
+            ):
+                with patch(
+                    "astroview.app.frame_render_worker.render_preview_u8",
+                    return_value=None,
+                ):
+                    with patch(
+                        "astroview.app.frame_render_worker.render_image_u8",
+                        return_value="playback-render",
+                    ):
+                        with patch.object(
+                            window,
+                            "_qimage_from_u8",
+                            side_effect=lambda image: image,
+                        ):
+                            with patch.object(window, "_show_current_frame_image"):
+                                with patch.object(window, "_prewarm_adjacent_frame"):
+                                    window._build_playback_render_queue()
+                                    window._pump_playback_render_queue()
+
+                                    for index in range(len(frames)):
+                                        self._wait_until(entered[index].is_set)
+                                        self.assertEqual(len(window._render_threads), 1)
+                                        releases[index].set()
+
+                                    self._wait_until(
+                                        lambda: (
+                                            not window._render_threads
+                                            and window._frame_dirty == [False, False, False]
+                                        ),
+                                        timeout=5.0,
+                                    )
+
+            self.assertEqual(
+                rendered_paths,
+                ["frame-1.fits", "frame-2.fits", "frame-0.fits"],
+            )
+            self.assertEqual(window._playback_render_queue, [])
+        finally:
+            for release in releases:
+                release.set()
+            window._is_closing = True
+            window._cancel_active_frame_renders(wait=True)
+            window.deleteLater()
+
+    def test_composite_queue_uses_global_render_slot_serially(self) -> None:
+        frames = [
+            FITSData(path=f"frame-{index}.fits", data=np.zeros((8, 8), dtype=np.float32))
+            for index in range(3)
+        ]
+        window = MainWindow()
+        window.canvas = Mock()
+        window.fits_service.current_data = frames[0]
+        window._frames = frames
+        window._frame_images = [None] * len(frames)
+        window._frame_dirty = [True] * len(frames)
+        window._frame_bkg_cache = [None] * len(frames)
+        window._frame_residual_cache = [None] * len(frames)
+        window._frame_cached_preview_dim = [0] * len(frames)
+        window._current_frame_index = 0
+        window._frame_layout_mode = "tiled"
+        entered = [threading.Event() for _ in frames]
+        releases = [threading.Event() for _ in frames]
+        rendered_paths: list[str] = []
+        call_lock = threading.Lock()
+
+        def staged_limits(data, *_args, **_kwargs):
+            with call_lock:
+                call_index = len(rendered_paths)
+                rendered_paths.append(data.path)
+            entered[call_index].set()
+            releases[call_index].wait(5)
+            return (0.0, 1.0)
+
+        try:
+            with patch(
+                "astroview.app.frame_render_worker.compute_interval_limits",
+                side_effect=staged_limits,
+            ):
+                with patch(
+                    "astroview.app.frame_render_worker.render_preview_u8",
+                    return_value=None,
+                ):
+                    with patch(
+                        "astroview.app.frame_render_worker.render_image_u8",
+                        return_value="composite-render",
+                    ):
+                        with patch.object(
+                            window,
+                            "_qimage_from_u8",
+                            side_effect=lambda image: image,
+                        ):
+                            with patch.object(window, "_show_current_frame_image"):
+                                with patch.object(window, "_prewarm_adjacent_frame"):
+                                    window._schedule_next_composite_dirty_frame()
+
+                                    for index in range(len(frames)):
+                                        self._wait_until(entered[index].is_set)
+                                        self.assertEqual(len(window._render_threads), 1)
+                                        releases[index].set()
+
+                                    self._wait_until(
+                                        lambda: (
+                                            not window._render_threads
+                                            and window._frame_dirty == [False, False, False]
+                                        ),
+                                        timeout=5.0,
+                                    )
+
+            self.assertEqual(
+                rendered_paths,
+                ["frame-0.fits", "frame-1.fits", "frame-2.fits"],
+            )
+        finally:
+            for release in releases:
+                release.set()
+            window._is_closing = True
+            window._cancel_active_frame_renders(wait=True)
+            window.deleteLater()
+
     def test_close_current_file_cancels_active_loading_and_rendering(self) -> None:
         window = MainWindow()
         window.canvas = Mock()
@@ -1026,8 +2092,8 @@ class TestMainWindowLoading(unittest.TestCase):
                         with patch.object(window, "sync_render_controls") as sync_render_mock:
                             window.close_current_file()
 
-            stop_load_mock.assert_called_once_with(wait=True)
-            cancel_renders_mock.assert_called_once_with(wait=True)
+            stop_load_mock.assert_called_once_with(wait=False)
+            cancel_renders_mock.assert_called_once_with(wait=False)
             self.assertEqual(window._render_generation, generation_before + 1)
             self.assertEqual(window._render_request_index_by_id, {})
             self.assertEqual(window._latest_render_request_by_index, {})
@@ -1061,6 +2127,33 @@ class TestMainWindowLoading(unittest.TestCase):
             window.header_dialog.raise_.assert_called_once_with()
         finally:
             window.deleteLater()
+
+    def test_header_payloads_fall_back_when_loaded_path_is_replaced_by_gzip(self) -> None:
+        from astropy.io import fits
+
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "replaced.fits"
+            hdu = fits.PrimaryHDU(data=np.arange(4, dtype=np.float32).reshape(2, 2))
+            hdu.header["OBJECT"] = "ORIGINAL"
+            hdu.writeto(path)
+            loaded = FITSData.load(str(path))
+
+            path.write_bytes(gzip.compress(path.read_bytes()))
+            window = MainWindow()
+            window.fits_service.current_data = loaded
+            try:
+                with patch("astroview.core.fits_data._astropy_fits") as astropy_mock:
+                    with patch("astroview.app.main_window.logger.exception"):
+                        payloads = window._build_header_payloads()
+
+                astropy_mock.assert_not_called()
+                self.assertEqual(len(payloads), 1)
+                self.assertEqual(payloads[0].hdu_index, 0)
+                self.assertEqual(payloads[0].name, "HDU 0")
+                self.assertIn("ORIGINAL", payloads[0].raw_text)
+                self.assertEqual(payloads[0].raw_text, loaded.header_as_text())
+            finally:
+                window.deleteLater()
 
     def test_activate_frame_includes_version_in_window_title(self) -> None:
         window = MainWindow()
@@ -1103,7 +2196,12 @@ class TestMainWindowLoading(unittest.TestCase):
 
             stale_thread.requestInterruption.assert_called_once_with()
             stale_thread.quit.assert_called_once_with()
-            self.assertIn(1, window._latest_render_request_by_index)
+            worker_cls.assert_not_called()
+            self.assertEqual(
+                window._pending_render_intent,
+                (1, window._render_generation, False),
+            )
+            self.assertNotIn(1, window._latest_render_request_by_index)
         finally:
             window.deleteLater()
 
@@ -1404,6 +2502,105 @@ class TestMainWindowLoading(unittest.TestCase):
         finally:
             window.deleteLater()
 
+    def test_stale_update_check_callbacks_cannot_clear_or_report_for_new_worker(self) -> None:
+        window = MainWindow()
+        old_thread = Mock()
+        old_worker = Mock()
+        new_thread = Mock()
+        new_worker = Mock()
+        window._active_update_check_request_id = 2
+        window._update_check_thread = new_thread
+        window._update_check_worker = new_worker
+        result = UpdateCheckResult(status="up_to_date", current_version=__version__)
+        try:
+            with patch.object(window, "_handle_update_check_result") as handle_mock:
+                window._handle_update_check_result_for_request(1, old_worker, result)
+                window._clear_update_check_refs(1, old_thread, old_worker)
+
+            handle_mock.assert_not_called()
+            self.assertIs(window._update_check_thread, new_thread)
+            self.assertIs(window._update_check_worker, new_worker)
+            self.assertEqual(window._active_update_check_request_id, 2)
+        finally:
+            window._update_check_thread = None
+            window._update_check_worker = None
+            window.deleteLater()
+
+    def test_update_check_timeout_keeps_running_thread_tracked_without_terminate(self) -> None:
+        window = MainWindow()
+        thread = Mock()
+        thread.isRunning.return_value = True
+        thread.wait.return_value = False
+        worker = Mock()
+        window._active_update_check_request_id = 4
+        window._update_check_thread = thread
+        window._update_check_worker = worker
+        try:
+            stopped = window._stop_update_check(wait=True)
+
+            self.assertFalse(stopped)
+            worker.cancel.assert_called_once_with()
+            thread.requestInterruption.assert_called_once_with()
+            thread.quit.assert_called_once_with()
+            thread.wait.assert_called_once_with(window.UPDATE_CHECK_THREAD_WAIT_MS)
+            thread.terminate.assert_not_called()
+            self.assertIs(window._update_check_thread, thread)
+            self.assertIs(window._update_check_worker, worker)
+        finally:
+            window._update_check_thread = None
+            window._update_check_worker = None
+            window._active_update_check_request_id = None
+            window.deleteLater()
+
+    def test_update_result_relay_runs_dialog_handler_on_gui_thread(self) -> None:
+        window = MainWindow()
+        thread = QThread()
+        worker = _ThreadUpdateEmitter()
+        worker.moveToThread(thread)
+        relay = _UpdateCheckSignalRelay(window, 1, thread, worker)
+        window._active_update_check_request_id = 1
+        window._update_check_thread = thread
+        window._update_check_worker = worker
+        handler_threads: list[QThread] = []
+        cleanup_threads: list[QThread] = []
+        try:
+            thread.started.connect(worker.run)
+            worker.result_ready.connect(relay.handle_result)
+            worker.finished.connect(worker.deleteLater)
+            worker.finished.connect(thread.quit)
+            thread.finished.connect(relay.handle_thread_finished)
+            thread.finished.connect(relay.deleteLater)
+
+            with patch.object(
+                window,
+                "_handle_update_check_result",
+                side_effect=lambda _result: handler_threads.append(QThread.currentThread()),
+            ):
+                with patch.object(
+                    window,
+                    "_clear_update_check_refs",
+                    side_effect=lambda *_args: cleanup_threads.append(QThread.currentThread()),
+                ):
+                    thread.start()
+                    self._wait_until(
+                        lambda: bool(handler_threads)
+                        and bool(cleanup_threads)
+                        and not thread.isRunning()
+                    )
+
+            self.assertIs(handler_threads[0], window.thread())
+            self.assertIs(cleanup_threads[0], window.thread())
+        finally:
+            if thread.isRunning():
+                thread.requestInterruption()
+                thread.quit()
+                thread.wait(3000)
+            window._update_check_thread = None
+            window._update_check_worker = None
+            window._active_update_check_request_id = None
+            thread.deleteLater()
+            window.deleteLater()
+
     def test_handle_source_color_changed_updates_canvas_roi_color(self) -> None:
         window = MainWindow()
         window.canvas = Mock()
@@ -1687,12 +2884,34 @@ class TestMainWindowLoading(unittest.TestCase):
         window.app_status_bar = Mock()
         window._active_sep_request_id = 7
         window._status_activity_kind = "sep"
+        thread = Mock()
+        worker = Mock()
+        window._sep_thread = thread
+        window._sep_worker = worker
         try:
             window._handle_sep_extraction_finished(7)
 
+            self.assertEqual(window._active_sep_request_id, 7)
+            self.assertIs(window._sep_thread, thread)
+            window.app_status_bar.clear_activity.assert_not_called()
+
+            window._clear_sep_worker_refs(7, thread, worker)
+
             window.app_status_bar.clear_activity.assert_called_once_with()
             self.assertIsNone(window._status_activity_kind)
+            self.assertIsNone(window._active_sep_request_id)
+            self.assertIsNone(window._sep_thread)
         finally:
+            window.deleteLater()
+
+    def test_sep_thread_slot_remains_busy_until_thread_finished_cleanup(self) -> None:
+        window = MainWindow()
+        window._active_sep_request_id = None
+        window._sep_thread = Mock()
+        try:
+            self.assertTrue(window._is_sep_extract_running())
+        finally:
+            window._sep_thread = None
             window.deleteLater()
 
     def test_handle_marker_color_changed_reapplies_existing_markers(self) -> None:

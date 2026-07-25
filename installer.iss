@@ -45,6 +45,7 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
+Name: "fileassoc"; Description: "Add AstroView to the Open with list for FITS files"; GroupDescription: "File integration:"; Flags: unchecked
 
 [Files]
 Source: "dist\AstroView\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
@@ -58,10 +59,12 @@ Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: de
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#MyAppName}}"; Flags: nowait postinstall skipifsilent
 
 [Registry]
-Root: HKCR; Subkey: ".fits"; ValueType: string; ValueName: ""; ValueData: "AstroView.FITS"; Flags: uninsdeletevalue uninsdeletekeyifempty
-Root: HKCR; Subkey: ".FITS"; ValueType: string; ValueName: ""; ValueData: "AstroView.FITS"; Flags: uninsdeletevalue uninsdeletekeyifempty
-Root: HKCR; Subkey: ".fit"; ValueType: string; ValueName: ""; ValueData: "AstroView.FITS"; Flags: uninsdeletevalue uninsdeletekeyifempty
-Root: HKCR; Subkey: ".fts"; ValueType: string; ValueName: ""; ValueData: "AstroView.FITS"; Flags: uninsdeletevalue uninsdeletekeyifempty
-Root: HKCR; Subkey: "AstroView.FITS"; ValueType: string; ValueName: ""; ValueData: "FITS Image File"; Flags: uninsdeletekey
-Root: HKCR; Subkey: "AstroView.FITS\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\{#MyAppExeName},0"; Flags: uninsdeletekey
-Root: HKCR; Subkey: "AstroView.FITS\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#MyAppExeName}"" ""%1"""; Flags: uninsdeletekey
+; Register only an optional per-user OpenWith handler.  In particular, never
+; write an extension's unnamed/default value: Windows and the user retain the
+; existing default application across both installation and uninstallation.
+Root: HKCU; Subkey: "Software\Classes\AstroView.FITS"; ValueType: string; ValueName: ""; ValueData: "FITS Image File"; Flags: uninsdeletekey; Tasks: fileassoc
+Root: HKCU; Subkey: "Software\Classes\AstroView.FITS\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\{#MyAppExeName},0"; Tasks: fileassoc
+Root: HKCU; Subkey: "Software\Classes\AstroView.FITS\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#MyAppExeName}"" ""%1"""; Tasks: fileassoc
+Root: HKCU; Subkey: "Software\Classes\.fits\OpenWithProgids"; ValueType: string; ValueName: "AstroView.FITS"; ValueData: ""; Flags: uninsdeletevalue; Tasks: fileassoc
+Root: HKCU; Subkey: "Software\Classes\.fit\OpenWithProgids"; ValueType: string; ValueName: "AstroView.FITS"; ValueData: ""; Flags: uninsdeletevalue; Tasks: fileassoc
+Root: HKCU; Subkey: "Software\Classes\.fts\OpenWithProgids"; ValueType: string; ValueName: "AstroView.FITS"; ValueData: ""; Flags: uninsdeletevalue; Tasks: fileassoc

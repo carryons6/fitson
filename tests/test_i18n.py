@@ -65,6 +65,23 @@ class TestI18n(unittest.TestCase):
             window.close()
             window.deleteLater()
 
+    def test_runtime_failure_and_shutdown_messages_are_localized(self) -> None:
+        install_translator(self._app, "zh_CN")
+        window = MainWindow()
+        try:
+            self.assertEqual(window.tr("FITS load cancelled."), "FITS 加载已取消。")
+            self.assertEqual(window.tr("Background calculation failed"), "背景计算失败")
+            self.assertEqual(
+                window.tr("Background unavailable: {detail}"),
+                "背景不可用：{detail}",
+            )
+            self.assertEqual(
+                window.tr("Waiting for background tasks to stop..."),
+                "正在等待后台任务停止...",
+            )
+        finally:
+            window.deleteLater()
+
 
 if __name__ == "__main__":
     unittest.main()

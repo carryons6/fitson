@@ -129,6 +129,31 @@ class TestMainEntry(unittest.TestCase):
         single_shot_mock.assert_called_once_with(0, window.schedule_startup_request)
         app.exec.assert_called_once_with()
 
+    def test_smoke_test_argument_is_hidden(self) -> None:
+        parser = main_module.build_arg_parser()
+
+        args = parser.parse_args(["--smoke-test"])
+
+        self.assertTrue(args.smoke_test)
+        self.assertNotIn("--smoke-test", parser.format_help())
+
+    def test_main_smoke_test_bypasses_normal_gui_startup(self) -> None:
+        parser = Mock()
+        parser.parse_args.return_value = argparse.Namespace(
+            path=None,
+            hdu=None,
+            smoke_test=True,
+        )
+
+        with patch.object(main_module, "build_arg_parser", return_value=parser):
+            with patch.object(main_module, "run_smoke_test", return_value=23) as smoke_mock:
+                with patch.object(main_module, "install_exception_hooks") as hooks_mock:
+                    result = main_module.main()
+
+        self.assertEqual(result, 23)
+        smoke_mock.assert_called_once_with()
+        hooks_mock.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

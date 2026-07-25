@@ -6,7 +6,18 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from PySide6.QtCore import QByteArray, QMarginsF, QSizeF, Qt, QThread, QSettings, QTimer, QUrl
+from PySide6.QtCore import (
+    QByteArray,
+    QObject,
+    QMarginsF,
+    QSizeF,
+    Slot,
+    Qt,
+    QThread,
+    QSettings,
+    QTimer,
+    QUrl,
+)
 from PySide6.QtGui import QAction, QActionGroup, QDesktopServices, QGuiApplication, QImage, QKeySequence, QPainter, QTransform
 from PySide6.QtWidgets import (
     QApplication,
@@ -25,6 +36,7 @@ from PySide6.QtWidgets import (
 
 from .. import APP_NAME, APP_RELEASES_URL, __version__
 from ..core import FITSService, OpenFileRequest, PixelSample, ROISelection, SEPService, SourceCatalog
+from ..core.fits_data import open_fits_container
 from ..core.sep_service import SEPParameters
 from ..diagnostics import log_current_exception
 from .contracts import (
@@ -61,14 +73,6 @@ from .update_check_worker import UpdateCheckResult, UpdateCheckWorker
 logger = logging.getLogger(__name__)
 
 
-def _astropy_fits():
-    """Import astropy FITS lazily for optional header inspection in the UI layer."""
-
-    from astropy.io import fits
-
-    return fits
-
-
 @dataclass(slots=True)
 class _FrameCompositePlacement:
     """Display-space placement for one frame inside a composite image."""
@@ -80,6 +84,184 @@ class _FrameCompositePlacement:
     display_height: int
     original_width: int
     original_height: int
+
+
+@dataclass(frozen=True, slots=True)
+class _PendingSEPAction:
+    """A deferred SEP action tied to one concrete frame activation."""
+
+    roi: ROISelection
+    frame_index: int
+    context_generation: int
+
+
+@dataclass(frozen=True, slots=True)
+class _PendingFrameLoad:
+    """The newest load request waiting for the current loader to exit."""
+
+    paths: tuple[str, ...]
+    hdu_index: int | None
+    append: bool
+
+
+class _LoadSignalRelay(QObject):
+    """Route worker signals through a QObject that has GUI-thread affinity."""
+
+    def __init__(
+        self,
+        window: Any,
+        request_id: int,
+        thread: QThread,
+        worker: FITSLoadWorker,
+    ) -> None:
+        super().__init__(window)
+        self._window = window
+        self._request_id = request_id
+        self._thread = thread
+        self._worker = worker
+
+    @Slot(object, object)
+    def handle_loaded(self, data: Any, preview_image_u8: Any) -> None:
+        self._window._handle_loaded_frame_for_request(
+            self._request_id,
+            self._worker,
+            data,
+            preview_image_u8,
+        )
+
+    @Slot(str, str)
+    def handle_error(self, path: str, detail: str) -> None:
+        self._window._handle_frame_load_error_for_request(
+            self._request_id,
+            self._worker,
+            path,
+            detail,
+        )
+
+    @Slot(int, int, str)
+    def handle_progress(self, completed: int, total: int, path: str) -> None:
+        self._window._handle_frame_load_progress_for_request(
+            self._request_id,
+            self._worker,
+            completed,
+            total,
+            path,
+        )
+
+    @Slot()
+    def handle_finished(self) -> None:
+        self._window._finish_frame_load_for_request(self._request_id, self._worker)
+
+    @Slot()
+    def handle_thread_finished(self) -> None:
+        self._window._handle_load_thread_finished(
+            self._request_id,
+            self._thread,
+            self._worker,
+        )
+
+
+class _UpdateCheckSignalRelay(QObject):
+    """Deliver update results on the owning window's GUI thread."""
+
+    def __init__(
+        self,
+        window: Any,
+        request_id: int,
+        thread: QThread,
+        worker: UpdateCheckWorker,
+    ) -> None:
+        super().__init__(window)
+        self._window = window
+        self._request_id = request_id
+        self._thread = thread
+        self._worker = worker
+
+    @Slot(object)
+    def handle_result(self, result: UpdateCheckResult) -> None:
+        self._window._handle_update_check_result_for_request(
+            self._request_id,
+            self._worker,
+            result,
+        )
+
+    @Slot()
+    def handle_thread_finished(self) -> None:
+        self._window._clear_update_check_refs(
+            self._request_id,
+            self._thread,
+            self._worker,
+        )
+
+
+class _SEPThreadFinishRelay(QObject):
+    """Run SEP thread-finalization bookkeeping on the GUI thread."""
+
+    def __init__(
+        self,
+        window: Any,
+        request_id: int,
+        thread: QThread,
+        worker: SEPExtractWorker,
+    ) -> None:
+        super().__init__(window)
+        self._window = window
+        self._request_id = request_id
+        self._thread = thread
+        self._worker = worker
+
+    @Slot()
+    def handle_thread_finished(self) -> None:
+        self._window._clear_sep_worker_refs(
+            self._request_id,
+            self._thread,
+            self._worker,
+        )
+
+
+class _FrameRenderThreadFinishRelay(QObject):
+    """Finalize a frame-render request on the window's GUI thread."""
+
+    def __init__(self, window: Any, request_id: int, index: int) -> None:
+        super().__init__(window)
+        self._window = window
+        self._request_id = request_id
+        self._index = index
+
+    @Slot()
+    def handle_thread_finished(self) -> None:
+        self._window._handle_frame_render_thread_finished(
+            self._request_id,
+            self._index,
+        )
+
+
+class _FrameBkgThreadFinishRelay(QObject):
+    """Finalize a frame-background request on the window's GUI thread."""
+
+    def __init__(
+        self,
+        window: Any,
+        index: int,
+        generation: int,
+        thread: QThread,
+        worker: FrameBkgWorker,
+    ) -> None:
+        super().__init__(window)
+        self._window = window
+        self._index = index
+        self._generation = generation
+        self._thread = thread
+        self._worker = worker
+
+    @Slot()
+    def handle_thread_finished(self) -> None:
+        self._window._handle_bkg_thread_finished(
+            self._index,
+            self._generation,
+            self._thread,
+            self._worker,
+        )
 
 
 class MainWindow(QMainWindow):
@@ -98,6 +280,10 @@ class MainWindow(QMainWindow):
     }
     DEFAULT_PREVIEW_PROFILE = "Balanced"
     SUPPORTED_FITS_SUFFIXES = frozenset({".fits", ".fit", ".fts"})
+    BACKGROUND_THREAD_WAIT_MS = 5_000
+    BKG_PREWARM_QUEUE_LIMIT = 8
+    UPDATE_CHECK_THREAD_WAIT_MS = 6_000
+    THREAD_JOIN_WAIT_MS = 6_000
     WORKSPACE_LAYOUT_VERSION = 4
     SEP_ESTIMATE_THRESHOLD_SIGMA = 15.0
     SEP_LARGE_COUNT_WARNING = 5000
@@ -196,6 +382,11 @@ class MainWindow(QMainWindow):
 
         self._load_thread: QThread | None = None
         self._load_worker: FITSLoadWorker | None = None
+        self._pending_frame_load: _PendingFrameLoad | None = None
+        self._load_request_id: int = 0
+        self._active_load_request_id: int | None = None
+        self._load_results_enabled: bool = False
+        self._load_cancel_feedback_pending: bool = False
         self._load_append_mode: bool = False
         self._load_total_count: int = 0
         self._load_completed_count: int = 0
@@ -207,20 +398,43 @@ class MainWindow(QMainWindow):
         self._render_workers: dict[int, FrameRenderWorker] = {}
         self._render_request_index_by_id: dict[int, int] = {}
         self._latest_render_request_by_index: dict[int, int] = {}
+        # Keep physical worker occupancy separate from result identity. Render
+        # generations may change while a native/NumPy render is still winding
+        # down; clearing the latest-result map must not allow a second worker
+        # for the same frame to start meanwhile.
+        self._active_render_request_by_index: dict[int, int] = {}
+        # Foreground rendering has one global slot. Rapid frame switches and
+        # preference changes replace this intent instead of accumulating
+        # QThreads; playback/composite work remains represented by its queue
+        # and per-frame dirty flags.
+        self._pending_render_intent: tuple[int, int, bool] | None = None
         self._playback_render_queue: list[int] = []
         self._playback_bg_render_ids: set[int] = set()
         self._bkg_threads: dict[int, QThread] = {}
         self._bkg_workers: dict[int, FrameBkgWorker] = {}
+        self._bkg_generation: int = 0
+        # BKG uses one global physical worker. Current-frame demand replaces
+        # itself, while opportunistic prewarming is bounded and serialized.
+        # Each tuple is (frame_index, generation, concrete FITSData object).
+        self._pending_bkg_current: tuple[int, int, Any] | None = None
+        self._pending_bkg_prewarm: list[tuple[int, int, Any]] = []
         self._sep_thread: QThread | None = None
         self._sep_worker: SEPExtractWorker | None = None
         self._sep_request_id: int = 0
         self._active_sep_request_id: int | None = None
+        self._sep_context_generation: int = 0
+        self._active_sep_context_generation: int | None = None
+        self._active_sep_frame_index: int | None = None
         self._sep_is_estimate_phase: bool = False
         self._sep_pending_extract_roi: ROISelection | None = None
-        self._sep_pending_launch_roi: ROISelection | None = None
-        self._sep_confirm_pending_roi: ROISelection | None = None
+        self._sep_pending_launch_roi: _PendingSEPAction | None = None
+        self._sep_confirm_pending_roi: _PendingSEPAction | None = None
         self._update_check_thread: QThread | None = None
         self._update_check_worker: UpdateCheckWorker | None = None
+        self._update_check_request_id: int = 0
+        self._active_update_check_request_id: int | None = None
+        self._is_closing: bool = False
+        self._close_pending: bool = False
         self._startup_request_applied = False
         self._status_activity_kind: str | None = None
         self._latest_error_title: str = ""
@@ -1386,6 +1600,8 @@ class MainWindow(QMainWindow):
     def check_for_updates(self) -> None:
         """Start a background check against the configured release source."""
 
+        if self._is_closing:
+            return
         thread = self._update_check_thread
         if thread is not None and thread.isRunning():
             return
@@ -1395,25 +1611,86 @@ class MainWindow(QMainWindow):
         if self.app_status_bar is not None:
             self.app_status_bar.showMessage(self.tr("Checking for updates..."))
 
-        self._update_check_thread = QThread(self)
-        self._update_check_worker = UpdateCheckWorker(__version__)
-        self._update_check_worker.moveToThread(self._update_check_thread)
+        self._update_check_request_id += 1
+        request_id = self._update_check_request_id
+        thread = QThread(self)
+        worker = UpdateCheckWorker(__version__)
+        self._active_update_check_request_id = request_id
+        self._update_check_thread = thread
+        self._update_check_worker = worker
+        relay = _UpdateCheckSignalRelay(self, request_id, thread, worker)
+        worker.moveToThread(thread)
 
-        self._update_check_thread.started.connect(self._update_check_worker.run)
-        self._update_check_worker.result_ready.connect(self._handle_update_check_result)
-        self._update_check_worker.finished.connect(self._update_check_thread.quit)
-        self._update_check_worker.finished.connect(self._update_check_worker.deleteLater)
-        self._update_check_thread.finished.connect(self._clear_update_check_refs)
-        self._update_check_thread.finished.connect(self._update_check_thread.deleteLater)
-        self._update_check_thread.start()
+        thread.started.connect(worker.run)
+        worker.result_ready.connect(relay.handle_result)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(relay.handle_thread_finished)
+        thread.finished.connect(relay.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.start()
 
-    def _clear_update_check_refs(self) -> None:
-        """Drop references after an update-check worker finishes."""
+    def _handle_update_check_result_for_request(
+        self,
+        request_id: int,
+        worker: UpdateCheckWorker,
+        result: UpdateCheckResult,
+    ) -> None:
+        """Accept an update result only from the worker that is still active."""
 
+        if self._is_closing:
+            return
+        if request_id != self._active_update_check_request_id:
+            return
+        if worker is not self._update_check_worker:
+            return
+        self._handle_update_check_result(result)
+
+    def _clear_update_check_refs(
+        self,
+        request_id: int | None = None,
+        thread: QThread | None = None,
+        worker: UpdateCheckWorker | None = None,
+    ) -> None:
+        """Drop references only for the update-check pair that actually exited."""
+
+        if request_id is None:
+            request_id = self._active_update_check_request_id
+        if thread is None:
+            thread = self._update_check_thread
+        if worker is None:
+            worker = self._update_check_worker
+        if request_id != self._active_update_check_request_id:
+            return
+        if thread is not self._update_check_thread or worker is not self._update_check_worker:
+            return
+        self._active_update_check_request_id = None
         self._update_check_thread = None
         self._update_check_worker = None
         if self.action_check_updates is not None:
             self.action_check_updates.setEnabled(True)
+
+    def _stop_update_check(self, *, wait: bool = False) -> bool:
+        """Cancel the active update check and optionally join it with a bound."""
+
+        thread = self._update_check_thread
+        worker = self._update_check_worker
+        request_id = self._active_update_check_request_id
+        if thread is None or worker is None or request_id is None:
+            return True
+
+        worker.cancel()
+        if thread.isRunning():
+            thread.requestInterruption()
+            thread.quit()
+        if wait and thread.isRunning():
+            stopped = thread.wait(self.UPDATE_CHECK_THREAD_WAIT_MS)
+            if not stopped:
+                logger.warning("Update-check thread is still stopping in the background")
+        if not thread.isRunning():
+            self._clear_update_check_refs(request_id, thread, worker)
+            return True
+        return False
 
     def _handle_update_check_result(self, result: UpdateCheckResult) -> None:
         """Show the outcome of a completed update check."""
@@ -1462,20 +1739,68 @@ class MainWindow(QMainWindow):
 
         if not paths:
             return
+        if self._is_closing:
+            return
 
-        self._stop_active_frame_load(wait=True)
+        request = _PendingFrameLoad(tuple(paths), hdu_index, append)
+        thread = self._load_thread
+        if thread is not None:
+            try:
+                running = thread.isRunning()
+            except RuntimeError:
+                running = False
+            if running:
+                # FITS decompression and array allocation cannot always stop at
+                # the instant interruption is requested. Keep at most one
+                # loader alive and replace (rather than accumulate) pending
+                # requests until it exits.
+                self._pending_frame_load = request
+                self._load_cancel_feedback_pending = False
+                self._stop_active_frame_load(wait=False)
+                self._set_loading_state(True, loaded=0, total=len(paths))
+                return
+
+            # The worker has exited but its queued GUI cleanup has not run.
+            # Replace any older pending request before cleanup so that cleanup
+            # can launch exactly this newest request, then return to avoid a
+            # second launch below.
+            self._pending_frame_load = request
+            self._load_cancel_feedback_pending = False
+            self._load_results_enabled = False
+            self._handle_load_thread_finished(
+                self._active_load_request_id,
+                thread,
+                self._load_worker,
+            )
+            return
+
+        self._pending_frame_load = None
+        self._launch_frame_load(request)
+
+    def _launch_frame_load(self, request: _PendingFrameLoad) -> None:
+        """Launch a load after the preceding loader has fully exited."""
+
+        if self._is_closing:
+            return
+
+        paths = list(request.paths)
+        hdu_index = request.hdu_index
+        append = request.append
         self._load_append_mode = append
         self._load_total_count = len(paths)
         self._load_completed_count = 0
         self._load_error_count = 0
+        self._load_cancel_feedback_pending = False
 
         if not append:
             self.close_current_file()
 
         self._set_loading_state(True, loaded=0, total=len(paths))
 
-        self._load_thread = QThread(self)
-        self._load_worker = FITSLoadWorker(
+        self._load_request_id += 1
+        request_id = self._load_request_id
+        thread = QThread(self)
+        worker = FITSLoadWorker(
             paths,
             hdu_index=hdu_index,
             source_group_start=self._next_source_group_id,
@@ -1486,38 +1811,148 @@ class MainWindow(QMainWindow):
             preview_max_dimension=self._preview_load_dimension(),
             manual_limits=self.fits_service.manual_interval_limits,
         )
+        self._active_load_request_id = request_id
+        self._load_results_enabled = True
+        self._load_thread = thread
+        self._load_worker = worker
+        relay = _LoadSignalRelay(self, request_id, thread, worker)
         self._next_source_group_id += len(paths)
-        self._load_worker.moveToThread(self._load_thread)
+        worker.moveToThread(thread)
 
-        self._load_thread.started.connect(self._load_worker.run)
-        self._load_worker.file_loaded.connect(self._handle_loaded_frame)
-        self._load_worker.file_error.connect(self._handle_frame_load_error)
-        self._load_worker.progress.connect(self._handle_frame_load_progress)
-        self._load_worker.finished.connect(self._finish_frame_load)
-        self._load_worker.finished.connect(self._load_thread.quit)
-        self._load_worker.finished.connect(self._load_worker.deleteLater)
-        self._load_thread.finished.connect(self._load_thread.deleteLater)
-        self._load_thread.finished.connect(self._clear_load_worker_refs)
-        self._load_thread.start()
+        thread.started.connect(worker.run)
+        worker.file_loaded.connect(relay.handle_loaded)
+        worker.file_error.connect(relay.handle_error)
+        worker.progress.connect(relay.handle_progress)
+        worker.finished.connect(relay.handle_finished)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(relay.handle_thread_finished)
+        thread.finished.connect(relay.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.start()
 
-    def _stop_active_frame_load(self, *, wait: bool = False) -> None:
+    def _stop_active_frame_load(self, *, wait: bool = False) -> bool:
         """Request cancellation for the active background load, if any."""
 
         thread = self._load_thread
-        if thread is None or not thread.isRunning():
+        worker = self._load_worker
+        request_id = self._active_load_request_id
+        if thread is None:
+            return True
+
+        # Cancellation has strong semantics: already-queued worker callbacks
+        # are rejected immediately even though the thread stays tracked until
+        # its cooperative shutdown completes.
+        self._load_results_enabled = False
+        if thread.isRunning():
+            thread.requestInterruption()
+            thread.quit()
+        if wait and thread.isRunning():
+            thread.wait(self.THREAD_JOIN_WAIT_MS)
+        stopped = not thread.isRunning()
+        if stopped:
+            self._handle_load_thread_finished(request_id, thread, worker)
+        return stopped
+
+    def _handle_load_thread_finished(
+        self,
+        request_id: int | None,
+        thread: QThread,
+        worker: FITSLoadWorker | None,
+    ) -> None:
+        """Clear the sole loader, then launch only the newest queued request."""
+
+        if thread is not self._load_thread or worker is not self._load_worker:
             return
 
-        thread.requestInterruption()
-        thread.quit()
-        if wait:
-            thread.wait()
-            self._clear_load_worker_refs()
-
-    def _clear_load_worker_refs(self) -> None:
-        """Drop references to the current worker/thread pair after shutdown."""
-
+        if request_id == self._active_load_request_id:
+            self._active_load_request_id = None
         self._load_thread = None
         self._load_worker = None
+        self._load_results_enabled = False
+
+        pending = self._pending_frame_load
+        self._pending_frame_load = None
+        if not self._is_closing and pending is not None:
+            self._launch_frame_load(pending)
+            return
+
+        if not self._is_closing and self._load_cancel_feedback_pending:
+            self._load_cancel_feedback_pending = False
+            self._set_loading_state(False)
+            if self.app_status_bar is not None:
+                self.app_status_bar.showMessage(self.tr("FITS load cancelled."), 3000)
+        self._schedule_pending_close_retry()
+
+    def _clear_load_worker_refs(
+        self,
+        request_id: int | None = None,
+        thread: QThread | None = None,
+        worker: FITSLoadWorker | None = None,
+    ) -> None:
+        """Drop references only for the load worker/thread pair that exited."""
+
+        if request_id is None:
+            request_id = self._active_load_request_id
+        if thread is None:
+            thread = self._load_thread
+        if worker is None:
+            worker = self._load_worker
+        if request_id != self._active_load_request_id:
+            return
+        if thread is not self._load_thread or worker is not self._load_worker:
+            return
+        self._active_load_request_id = None
+        self._load_thread = None
+        self._load_worker = None
+        self._load_results_enabled = False
+
+    def _is_current_load_request(self, request_id: int, worker: FITSLoadWorker) -> bool:
+        return (
+            not self._is_closing
+            and self._load_results_enabled
+            and request_id == self._active_load_request_id
+            and worker is self._load_worker
+        )
+
+    def _handle_loaded_frame_for_request(
+        self,
+        request_id: int,
+        worker: FITSLoadWorker,
+        data: Any,
+        preview_image_u8: Any,
+    ) -> None:
+        if self._is_current_load_request(request_id, worker):
+            self._handle_loaded_frame(data, preview_image_u8)
+
+    def _handle_frame_load_error_for_request(
+        self,
+        request_id: int,
+        worker: FITSLoadWorker,
+        path: str,
+        detail: str,
+    ) -> None:
+        if self._is_current_load_request(request_id, worker):
+            self._handle_frame_load_error(path, detail)
+
+    def _handle_frame_load_progress_for_request(
+        self,
+        request_id: int,
+        worker: FITSLoadWorker,
+        completed: int,
+        total: int,
+        path: str,
+    ) -> None:
+        if self._is_current_load_request(request_id, worker):
+            self._handle_frame_load_progress(completed, total, path)
+
+    def _finish_frame_load_for_request(
+        self,
+        request_id: int,
+        worker: FITSLoadWorker,
+    ) -> None:
+        if self._is_current_load_request(request_id, worker):
+            self._finish_frame_load()
 
     def _cancel_active_frame_renders(self, *, wait: bool = False) -> None:
         """Request cancellation for all active background frame renders."""
@@ -1529,20 +1964,92 @@ class MainWindow(QMainWindow):
 
         if wait:
             for thread in list(self._render_threads.values()):
-                thread.wait()
+                if thread.isRunning():
+                    thread.wait(self.THREAD_JOIN_WAIT_MS)
 
-    def _handle_frame_render_thread_finished(self, request_id: int) -> None:
-        """Drop bookkeeping for a completed frame-render request."""
+    def _handle_frame_render_thread_finished(
+        self,
+        request_id: int,
+        index: int | None = None,
+    ) -> None:
+        """Drop one physical render, then launch only its newest intent."""
 
+        known_request = (
+            request_id in self._render_threads
+            or request_id in self._render_workers
+            or request_id in self._render_request_index_by_id
+            or request_id in self._active_render_request_by_index.values()
+            or request_id in self._playback_bg_render_ids
+        )
+        if not known_request:
+            if self._is_closing:
+                self._schedule_pending_close_retry()
+            return
+
+        if index is None:
+            index = self._render_request_index_by_id.get(request_id)
+        if index is None:
+            index = next(
+                (
+                    candidate
+                    for candidate, active_request_id in self._active_render_request_by_index.items()
+                    if active_request_id == request_id
+                ),
+                None,
+            )
         was_bg = request_id in self._playback_bg_render_ids
         self._render_threads.pop(request_id, None)
         self._render_workers.pop(request_id, None)
         self._render_request_index_by_id.pop(request_id, None)
         self._playback_bg_render_ids.discard(request_id)
-        if was_bg:
+        if index is not None and self._active_render_request_by_index.get(index) == request_id:
+            self._active_render_request_by_index.pop(index, None)
+        if index is not None and self._latest_render_request_by_index.get(index) == request_id:
+            self._latest_render_request_by_index.pop(index, None)
+
+        if self._is_closing:
+            self._pending_render_intent = None
+            self._schedule_pending_close_retry()
+            return
+
+        # A pre-fix session or a synchronous cleanup race may momentarily leave
+        # more than one physical render tracked. Do not consume the one global
+        # intent until the slot is completely empty.
+        if self._render_threads:
+            return
+
+        pending = self._pending_render_intent
+        self._pending_render_intent = None
+        if (
+            pending is not None
+            and pending[1] == self._render_generation
+            and 0 <= pending[0] < len(self._frame_dirty)
+            and self._frame_dirty[pending[0]]
+        ):
+            self._schedule_frame_render(pending[0], playback_bg=pending[2])
+            return
+
+        if self._is_playback_active() or was_bg:
             self._pump_playback_render_queue()
         else:
             self._schedule_next_composite_dirty_frame()
+
+    def _active_render_request_id_for_index(self, index: int) -> int | None:
+        """Return the sole tracked physical render request for ``index``."""
+
+        request_id = self._active_render_request_by_index.get(index)
+        if request_id is not None and request_id in self._render_threads:
+            return request_id
+        if request_id is not None:
+            self._active_render_request_by_index.pop(index, None)
+
+        # Compatibility for bookkeeping assembled before the single-flight
+        # map existed (and for focused tests that build a request by hand).
+        for candidate, candidate_index in self._render_request_index_by_id.items():
+            if candidate_index == index and candidate in self._render_threads:
+                self._active_render_request_by_index[index] = candidate
+                return candidate
+        return None
 
     def _cancel_frame_render_request(self, request_id: int, *, wait: bool = False) -> None:
         """Request cancellation for one active frame-render request."""
@@ -1554,7 +2061,7 @@ class MainWindow(QMainWindow):
         thread.requestInterruption()
         thread.quit()
         if wait:
-            thread.wait()
+            thread.wait(self.THREAD_JOIN_WAIT_MS)
 
     def _cancel_stale_frame_renders(self, preferred_index: int, *, wait: bool = False) -> None:
         """Stop active render requests for frames other than the preferred one.
@@ -1562,14 +2069,19 @@ class MainWindow(QMainWindow):
         Playback background renders (full-res cache fills) are preserved.
         """
 
-        for request_id, index in list(self._render_request_index_by_id.items()):
+        requests_by_index = dict(self._active_render_request_by_index)
+        for request_id, index in self._render_request_index_by_id.items():
+            requests_by_index.setdefault(index, request_id)
+        for index, request_id in list(requests_by_index.items()):
             if index != preferred_index and request_id not in self._playback_bg_render_ids:
                 self._cancel_frame_render_request(request_id, wait=wait)
 
     def _has_active_render_for_index(self, index: int) -> bool:
         """Return whether the given frame currently has a running render request."""
 
-        request_id = self._latest_render_request_by_index.get(index)
+        request_id = self._active_render_request_id_for_index(index)
+        if request_id is None:
+            request_id = self._latest_render_request_by_index.get(index)
         if request_id is None:
             return False
         thread = self._render_threads.get(request_id)
@@ -1603,13 +2115,131 @@ class MainWindow(QMainWindow):
             return self._frame_bkg_cache[index] is not None
         return self._frame_residual_cache[index] is not None
 
-    def _dispatch_bkg_worker(self, index: int) -> None:
-        """Compute background/residual for `index` off the UI thread."""
+    def _source_cutout_needs_bkg(self, index: int) -> bool:
+        """Whether the current source cutout still consumes a missing BKG cache."""
+
+        if index != self._current_frame_index or self.source_table_dock is None:
+            return False
+        mode = self.source_table_dock.current_cutout_mode()
+        if mode == SourceTableDock.CUTOUT_MODE_BACKGROUND:
+            return index >= len(self._frame_bkg_cache) or self._frame_bkg_cache[index] is None
+        if mode == SourceTableDock.CUTOUT_MODE_RESIDUAL:
+            return index >= len(self._frame_residual_cache) or self._frame_residual_cache[index] is None
+        return False
+
+    def _frame_needs_bkg(self, index: int) -> bool:
+        """Whether a dirty main view or current cutout still needs BKG data."""
 
         if not (0 <= index < len(self._frames)):
+            return False
+        main_view_needs_bkg = (
+            self._view_mode != "original"
+            and index < len(self._frame_dirty)
+            and self._frame_dirty[index]
+            and not self._frame_bkg_cached(index)
+        )
+        return main_view_needs_bkg or self._source_cutout_needs_bkg(index)
+
+    def _bkg_action(self, index: int) -> tuple[int, int, Any]:
+        return (index, self._bkg_generation, self._frames[index])
+
+    def _bkg_action_is_valid(
+        self,
+        action: tuple[int, int, Any],
+        *,
+        require_current: bool = False,
+    ) -> bool:
+        index, generation, frame = action
+        return (
+            not self._is_closing
+            and generation == self._bkg_generation
+            and 0 <= index < len(self._frames)
+            and self._frames[index] is frame
+            and (not require_current or index == self._current_frame_index)
+            and self._frame_needs_bkg(index)
+        )
+
+    def _queue_bkg_prewarm(self, action: tuple[int, int, Any]) -> None:
+        """Append one unique bounded prewarm request, preferring recent demand."""
+
+        index = action[0]
+        self._pending_bkg_prewarm = [
+            existing for existing in self._pending_bkg_prewarm if existing[0] != index
+        ]
+        self._pending_bkg_prewarm.append(action)
+        if len(self._pending_bkg_prewarm) > self.BKG_PREWARM_QUEUE_LIMIT:
+            self._pending_bkg_prewarm = self._pending_bkg_prewarm[
+                -self.BKG_PREWARM_QUEUE_LIMIT:
+            ]
+
+    def _dispatch_bkg_worker(self, index: int) -> None:
+        """Request BKG data through the one global physical worker slot."""
+
+        if self._is_closing:
             return
-        if index in self._bkg_threads:
-            return  # already in flight
+        if not (0 <= index < len(self._frames)):
+            return
+        original = self._frames[index]
+        if original.data is None:
+            return
+
+        jobs = [
+            (job_index, thread, self._bkg_workers.get(job_index))
+            for job_index, thread in list(self._bkg_threads.items())
+        ]
+        if jobs:
+            same_live_job = any(
+                job_index == index
+                and worker is not None
+                and worker.generation == self._bkg_generation
+                and thread.isRunning()
+                for job_index, thread, worker in jobs
+            )
+            if same_live_job:
+                return
+
+            action = self._bkg_action(index)
+            foreground = index == self._current_frame_index
+            if foreground:
+                self._pending_bkg_current = action
+            elif self._is_playback_active():
+                if index not in self._playback_render_queue:
+                    self._playback_render_queue.insert(0, index)
+            elif not self._is_composite_frame_layout_active():
+                self._queue_bkg_prewarm(action)
+
+            for _job_index, thread, worker in jobs:
+                stale_generation = (
+                    worker is not None and worker.generation != self._bkg_generation
+                )
+                if foreground or stale_generation:
+                    if worker is not None:
+                        worker.cancel()
+                    if thread.isRunning():
+                        thread.requestInterruption()
+                        thread.quit()
+
+            # Retire a stopped thread synchronously when its queued finished
+            # callback has not reached the GUI yet. The last retirement starts
+            # the highest-priority pending BKG action exactly once.
+            for job_index, thread, worker in jobs:
+                if thread.isRunning() or worker is None:
+                    continue
+                self._handle_bkg_thread_finished(
+                    job_index,
+                    worker.generation,
+                    thread,
+                    worker,
+                )
+            return
+
+        self._launch_bkg_worker(index)
+
+    def _launch_bkg_worker(self, index: int) -> None:
+        """Occupy the global BKG slot for one already-validated frame."""
+
+        if self._is_closing or not (0 <= index < len(self._frames)):
+            return
         original = self._frames[index]
         if original.data is None:
             return
@@ -1617,7 +2247,7 @@ class MainWindow(QMainWindow):
         thread = QThread(self)
         worker = FrameBkgWorker(
             frame_index=index,
-            generation=self._render_generation,
+            generation=self._bkg_generation,
             data=original.data,
             sep_service=self.sep_service,
             params=self.sep_service.params,
@@ -1636,12 +2266,20 @@ class MainWindow(QMainWindow):
         worker.bkg_error.connect(self._handle_bkg_error)
         worker.finished.connect(thread.quit)
         worker.finished.connect(worker.deleteLater)
-        thread.finished.connect(lambda idx=index: self._handle_bkg_thread_finished(idx))
+        finish_relay = _FrameBkgThreadFinishRelay(
+            self,
+            index,
+            worker.generation,
+            thread,
+            worker,
+        )
+        thread.finished.connect(finish_relay.handle_thread_finished)
+        thread.finished.connect(finish_relay.deleteLater)
         thread.finished.connect(thread.deleteLater)
         thread.start()
 
     def _handle_bkg_ready(self, index: int, generation: int, bkg: Any, residual: Any) -> None:
-        if generation != self._render_generation:
+        if self._is_closing or generation != self._bkg_generation:
             return
         if not (0 <= index < len(self._frames)):
             return
@@ -1663,9 +2301,73 @@ class MainWindow(QMainWindow):
                 self._update_source_cutout()
 
     def _handle_bkg_error(self, index: int, generation: int, detail: str) -> None:
+        if self._is_closing or generation != self._bkg_generation:
+            return
         logger.error("Background computation failed for frame %d: %s", index, detail)
+        if not (0 <= index < len(self._frames)):
+            return
 
-    def _handle_bkg_thread_finished(self, index: int) -> None:
+        if (
+            self._pending_bkg_current is not None
+            and self._pending_bkg_current[0] == index
+            and self._pending_bkg_current[1] == generation
+        ):
+            self._pending_bkg_current = None
+        self._pending_bkg_prewarm = [
+            action
+            for action in self._pending_bkg_prewarm
+            if not (action[0] == index and action[1] == generation)
+        ]
+
+        # There is no useful automatic retry for a same-generation SEP/BKG
+        # failure. End the render feedback and keep the already visible
+        # original image as a safe fallback instead of spinning forever.
+        if self._view_mode != "original" and index < len(self._frame_dirty):
+            self._frame_dirty[index] = False
+            self._sync_current_canvas_image_state()
+        if self._source_cutout_needs_bkg(index) and self.source_table_dock is not None:
+            self.source_table_dock.clear_cutout_image(
+                self.tr("Background unavailable: {detail}").format(detail=detail)
+            )
+        if index == self._current_frame_index:
+            self.show_error(self.tr("Background calculation failed"), detail)
+
+    def _resume_bkg_index(self, index: int) -> bool:
+        """Resume one valid BKG consumer through its normal scheduling path."""
+
+        if not self._frame_needs_bkg(index):
+            return False
+        main_view_needs_bkg = (
+            self._view_mode != "original"
+            and index < len(self._frame_dirty)
+            and self._frame_dirty[index]
+            and not self._frame_bkg_cached(index)
+        )
+        if main_view_needs_bkg:
+            self._ensure_frame_rendered(index)
+        elif self._source_cutout_needs_bkg(index):
+            self._dispatch_bkg_worker(index)
+        return True
+
+    def _handle_bkg_thread_finished(
+        self,
+        index: int,
+        generation: int | None = None,
+        thread: QThread | None = None,
+        worker: FrameBkgWorker | None = None,
+    ) -> None:
+        if thread is None:
+            thread = self._bkg_threads.get(index)
+        if worker is None:
+            worker = self._bkg_workers.get(index)
+        if thread is None or worker is None:
+            return
+        if generation is None:
+            generation = worker.generation
+        if self._bkg_threads.get(index) is not thread:
+            return
+        if self._bkg_workers.get(index) is not worker:
+            return
         self._bkg_threads.pop(index, None)
         self._bkg_workers.pop(index, None)
         if index == self._current_frame_index:
@@ -1673,15 +2375,78 @@ class MainWindow(QMainWindow):
             if not self._bkg_threads and self.app_status_bar is not None:
                 self.app_status_bar.clearMessage()
 
-    def _cancel_bkg_workers(self, wait: bool = False) -> None:
-        for thread in list(self._bkg_threads.values()):
-            thread.requestInterruption()
-            thread.quit()
-            if wait:
-                thread.wait()
-        if wait:
-            self._bkg_threads.clear()
-            self._bkg_workers.clear()
+        if self._is_closing:
+            self._pending_bkg_current = None
+            self._pending_bkg_prewarm.clear()
+            self._schedule_pending_close_retry()
+            return
+
+        # Cache invalidation can overtake an in-flight worker. Preserve that
+        # retry as an intent, but give the currently visible frame/cutout first
+        # claim on the one global BKG slot.
+        if generation != self._bkg_generation:
+            current_index = self._current_frame_index
+            if self._frame_needs_bkg(current_index):
+                self._pending_bkg_current = self._bkg_action(current_index)
+            elif self._frame_needs_bkg(index):
+                action = self._bkg_action(index)
+                if index == current_index:
+                    self._pending_bkg_current = action
+                elif not self._is_playback_active() and not self._is_composite_frame_layout_active():
+                    self._queue_bkg_prewarm(action)
+
+        # Only the final legacy/in-flight worker may consume pending work.
+        if self._bkg_threads:
+            return
+
+        pending_current = self._pending_bkg_current
+        self._pending_bkg_current = None
+        if (
+            pending_current is not None
+            and self._bkg_action_is_valid(pending_current, require_current=True)
+            and self._resume_bkg_index(pending_current[0])
+        ):
+            return
+
+        if self._is_playback_active():
+            self._pump_playback_render_queue()
+            if self._bkg_threads or self._render_threads:
+                return
+        elif self._is_composite_frame_layout_active():
+            self._schedule_next_composite_dirty_frame()
+            if self._bkg_threads or self._render_threads:
+                return
+
+        while self._pending_bkg_prewarm:
+            action = self._pending_bkg_prewarm.pop(0)
+            if self._bkg_action_is_valid(action) and self._resume_bkg_index(action[0]):
+                return
+
+    def _cancel_bkg_workers(self, wait: bool = False) -> bool:
+        jobs = [
+            (index, thread, self._bkg_workers.get(index))
+            for index, thread in list(self._bkg_threads.items())
+        ]
+        for _index, thread, worker in jobs:
+            if worker is not None:
+                worker.cancel()
+            if thread.isRunning():
+                thread.requestInterruption()
+                thread.quit()
+
+        if not wait:
+            return not any(thread.isRunning() for _index, thread, _worker in jobs)
+
+        all_stopped = True
+        for index, thread, worker in jobs:
+            stopped = not thread.isRunning() or thread.wait(self.BACKGROUND_THREAD_WAIT_MS)
+            if not stopped:
+                logger.warning("Background thread for frame %d is still stopping", index)
+                all_stopped = False
+                continue
+            if worker is not None:
+                self._handle_bkg_thread_finished(index, worker.generation, thread, worker)
+        return all_stopped
 
     def _invalidate_bkg_caches(self, indices: list[int] | None = None) -> None:
         """Drop cached background/residual images.
@@ -1707,11 +2472,16 @@ class MainWindow(QMainWindow):
                 if 0 <= i < len(self._frames):
                     target_indices.append(i)
 
+        self._pending_bkg_current = None
+        self._pending_bkg_prewarm.clear()
+        self._bkg_generation += 1
+        self._cancel_bkg_workers(wait=False)
+
         if self._view_mode == "original" or not target_indices:
             return
         self._render_generation += 1
+        self._pending_render_intent = None
         self._cancel_active_frame_renders(wait=False)
-        self._cancel_bkg_workers(wait=False)
         self._render_request_index_by_id.clear()
         self._latest_render_request_by_index.clear()
         for i in target_indices:
@@ -2174,6 +2944,8 @@ class MainWindow(QMainWindow):
     def _schedule_frame_render(self, index: int, *, playback_bg: bool = False) -> None:
         """Render the requested frame in the background."""
 
+        if self._is_closing:
+            return
         if index < 0 or index >= len(self._frames):
             return
         if not self._frame_dirty[index]:
@@ -2191,11 +2963,62 @@ class MainWindow(QMainWindow):
             if index != self._current_frame_index and self._has_active_render_for_index(self._current_frame_index):
                 return
 
-        request_id = self._latest_render_request_by_index.get(index)
-        if request_id is not None:
-            thread = self._render_threads.get(request_id)
-            if thread is not None and thread.isRunning():
-                return
+        active_request_ids = list(self._render_threads)
+        if active_request_ids:
+            if playback_bg:
+                # Playback already owns an ordered dirty-frame queue. Put the
+                # item back and let the global slot's finished callback pump it;
+                # a background request must never replace a foreground intent.
+                if index not in self._playback_render_queue:
+                    self._playback_render_queue.insert(0, index)
+            else:
+                active_request_id = active_request_ids[-1]
+                active_index = self._render_request_index_by_id.get(active_request_id)
+                active_worker = self._render_workers.get(active_request_id)
+                active_thread = self._render_threads.get(active_request_id)
+                same_current_work = (
+                    len(active_request_ids) == 1
+                    and active_index == index
+                    and active_worker is not None
+                    and active_worker.generation == self._render_generation
+                    and active_thread is not None
+                    and active_thread.isRunning()
+                )
+                if same_current_work:
+                    return
+
+                # Only the newest foreground request survives. Every physical
+                # worker remains tracked until finished, but none can be joined
+                # by another QThread while it winds down.
+                self._pending_render_intent = (
+                    index,
+                    self._render_generation,
+                    False,
+                )
+                for request_id in active_request_ids:
+                    thread = self._render_threads.get(request_id)
+                    if thread is not None and thread.isRunning():
+                        thread.requestInterruption()
+                        thread.quit()
+
+            # Retire threads that stopped before their queued GUI cleanup. The
+            # last retirement consumes the one pending foreground intent.
+            for request_id in active_request_ids:
+                thread = self._render_threads.get(request_id)
+                if thread is not None and thread.isRunning():
+                    continue
+                request_index = self._render_request_index_by_id.get(request_id)
+                if request_index is None:
+                    request_index = next(
+                        (
+                            candidate
+                            for candidate, candidate_request_id in self._active_render_request_by_index.items()
+                            if candidate_request_id == request_id
+                        ),
+                        None,
+                    )
+                self._handle_frame_render_thread_finished(request_id, request_index)
+            return
 
         if not playback_bg and index == self._current_frame_index:
             self._cancel_stale_frame_renders(index)
@@ -2204,6 +3027,7 @@ class MainWindow(QMainWindow):
         request_id = self._render_request_id
         self._latest_render_request_by_index[index] = request_id
         self._render_request_index_by_id[request_id] = index
+        self._active_render_request_by_index[index] = request_id
         if playback_bg:
             self._playback_bg_render_ids.add(request_id)
 
@@ -2237,7 +3061,9 @@ class MainWindow(QMainWindow):
         worker.render_error.connect(self._handle_frame_render_error)
         worker.finished.connect(thread.quit)
         worker.finished.connect(worker.deleteLater)
-        thread.finished.connect(lambda rid=request_id: self._handle_frame_render_thread_finished(rid))
+        finish_relay = _FrameRenderThreadFinishRelay(self, request_id, index)
+        thread.finished.connect(finish_relay.handle_thread_finished)
+        thread.finished.connect(finish_relay.deleteLater)
         thread.finished.connect(thread.deleteLater)
 
         self._render_threads[request_id] = thread
@@ -2246,6 +3072,8 @@ class MainWindow(QMainWindow):
     def _should_accept_render_result(self, request_id: int, generation: int, index: int) -> bool:
         """Return whether a background render result still matches current state."""
 
+        if self._is_closing:
+            return False
         if generation != self._render_generation:
             return False
         if index < 0 or index >= len(self._frames):
@@ -2403,14 +3231,23 @@ class MainWindow(QMainWindow):
         """Cancel the currently exposed long-running task when supported."""
 
         if self._status_activity_kind == "load":
-            self._stop_active_frame_load(wait=False)
-            self._set_status_activity(
-                kind="load",
-                text=self.tr("Cancelling FITS load..."),
-                progress_value=self._load_completed_count,
-                progress_max=self._load_total_count,
-                cancellable=False,
-            )
+            self._pending_frame_load = None
+            self._load_cancel_feedback_pending = True
+            stopped = self._stop_active_frame_load(wait=False)
+            if not stopped:
+                self._set_status_activity(
+                    kind="load",
+                    text=self.tr("Cancelling FITS load..."),
+                    progress_value=self._load_completed_count,
+                    progress_max=self._load_total_count,
+                    cancellable=False,
+                )
+            elif self._load_cancel_feedback_pending:
+                # No tracked thread existed to deliver a finished signal.
+                self._load_cancel_feedback_pending = False
+                self._set_loading_state(False)
+                if self.app_status_bar is not None:
+                    self.app_status_bar.showMessage(self.tr("FITS load cancelled."), 3000)
         elif self._status_activity_kind == "sep":
             self._sep_pending_extract_roi = None
             self._sep_pending_launch_roi = None
@@ -2439,13 +3276,16 @@ class MainWindow(QMainWindow):
         self._sep_confirm_pending_roi = None
         if pending is None:
             return
+        if not self._sep_action_is_current(pending):
+            self._clear_status_activity(kind="sep")
+            return
         self._clear_status_activity(kind="sep")
         if self._sep_thread is not None:
             # Estimate thread may still be tearing down; chain the launch through
             # _clear_sep_worker_refs so we don't clobber its references.
             self._sep_pending_launch_roi = pending
             return
-        self._start_sep_extract_full(pending)
+        self._start_sep_extract_full(pending.roi)
 
     def _show_latest_error_details(self) -> None:
         """Open a dialog with the most recently stored error detail."""
@@ -2617,12 +3457,18 @@ class MainWindow(QMainWindow):
         -> clear canvas, table, dialog state, and status bar.
         """
 
-        self._stop_active_frame_load(wait=True)
+        self._pending_frame_load = None
+        self._load_cancel_feedback_pending = False
+        self._stop_active_frame_load(wait=False)
         self._playback_render_queue.clear()
         self._playback_bg_render_ids.clear()
-        self._cancel_active_frame_renders(wait=True)
-        self._cancel_bkg_workers(wait=True)
-        self._cancel_active_sep_extract(wait=True)
+        self._pending_render_intent = None
+        self._cancel_active_frame_renders(wait=False)
+        self._pending_bkg_current = None
+        self._pending_bkg_prewarm.clear()
+        self._bkg_generation += 1
+        self._cancel_bkg_workers(wait=False)
+        self._cancel_active_sep_extract(wait=False)
         self._render_generation += 1
         self._render_request_index_by_id.clear()
         self._latest_render_request_by_index.clear()
@@ -3145,38 +3991,110 @@ class MainWindow(QMainWindow):
     def _is_sep_extract_running(self) -> bool:
         """Return whether a background SEP extraction is currently active."""
 
-        return self._active_sep_request_id is not None
+        # Worker.finished can be delivered before QThread.finished cleanup.
+        # Retain the slot until the thread object is fully retired so another
+        # request cannot overwrite its references and later consume stale
+        # pending actions.
+        return self._active_sep_request_id is not None or self._sep_thread is not None
+
+    def _pending_sep_action(self, roi: ROISelection) -> _PendingSEPAction:
+        return _PendingSEPAction(
+            roi=roi,
+            frame_index=self._current_frame_index,
+            context_generation=self._sep_context_generation,
+        )
+
+    def _sep_action_is_current(self, action: _PendingSEPAction) -> bool:
+        return (
+            not self._is_closing
+            and action.frame_index == self._current_frame_index
+            and action.context_generation == self._sep_context_generation
+            and 0 <= action.frame_index < len(self._frames)
+            and self.fits_service.current_data is self._frames[action.frame_index]
+        )
+
+    def _sep_request_matches_current_context(self, request_id: int) -> bool:
+        return (
+            not self._is_closing
+            and request_id == self._active_sep_request_id
+            and self._active_sep_frame_index == self._current_frame_index
+            and self._active_sep_context_generation == self._sep_context_generation
+            and 0 <= self._current_frame_index < len(self._frames)
+            and self.fits_service.current_data is self._frames[self._current_frame_index]
+        )
+
+    def _clear_pending_sep_actions(self) -> None:
+        self._sep_pending_extract_roi = None
+        self._sep_pending_launch_roi = None
+        self._sep_confirm_pending_roi = None
 
     def _cancel_active_sep_extract(self, *, wait: bool = False) -> None:
         """Request shutdown for any active SEP worker thread."""
 
+        # Invalidate the request before asking the worker to stop. A result
+        # signal may already be queued for the GUI thread; cancellation must
+        # still prevent that result from replacing the catalog/overlays.
+        self._sep_context_generation += 1
         thread = self._sep_thread
         worker = self._sep_worker
-        if thread is None or not thread.isRunning():
+        request_id = self._active_sep_request_id
+        self._clear_pending_sep_actions()
+        self._clear_status_activity(kind="sep")
+        if thread is None or worker is None:
             self._active_sep_request_id = None
+            self._active_sep_context_generation = None
+            self._active_sep_frame_index = None
             return
 
-        if worker is not None:
+        if thread.isRunning():
             try:
                 worker.cancel()
             except Exception:
                 pass
-        thread.requestInterruption()
-        thread.quit()
-        if wait:
-            thread.wait()
-            self._clear_sep_worker_refs()
+            thread.requestInterruption()
+            thread.quit()
+        if wait and thread.isRunning():
+            thread.wait(self.THREAD_JOIN_WAIT_MS)
+        if not thread.isRunning():
+            self._clear_sep_worker_refs(request_id, thread, worker)
 
-    def _clear_sep_worker_refs(self) -> None:
-        """Drop references to the current SEP worker/thread pair after shutdown."""
+    def _clear_sep_worker_refs(
+        self,
+        request_id: int | None = None,
+        thread: QThread | None = None,
+        worker: SEPExtractWorker | None = None,
+    ) -> None:
+        """Clear only the SEP pair that exited, then validate any chained run."""
 
+        if request_id is None:
+            request_id = self._active_sep_request_id
+        if thread is None:
+            thread = self._sep_thread
+        if worker is None:
+            worker = self._sep_worker
+        if thread is not self._sep_thread or worker is not self._sep_worker:
+            return
         self._sep_thread = None
         self._sep_worker = None
-        self._active_sep_request_id = None
+        if request_id == self._active_sep_request_id:
+            self._active_sep_request_id = None
+            self._active_sep_context_generation = None
+            self._active_sep_frame_index = None
         pending = self._sep_pending_launch_roi
-        if pending is not None:
-            self._sep_pending_launch_roi = None
-            self._start_sep_extract_full(pending)
+        self._sep_pending_launch_roi = None
+        if pending is not None and self._sep_action_is_current(pending):
+            self._start_sep_extract_full(pending.roi)
+            return
+
+        if self._sep_confirm_pending_roi is None:
+            self._clear_status_activity(kind="sep")
+        self.sync_sep_panel_state()
+        if self.source_table_dock is not None:
+            self.source_table_dock.set_view_state(self.build_table_view_state())
+        if self.canvas is not None:
+            self.canvas.set_overlay_state(self.build_canvas_overlay_state())
+        self.sync_render_controls()
+        self._schedule_pending_close_retry()
 
     def _start_sep_extract(self, roi: ROISelection) -> None:
         """Run a count-estimate pre-pass, then the full SEP extraction on confirm."""
@@ -3281,17 +4199,21 @@ class MainWindow(QMainWindow):
     ) -> None:
         """Spin up the SEP worker thread for either an estimate pass or full extract."""
 
+        if self._is_closing:
+            return
         self._sep_request_id += 1
         request_id = self._sep_request_id
         self._active_sep_request_id = request_id
+        self._active_sep_context_generation = self._sep_context_generation
+        self._active_sep_frame_index = self._current_frame_index
         self._sep_is_estimate_phase = estimate_only
         if not estimate_only:
             self.current_catalog = None
             self._catalog_results_stale = False
         self._clear_latest_error()
 
-        self._sep_thread = QThread(self)
-        self._sep_worker = SEPExtractWorker(
+        thread = QThread(self)
+        worker = SEPExtractWorker(
             request_id=request_id,
             data_subarray=subarray,
             roi=roi,
@@ -3300,17 +4222,21 @@ class MainWindow(QMainWindow):
             estimate_only=estimate_only,
             estimate_threshold=self.SEP_ESTIMATE_THRESHOLD_SIGMA if estimate_only else None,
         )
-        self._sep_worker.moveToThread(self._sep_thread)
+        self._sep_thread = thread
+        self._sep_worker = worker
+        finish_relay = _SEPThreadFinishRelay(self, request_id, thread, worker)
+        worker.moveToThread(thread)
 
-        self._sep_thread.started.connect(self._sep_worker.run)
-        self._sep_worker.extraction_ready.connect(self._handle_sep_extraction_ready)
-        self._sep_worker.estimation_ready.connect(self._handle_sep_estimation_ready)
-        self._sep_worker.extraction_error.connect(self._handle_sep_extraction_error)
-        self._sep_worker.finished.connect(self._handle_sep_extraction_finished)
-        self._sep_worker.finished.connect(self._sep_thread.quit)
-        self._sep_worker.finished.connect(self._sep_worker.deleteLater)
-        self._sep_thread.finished.connect(self._sep_thread.deleteLater)
-        self._sep_thread.finished.connect(self._clear_sep_worker_refs)
+        thread.started.connect(worker.run)
+        worker.extraction_ready.connect(self._handle_sep_extraction_ready)
+        worker.estimation_ready.connect(self._handle_sep_estimation_ready)
+        worker.extraction_error.connect(self._handle_sep_extraction_error)
+        worker.finished.connect(self._handle_sep_extraction_finished)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(finish_relay.handle_thread_finished)
+        thread.finished.connect(finish_relay.deleteLater)
+        thread.finished.connect(thread.deleteLater)
 
         if not estimate_only:
             if self.source_table_dock is not None:
@@ -3333,12 +4259,12 @@ class MainWindow(QMainWindow):
         )
         self.sync_sep_panel_state()
         self.sync_render_controls()
-        self._sep_thread.start()
+        thread.start()
 
     def _handle_sep_estimation_ready(self, request_id: int, roi: ROISelection, count: int) -> None:
         """Process a count-estimate pre-pass and decide whether to run the full extraction."""
 
-        if request_id != self._active_sep_request_id:
+        if not self._sep_request_matches_current_context(request_id):
             return
         pending_roi = self._sep_pending_extract_roi
         self._sep_pending_extract_roi = None
@@ -3356,11 +4282,11 @@ class MainWindow(QMainWindow):
         dense = density >= self.SEP_DENSE_FIELD_PER_MPX
         large = extrapolated >= self.SEP_LARGE_COUNT_WARNING
         if not (dense or large):
-            self._sep_pending_launch_roi = pending_roi
+            self._sep_pending_launch_roi = self._pending_sep_action(pending_roi)
             return
 
         # Defer decision to the user via a non-modal status-bar prompt.
-        self._sep_confirm_pending_roi = pending_roi
+        self._sep_confirm_pending_roi = self._pending_sep_action(pending_roi)
         if self.app_status_bar is not None:
             crowded_hint = self.tr("crowded ") if dense else ""
             prompt = self.tr(
@@ -3378,7 +4304,7 @@ class MainWindow(QMainWindow):
     def _handle_sep_extraction_ready(self, request_id: int, roi: ROISelection, catalog: SourceCatalog) -> None:
         """Accept a SEP extraction result if it still matches the latest request."""
 
-        if request_id != self._active_sep_request_id:
+        if not self._sep_request_matches_current_context(request_id):
             return
 
         self._catalog_results_stale = False
@@ -3400,29 +4326,22 @@ class MainWindow(QMainWindow):
     def _handle_sep_extraction_error(self, request_id: int, detail: str) -> None:
         """Report a SEP extraction failure if it still matches the latest request."""
 
-        if request_id != self._active_sep_request_id:
+        if not self._sep_request_matches_current_context(request_id):
             return
 
-        self._sep_pending_extract_roi = None
-        self._sep_pending_launch_roi = None
-        self._sep_confirm_pending_roi = None
+        self._clear_pending_sep_actions()
         self.show_error(self.tr("SEP extraction failed"), detail)
         if self.source_table_dock is not None:
             self.source_table_dock.set_view_state(self.build_table_view_state())
 
     def _handle_sep_extraction_finished(self, request_id: int) -> None:
-        """Finalize SEP-extraction UI state when a worker exits."""
+        """Observe worker completion while retaining identity until thread exit."""
 
-        if request_id == self._active_sep_request_id:
-            if self._sep_confirm_pending_roi is None:
-                self._clear_status_activity(kind="sep")
-            self._active_sep_request_id = None
-            self.sync_sep_panel_state()
-            if self.source_table_dock is not None:
-                self.source_table_dock.set_view_state(self.build_table_view_state())
-            if self.canvas is not None:
-                self.canvas.set_overlay_state(self.build_canvas_overlay_state())
-            self.sync_render_controls()
+        # QThread.finished performs the authoritative cleanup. Clearing the
+        # active identity here opens a GUI-event window where a new worker can
+        # overwrite `_sep_thread` before the old cleanup consumes/invalidates
+        # its pending estimate action.
+        return
 
     def _apply_markers(self, entries: list) -> None:
         """Draw markers on the canvas. Converts WCS entries to pixel coords."""
@@ -3802,8 +4721,7 @@ class MainWindow(QMainWindow):
         """Read every HDU header from a FITS file for dialog display."""
 
         try:
-            fits = _astropy_fits()
-            with fits.open(path, memmap=True) as hdul:
+            with open_fits_container(path, memmap=True) as hdul:
                 payloads: list[HeaderPayload] = []
                 for index, hdu in enumerate(hdul):
                     header = getattr(hdu, "header", None)
@@ -4240,6 +5158,7 @@ class MainWindow(QMainWindow):
         self._render_generation += 1
         self._playback_render_queue.clear()
         self._playback_bg_render_ids.clear()
+        self._pending_render_intent = None
         self._cancel_active_frame_renders(wait=False)
         self._render_request_index_by_id.clear()
         self._latest_render_request_by_index.clear()
@@ -4293,11 +5212,19 @@ class MainWindow(QMainWindow):
 
         playing = self._is_playback_active()
 
-        self._cancel_active_sep_extract(wait=not playing)
+        self._cancel_active_sep_extract(wait=False)
+        self.current_catalog = None
+        self._catalog_results_stale = False
+        if self.canvas is not None:
+            self.canvas.clear_sources()
+        if self.source_table_dock is not None:
+            self.source_table_dock.clear_catalog()
+            self.source_table_dock.set_row_view_models([])
+            self.source_table_dock.clear_cutout_image()
+
         self._current_frame_index = index
         data = self._frames[index]
         self.fits_service.current_data = data
-        self.current_catalog = None
 
         label = data.path or f"Frame {index}"
         if len(self._frames) > 1:
@@ -4527,13 +5454,68 @@ class MainWindow(QMainWindow):
         if directory:
             self._settings.setValue("paths/last_open_dir", directory)
 
-    def closeEvent(self, event: Any) -> None:
-        """Stop any active background load before the window closes."""
+    def _running_background_threads(self) -> list[QThread]:
+        """Return every tracked QThread that still prevents safe destruction."""
 
-        self._stop_active_frame_load(wait=True)
-        self._cancel_active_frame_renders(wait=True)
-        self._cancel_bkg_workers(wait=True)
-        self._cancel_active_sep_extract(wait=True)
+        candidates: list[QThread | None] = [
+            self._load_thread,
+            *self._render_threads.values(),
+            *self._bkg_threads.values(),
+            self._sep_thread,
+            self._update_check_thread,
+        ]
+        running: list[QThread] = []
+        seen: set[int] = set()
+        for thread in candidates:
+            if thread is None or id(thread) in seen:
+                continue
+            seen.add(id(thread))
+            try:
+                if thread.isRunning():
+                    running.append(thread)
+            except RuntimeError:
+                # A deferred-delete event may already have destroyed a thread
+                # whose finished bookkeeping has not run yet.
+                continue
+        return running
+
+    def _schedule_pending_close_retry(self) -> None:
+        if self._close_pending:
+            QTimer.singleShot(0, self._retry_pending_close)
+
+    def _retry_pending_close(self) -> None:
+        if not self._close_pending or self._running_background_threads():
+            return
+        self._close_pending = False
+        self.close()
+
+    def closeEvent(self, event: Any) -> None:
+        """Cooperatively stop background jobs before allowing destruction."""
+
+        self._is_closing = True
+        self._stop_active_frame_load(wait=False)
+        self._cancel_active_frame_renders(wait=False)
+        self._pending_bkg_current = None
+        self._pending_bkg_prewarm.clear()
+        self._cancel_bkg_workers(wait=False)
+        self._cancel_active_sep_extract(wait=False)
+        self._stop_update_check(wait=False)
+
+        running_threads = self._running_background_threads()
+        if running_threads:
+            self._close_pending = True
+            for thread in running_threads:
+                try:
+                    thread.finished.connect(self._schedule_pending_close_retry)
+                except (RuntimeError, TypeError):
+                    pass
+            if self.app_status_bar is not None:
+                self.app_status_bar.showMessage(self.tr("Waiting for background tasks to stop..."))
+            event.ignore()
+            self._schedule_pending_close_retry()
+            return
+
+        self._close_pending = False
         self._persist_window_state()
         super().closeEvent(event)
 

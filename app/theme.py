@@ -5,16 +5,19 @@ via QSettings under the "ui/theme" key so it survives restarts.
 """
 from __future__ import annotations
 
+import logging
 import tempfile
 from pathlib import Path
 
-from PySide6.QtCore import QPoint, QSettings, Qt
+from PySide6.QtCore import QPoint, QSettings, QStandardPaths, Qt
 from PySide6.QtGui import QColor, QPainter, QPalette, QPen, QPixmap
 from PySide6.QtWidgets import QApplication
 
 THEME_KEY = "ui/theme"
 DEFAULT_THEME = "light"
 AVAILABLE_THEMES = ("dark", "light")
+
+logger = logging.getLogger(__name__)
 
 
 def _dark_palette() -> QPalette:
@@ -75,8 +78,66 @@ def _light_palette() -> QPalette:
     return p
 
 
-_ARROW_CACHE_DIR = Path(tempfile.gettempdir()) / "astroview_theme_icons"
+_arrow_cache_context: tempfile.TemporaryDirectory[str] | None = None
+_arrow_cache_dir: Path | None = None
+_arrow_cache_init_attempted = False
 _arrow_paths_cache: dict[tuple[str, str], str] = {}
+
+
+def _create_private_arrow_cache(base_dir: Path | None) -> tuple[tempfile.TemporaryDirectory[str], Path]:
+    """Create a process-private, unpredictable directory for generated icons."""
+
+    if base_dir is not None:
+        base_dir.mkdir(parents=True, exist_ok=True)
+    context = tempfile.TemporaryDirectory(
+        prefix="astroview-theme-icons-",
+        dir=str(base_dir) if base_dir is not None else None,
+    )
+    cache_dir = Path(context.name)
+    # TemporaryDirectory already creates mode 0700 on POSIX.  Re-apply it in
+    # case an unusual platform umask or temporary-directory implementation did
+    # not, while leaving Windows ACL handling to the OS.
+    try:
+        cache_dir.chmod(0o700)
+    except OSError:
+        if not cache_dir.is_dir():
+            context.cleanup()
+            raise
+    if not cache_dir.is_dir():
+        context.cleanup()
+        raise OSError(f"Theme icon cache was not created: {cache_dir}")
+    return context, cache_dir
+
+
+def _get_arrow_cache_dir() -> Path | None:
+    """Return a private per-process cache, or ``None`` if it cannot be made."""
+
+    global _arrow_cache_context, _arrow_cache_dir, _arrow_cache_init_attempted
+    if _arrow_cache_dir is not None:
+        return _arrow_cache_dir
+    if _arrow_cache_init_attempted:
+        return None
+    _arrow_cache_init_attempted = True
+
+    cache_location = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.CacheLocation)
+    candidates = [Path(cache_location) if cache_location else None]
+    if candidates[0] is not None:
+        # A secure random directory in the system temp location is a fallback
+        # when the per-user Qt cache is read-only or otherwise unavailable.
+        candidates.append(None)
+
+    for base_dir in candidates:
+        try:
+            context, cache_dir = _create_private_arrow_cache(base_dir)
+        except OSError as exc:
+            logger.warning("Could not create theme icon cache under %s: %s", base_dir, exc)
+            continue
+        _arrow_cache_context = context
+        _arrow_cache_dir = cache_dir
+        return cache_dir
+
+    logger.warning("Theme arrow icons are disabled because no writable private cache is available")
+    return None
 
 
 def _arrow_pixmap(direction: str, color: QColor, size: int = 12) -> QPixmap:
@@ -109,16 +170,29 @@ def _arrow_pixmap(direction: str, color: QColor, size: int = 12) -> QPixmap:
     return pm
 
 
-def _arrow_path(direction: str, hex_color: str) -> str:
+def _arrow_path(direction: str, hex_color: str) -> str | None:
     """Return an absolute file path to a cached PNG arrow icon."""
     key = (direction, hex_color)
     cached = _arrow_paths_cache.get(key)
     if cached and Path(cached).exists():
         return cached
-    _ARROW_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    cache_dir = _get_arrow_cache_dir()
+    if cache_dir is None:
+        return None
     pm = _arrow_pixmap(direction, QColor(hex_color))
-    out = _ARROW_CACHE_DIR / f"arrow_{direction}_{hex_color.lstrip('#')}.png"
-    pm.save(str(out), "PNG")
+    out = cache_dir / f"arrow_{direction}_{hex_color.lstrip('#')}.png"
+    try:
+        saved = pm.save(str(out), "PNG")
+    except (OSError, RuntimeError) as exc:
+        logger.warning("Could not write theme arrow icon %s: %s", out, exc)
+        return None
+    if not saved or not out.is_file():
+        logger.warning("Could not write theme arrow icon %s", out)
+        try:
+            out.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return None
     # Qt QSS url() wants forward slashes; absolute path works cross-platform.
     url = out.as_posix()
     _arrow_paths_cache[key] = url
@@ -128,6 +202,8 @@ def _arrow_path(direction: str, hex_color: str) -> str:
 def _spinbox_qss(btn_bg: str, btn_hover: str, btn_pressed: str, border: str, arrow_color: str) -> str:
     up = _arrow_path("up", arrow_color)
     down = _arrow_path("down", arrow_color)
+    up_image = f'image: url("{up}"); width: 10px; height: 10px;' if up else "image: none;"
+    down_image = f'image: url("{down}"); width: 10px; height: 10px;' if down else "image: none;"
     return f"""
 QSpinBox, QDoubleSpinBox {{
     padding-right: 22px;
@@ -154,10 +230,10 @@ QSpinBox::down-button:pressed, QDoubleSpinBox::down-button:pressed {{
     background: {btn_pressed};
 }}
 QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {{
-    image: url({up}); width: 10px; height: 10px;
+    {up_image}
 }}
 QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {{
-    image: url({down}); width: 10px; height: 10px;
+    {down_image}
 }}
 QSpinBox::up-arrow:disabled, QSpinBox::down-arrow:disabled,
 QDoubleSpinBox::up-arrow:disabled, QDoubleSpinBox::down-arrow:disabled {{

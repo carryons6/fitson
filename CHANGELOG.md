@@ -2,6 +2,42 @@
 
 ## Unreleased
 
+## 1.7.5 - 2026-07-25
+
+### English
+
+#### Security
+- Reject whole-file gzip/ZIP/bzip2/xz/LZW wrappers before decompression, and enforce pre-decode limits of 8192² pixels, 512 MiB, and 4096 frames while retaining bounded FITS tile-compression support.
+- Move generated theme icons to a private randomized cache and stop overwriting the user's default FITS file association during installation.
+- Harden releases with immutable Action SHAs, split build/publish permissions, a complete win-64 URL+SHA Conda lock, hash-verified Miniforge and Inno Setup bootstraps, tag/version validation, checksums, and a frozen-executable smoke test.
+
+#### Fixed
+- Prevent stale FITS load and update-check signals from mutating newer requests or clearing their worker references; all worker-to-window callbacks now run on the GUI thread.
+- Reject empty, table, and one-dimensional HDUs with readable errors, and guarantee FITS load workers finish cleanly after preview failures or cancellation.
+- Prevent deferred SEP extraction from surviving cancellation, frame switches, file close, or application shutdown; clear source overlays atomically on frame changes.
+- Keep background/residual computation valid across unrelated render changes and safely delay window destruction until active background tasks finish.
+- Coalesce repeated FITS loads and frame renders into bounded single-flight workers, reject results already queued when the user cancels, and hold SEP request identity until its thread fully exits.
+- Redispatch invalidated background work for source cutouts and end failed background jobs with a visible error instead of leaving permanent loading feedback.
+- Render all-NaN/Inf frames as black and continue loading later cube frames when an optional preview cannot be produced.
+- Detach memory-mapped uint8 data before closing a FITS file so Windows can remove or overwrite the source path.
+
+### 简体中文
+
+#### 安全
+- 在解压前拒绝整文件 gzip/ZIP/bzip2/xz/LZW 外层压缩，并实施 8192² 像素、512 MiB 解码数据和 4096 帧的预解码限制，同时继续支持受同一预算约束的 FITS 分块压缩。
+- 将动态生成的主题图标移入随机化的进程私有缓存目录，并停止在安装时覆盖用户现有的默认 FITS 文件关联。
+- 加固发布链：GitHub Actions 固定到不可变提交、构建与发布权限分离、完整 win-64 URL+SHA Conda 锁、Miniforge 与 Inno Setup 引导程序哈希校验、标签/版本一致性校验、发布校验和及冻结 EXE smoke test。
+
+#### 修复
+- 防止过期的 FITS 加载与更新检查信号修改新请求或清除新 worker 引用；所有 worker 到窗口的回调现在都在 GUI 线程执行。
+- 对空 HDU、表格 HDU 和一维 HDU 返回可读错误，并确保 FITS 加载 worker 在预览失败或取消后始终干净结束。
+- 防止延迟 SEP 提取在取消、切帧、关闭文件或退出应用后继续落地，并在帧切换时原子清除源叠加层。
+- 保持背景/残差计算不受无关渲染代次影响，并在后台任务仍运行时安全延迟窗口销毁。
+- 将重复 FITS 加载、帧渲染和背景计算合并为有界 single-flight worker；取消后拒绝已排队结果，并在 SEP 线程完全退出前保留请求身份。
+- 为源切图重新派发已失效的背景任务，并在背景计算失败时显示明确错误，不再永久停留在加载状态。
+- 将全 NaN/Inf 帧渲染为黑色；单个可选预览失败时继续加载数据立方体中的后续帧。
+- 在关闭 FITS 文件前分离内存映射的 uint8 数据，使 Windows 可以删除或覆盖源文件。
+
 ## 1.7.4 - 2026-05-11
 
 ### Changed

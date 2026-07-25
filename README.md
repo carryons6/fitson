@@ -14,7 +14,7 @@ A desktop FITS astronomical image viewer built with PySide6.
 - Image orientation as a persistent display property: all 8 D4 transforms (flip H/V, rotate 90/180/270, transpose, anti-transpose) under `View → Image Orientation`, applied automatically to every loaded frame; an on-canvas compass shows the displayed-frame `+X` / `+Y` axes
 
 ### Source Extraction (SEP)
-- Built-in SEP (Source Extractor Python) integration as an optional tool
+- Built-in SEP (Source Extractor Python) integration
 - Full-image or ROI (right-click drag) source extraction
 - Configurable extraction parameters (threshold, min area, deblend, etc.)
 - Source overlay ellipses on the canvas with click-to-highlight and hover-to-preview
@@ -50,9 +50,9 @@ A desktop FITS astronomical image viewer built with PySide6.
 - Each dock (source table, SEP params, markers, histogram, frame player) has a custom title bar with dock/undock and close buttons
 - Floating docks gain native window controls (minimize / maximize / close) and behave as standalone windows
 
-### Performance
-- Memory-mapped FITS loading (`memmap=True`) for large files
-- Deferred type conversion avoids unnecessary float32 copy at load time
+### Performance and safety
+- Header-based allocation budgets are enforced before pixel decoding
+- Decoded arrays are detached from file mappings when needed, so source files can be closed or overwritten safely on Windows
 - Subsampled interval calculation for large images (stride to ~1000x1000)
 - Background multi-file FITS loading keeps the UI responsive during large imports
 - Progressive first-frame preview rendering for faster time-to-first-image
@@ -64,7 +64,7 @@ A desktop FITS astronomical image viewer built with PySide6.
 - PySide6
 - astropy
 - numpy
-- sep (optional, for source extraction)
+- sep
 
 Recommended install via conda-forge:
 ```bash
@@ -72,18 +72,34 @@ conda env create -f environment.yml
 conda activate astroview
 ```
 
-`environment.yml` pins `libblas` to the OpenBLAS variant so Windows PyInstaller
-builds do not pull in the much larger MKL runtime set.
+`environment.yml` is the human-maintained development specification and pins
+`libblas` to OpenBLAS. Release CI instead consumes
+`environment-win-64.conda.lock`, which fixes every direct and transitive Conda
+artifact by URL, build, and SHA-256.
 
 ## Usage
 
-You can launch AstroView from either the parent directory of `astroview/` or from the repository root itself:
+From the repository root:
 
 ```bash
 python -m astroview                     # launch with empty window
 python -m astroview path/to/image.fits  # open a FITS file directly
 python -m astroview image.fits --hdu 1  # open a specific HDU
 ```
+
+After installing the wheel or running `python -m pip install .`, the
+`astroview` console command is available from any directory.
+
+### FITS resource limits
+
+Untrusted FITS metadata is checked before Astropy materializes pixel data. The
+desktop loader accepts at most `8192 × 8192` total pixels, 512 MiB of estimated
+decoded data, and 4096 frames by default. Library callers may explicitly raise
+or disable individual limits for trusted data.
+
+FITS tile compression (`CompImageHDU`) remains supported and is checked against
+the same decoded-size budget. Whole-file gzip/ZIP/bzip2/xz/LZW wrappers are
+rejected before decompression; safely decompress those files first.
 
 ## Testing
 
@@ -102,14 +118,17 @@ python -m unittest discover -s tests -v
 
 ## Build
 
-Windows bundle and installer:
+Windows bundle and installer from the exact release environment:
 ```powershell
-python -m pip install pyinstaller
-.\scripts\build_windows.ps1
+conda create -n astroview-release --file environment-win-64.conda.lock
+conda activate astroview-release
+.\scripts\build_windows.ps1 -CondaLockPath environment-win-64.conda.lock
 ```
 
-For the smallest Windows installer, build from an environment created via
-`environment.yml`, which keeps NumPy on the OpenBLAS runtime.
+The lock keeps NumPy on OpenBLAS and the build script rejects an activated
+environment whose explicit URL+SHA package set differs from it. GitHub Actions
+also downloads fixed Miniforge and Inno Setup installers and verifies their
+SHA-256 hashes before using them.
 
 ## Architecture
 
@@ -140,7 +159,7 @@ Recent GPT-5.4 contributions include:
 - Windows packaging stabilization, including the restored `pydoc` dependency needed by `astropy` and verification that the rebuilt `AstroView.exe` starts correctly.
 - Test-baseline expansion from placeholder coverage to executable unit tests for FITS loading, rendering, SEP extraction, source catalogs, background file loading, and background frame rendering.
 - One-click Windows test runners under `tests/` for the conda `astro` environment.
-- Startup compatibility so `python -m astroview` works from both the package parent directory and the repository root.
+- Startup compatibility for `python -m astroview` from the repository root and the installed `astroview` console command.
 - Background multi-file FITS loading, progressive first-frame preview rendering, and background dirty-frame rendering to reduce UI stalls on large datasets.
 - Image-orientation stabilization: fixed the runtime crash triggered by switching orientation on PySide6, aligned the displayed `QImage` transform with overlay/cursor coordinate remapping, and added regression coverage for all 8 supported orientations.
 

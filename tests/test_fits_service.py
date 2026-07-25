@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
@@ -24,6 +26,19 @@ class _FixedInterval:
 
 
 class TestFITSService(unittest.TestCase):
+    def test_list_image_hdus_rejects_disguised_gzip_before_astropy_open(self) -> None:
+        service = FITSService()
+
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "disguised-gzip.fits"
+            path.write_bytes(b"\x1f\x8b\x08\x00compressed payload")
+
+            with patch("core.fits_data._astropy_fits") as astropy_mock:
+                with self.assertRaisesRegex(ValueError, r"compression is not supported safely"):
+                    service.list_image_hdus(str(path))
+
+        astropy_mock.assert_not_called()
+
     def test_open_file_loads_and_stores_current_data(self) -> None:
         service = FITSService()
         loaded = FITSData(path="demo.fits")
@@ -120,6 +135,46 @@ class TestFITSService(unittest.TestCase):
         ))
         render_data = render_mock.call_args.args[0]
         self.assertEqual(render_data.data.shape, (2, 2))
+
+    def test_render_preview_u8_rejects_unsafe_full_size_output(self) -> None:
+        # broadcast_to creates a large logical image without allocating it.
+        image = np.broadcast_to(np.array([[1.0]], dtype=np.float32), (100, 100))
+        data = FITSData(data=image)
+
+        with self.assertRaisesRegex(ValueError, r"10,000 pixels"):
+            render_preview_u8(
+                data,
+                "Linear",
+                "ZScale",
+                max_dimension=10,
+                max_output_pixels=9_999,
+            )
+
+    def test_render_preview_u8_output_limit_can_be_disabled(self) -> None:
+        data = FITSData(data=np.arange(16, dtype=np.float32).reshape(4, 4))
+        preview_tile = np.array([[10, 20], [30, 40]], dtype=np.uint8)
+
+        with patch("core.fits_service.render_image_u8", return_value=preview_tile):
+            preview = render_preview_u8(
+                data,
+                "Linear",
+                "ZScale",
+                max_dimension=2,
+                max_output_pixels=None,
+            )
+
+        self.assertEqual(preview.shape, data.data.shape)
+
+    def test_render_all_non_finite_pixels_returns_black_image(self) -> None:
+        service = FITSService()
+        service.current_data = FITSData(
+            data=np.array([[np.nan, np.inf], [-np.inf, np.nan]], dtype=np.float32)
+        )
+
+        result = service.render()
+
+        self.assertEqual(result.image_u8.shape, (2, 2))
+        self.assertTrue(np.array_equal(result.image_u8, np.zeros((2, 2), dtype=np.uint8)))
 
     def test_subsample_strides_large_arrays(self) -> None:
         data = np.arange(2_000 * 1_500, dtype=np.float32).reshape(2_000, 1_500)

@@ -6,6 +6,9 @@ on:
       - main
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   tests:
     runs-on: windows-latest
@@ -13,15 +16,94 @@ jobs:
       run:
         working-directory: astroview
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           path: astroview
-      - uses: conda-incubator/setup-miniconda@v3
+          persist-credentials: false
+      - name: Download and verify pinned Miniforge bootstrap
+        id: miniforge
+        shell: powershell
+        env:
+          MINIFORGE_URL: https://github.com/conda-forge/miniforge/releases/download/26.3.2-3/Miniforge3-26.3.2-3-Windows-x86_64.exe
+          MINIFORGE_SHA256: 14a8635465b5190537ddad6286746ffebbc55a1ed2a7bb14a506595fe3191e1e
+        run: |
+          $installer = Join-Path $env:RUNNER_TEMP "Miniforge3-26.3.2-3-Windows-x86_64.exe"
+          Invoke-WebRequest -UseBasicParsing -Uri $env:MINIFORGE_URL -OutFile $installer
+          $actual = (Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $env:MINIFORGE_SHA256) {
+            throw "Miniforge bootstrap hash mismatch: expected $env:MINIFORGE_SHA256, got $actual."
+          }
+          $installerUrl = ([System.Uri](Resolve-Path -LiteralPath $installer).Path).AbsoluteUri
+          "installer-url=$installerUrl" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+      - uses: conda-incubator/setup-miniconda@fc2d68f6413eb2d87b895e92f8584b5b94a10167 # v3
         with:
           activate-environment: astroview
           auto-activate-base: false
-          environment-file: astroview/environment.yml
-          miniforge-variant: Miniforge3
+          auto-update-conda: false
+          environment-file: astroview/environment-win-64.conda.lock
+          installer-url: ${{ steps.miniforge.outputs.installer-url }}
       - name: Run unittest suite
         shell: powershell
-        run: python -m unittest discover -s tests -v
+        run: |
+          python -m pip check
+          python -m unittest discover -s tests -v
+
+  package-smoke:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+    defaults:
+      run:
+        working-directory: astroview
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          path: astroview
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Build and install wheel
+        shell: powershell
+        run: |
+          python -m pip wheel . --no-deps --wheel-dir wheelhouse
+          $wheel = Get-ChildItem -LiteralPath wheelhouse -Filter "astroview-*.whl" | Select-Object -First 1
+          if (-not $wheel) {
+            throw "AstroView wheel was not produced."
+          }
+          python -m pip install $wheel.FullName
+          python -m pip check
+      - name: Smoke-test installed package outside checkout
+        shell: powershell
+        run: |
+          $env:EXPECTED_VERSION = (Get-Content -LiteralPath VERSION | Select-Object -First 1).Trim()
+          $outsideCheckout = Join-Path $env:RUNNER_TEMP "astroview-installed-smoke"
+          New-Item -ItemType Directory -Path $outsideCheckout -Force | Out-Null
+          Push-Location $outsideCheckout
+          try {
+            $smokeReport = Join-Path $outsideCheckout "smoke-result.txt"
+            $env:ASTROVIEW_SMOKE_REPORT = $smokeReport
+            $smokeExitCode = -1
+            try {
+              astroview --smoke-test
+              $smokeExitCode = $LASTEXITCODE
+            }
+            finally {
+              Remove-Item Env:ASTROVIEW_SMOKE_REPORT -ErrorAction SilentlyContinue
+            }
+            $smokeResult = if (Test-Path -LiteralPath $smokeReport) {
+              (Get-Content -LiteralPath $smokeReport -Raw).Trim()
+            } else {
+              "<no smoke-test report was produced>"
+            }
+            if ($smokeExitCode -ne 0 -or -not $smokeResult.StartsWith("OK ")) {
+              throw "Installed astroview smoke test failed with exit code $smokeExitCode.`n$smokeResult"
+            }
+            python -c "import importlib.metadata as m, os; assert m.version('astroview') == os.environ['EXPECTED_VERSION']"
+          }
+          finally {
+            Pop-Location
+          }

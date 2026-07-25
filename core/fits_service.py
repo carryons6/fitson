@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import operator
 from typing import Any
 
 import numpy as np
 
 from .contracts import RenderRequest, RenderResult
-from .fits_data import FITSData, HDUInfo
+from .fits_data import DEFAULT_MAX_PIXELS, FITSData, HDUInfo, open_fits_container
+
+
+DEFAULT_MAX_PREVIEW_OUTPUT_PIXELS = DEFAULT_MAX_PIXELS
 
 
 def _astropy_visualization():
@@ -55,9 +59,8 @@ class FITSService:
         """
 
         from .fits_data import _scan_image_hdus
-        from astropy.io import fits as astro_fits
 
-        with astro_fits.open(path, memmap=True) as hdul:
+        with open_fits_container(path, memmap=True) as hdul:
             return _scan_image_hdus(hdul)
 
     def open_file(self, path: str, hdu_index: int | None = None) -> FITSData:
@@ -144,7 +147,17 @@ class FITSService:
 
         # Keep "Original" on the full image; other interval modes can subsample large data.
         sample = data if request.interval_name == "Original" else _subsample(data)
-        vmin, vmax = interval.get_limits(sample)
+        limits = _robust_interval_limits(interval, sample, data)
+        if limits is None:
+            # A frame containing only NaN/Inf has no meaningful display range,
+            # but it is still a valid image frame and should not abort a cube
+            # load or strand its worker thread.
+            return RenderResult(
+                image_u8=np.zeros((h, w), dtype=np.uint8),
+                width=w,
+                height=h,
+            )
+        vmin, vmax = limits
 
         # In-place pipeline to minimize allocations
         fdata = data.astype(np.float32, copy=True)
@@ -279,6 +292,35 @@ def render_image_u8(
     return service.render().image_u8
 
 
+def _robust_interval_limits(
+    interval: Any,
+    sample: np.ndarray,
+    full_data: np.ndarray,
+) -> tuple[float, float] | None:
+    """Return finite limits, retrying interval estimation on finite values only."""
+
+    try:
+        vmin, vmax = interval.get_limits(sample)
+    except Exception:
+        vmin = vmax = np.nan
+    if np.isfinite(vmin) and np.isfinite(vmax):
+        return float(vmin), float(vmax)
+
+    finite = sample[np.isfinite(sample)]
+    if finite.size == 0 and sample is not full_data:
+        finite = full_data[np.isfinite(full_data)]
+    if finite.size == 0:
+        return None
+
+    try:
+        vmin, vmax = interval.get_limits(finite)
+    except Exception:
+        vmin, vmax = np.min(finite), np.max(finite)
+    if not (np.isfinite(vmin) and np.isfinite(vmax)):
+        vmin, vmax = np.min(finite), np.max(finite)
+    return float(vmin), float(vmax)
+
+
 def compute_interval_limits(
     data: FITSData,
     interval_name: str,
@@ -318,16 +360,52 @@ def render_preview_u8(
     *,
     max_dimension: int = 2048,
     manual_limits: tuple[float, float] | None = None,
+    max_output_pixels: int | None = DEFAULT_MAX_PREVIEW_OUTPUT_PIXELS,
 ) -> np.ndarray | None:
-    """Render a fast low-resolution preview and expand it back to image size."""
+    """Render a fast low-resolution preview and expand it back to image size.
+
+    The full-size return value is intentional: the canvas uses image dimensions
+    as its coordinate system.  Expansion is performed one source row at a time
+    to avoid the additional full-height temporary created by nested
+    ``np.repeat`` calls.  ``max_output_pixels`` bounds the unavoidable final
+    allocation; pass ``None`` only for trusted data.
+    """
 
     if data.data is None:
         return None
+    if data.data.ndim != 2:
+        raise ValueError("A preview requires a 2D image frame.")
+    if isinstance(max_dimension, bool):
+        raise ValueError("max_dimension must be a positive integer.")
+    try:
+        max_dimension = operator.index(max_dimension)
+    except TypeError as exc:
+        raise ValueError("max_dimension must be a positive integer.") from exc
+    if max_dimension <= 0:
+        raise ValueError("max_dimension must be a positive integer.")
+    if max_output_pixels is not None:
+        if isinstance(max_output_pixels, bool):
+            raise ValueError("max_output_pixels must be a positive integer or None.")
+        try:
+            max_output_pixels = operator.index(max_output_pixels)
+        except TypeError as exc:
+            raise ValueError("max_output_pixels must be a positive integer or None.") from exc
+        if max_output_pixels <= 0:
+            raise ValueError("max_output_pixels must be a positive integer or None.")
 
     height, width = data.data.shape[:2]
     longest_edge = max(height, width)
     if longest_edge <= max_dimension:
         return None
+
+    if max_output_pixels is not None:
+        output_pixels = int(height) * int(width)
+        if output_pixels > max_output_pixels:
+            raise ValueError(
+                f"Preview output would contain {output_pixels:,} pixels, exceeding the "
+                f"safety limit of {max_output_pixels:,}; pass a larger "
+                "max_output_pixels value or None for trusted data."
+            )
 
     step = max(2, (longest_edge + max_dimension - 1) // max_dimension)
     preview_data = data.data[::step, ::step]
@@ -339,9 +417,21 @@ def render_preview_u8(
     )
     if preview_image is None:
         return None
+    if preview_image.ndim != 2 or preview_image.shape != preview_data.shape:
+        raise ValueError(
+            "Preview renderer returned an unexpected shape: "
+            f"expected {preview_data.shape}, got {preview_image.shape}."
+        )
 
-    preview_image = np.repeat(np.repeat(preview_image, step, axis=0), step, axis=1)
-    return preview_image[:height, :width]
+    expanded = np.empty((height, width), dtype=preview_image.dtype)
+    for source_y, row in enumerate(preview_image):
+        start_y = source_y * step
+        if start_y >= height:
+            break
+        end_y = min(height, start_y + step)
+        expanded_row = np.repeat(row, step)[:width]
+        expanded[start_y:end_y, :] = expanded_row
+    return expanded
 
 
 _PERCENTILE_INTERVALS: dict[str, float] = {

@@ -1,9 +1,10 @@
 """Top-level package metadata for AstroView."""
 
+from .metadata import (
+    APP_NAME,
+    APP_RELEASES_API_URL,
+    APP_RELEASES_URL,
+    APP_REPOSITORY,
+    APP_TAGS_API_URL,
+)
 from .version import __version__
-
-APP_NAME = "AstroView"
-APP_REPOSITORY = "Suiren0816/fitson"
-APP_RELEASES_URL = f"https://github.com/{APP_REPOSITORY}/releases"
-APP_RELEASES_API_URL = f"https://api.github.com/repos/{APP_REPOSITORY}/releases/latest"
-APP_TAGS_API_URL = f"https://api.github.com/repos/{APP_REPOSITORY}/tags?per_page=1"

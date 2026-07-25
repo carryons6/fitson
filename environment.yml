@@ -1,13 +1,23 @@
 name: astroview
 channels:
   - conda-forge
+  - nodefaults
 dependencies:
-  - python>=3.10,<3.13
-  - pyside6>=6.5
-  - astropy>=5.3
-  - numpy>=1.24
-  - sep>=1.2
-  - pyinstaller>=6
-  # Keep the Windows bundle on the lighter OpenBLAS runtime instead of MKL.
-  - libblas=*=*openblas
-  - pip
+  # Human-maintained direct constraints used to regenerate
+  # environment-win-64.conda.lock. CI/release consume that exact URL+SHA lock.
+  - python=3.12.13
+  - pyside6=6.11.0
+  - astropy=7.2.0
+  - numpy=2.4.3
+  - sep=1.4.1
+  - pyinstaller=6.20.0
+  # PyInstaller 6.20 requires hooks-contrib >=2026.4; pin the available
+  # compatible conda-forge build as well.
+  - pyinstaller-hooks-contrib=2026.6
+  - pip=26.1.1
+  - setuptools=82.0.1
+  - wheel=0.47.0
+  - packaging=26.2
+  # Keep the Windows bundle on the lighter, deterministic OpenBLAS runtime.
+  - libblas=3.11.0=*_openblas
+  - libopenblas=0.3.32

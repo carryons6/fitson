@@ -1,9 +1,9 @@
 from pathlib import Path
+import re
 import shutil
 import sys
 import sysconfig
 
-import PyInstaller.building.build_main as build_main
 import numpy
 import PySide6
 import shiboken6
@@ -20,16 +20,6 @@ python_dlls_dir = env_dir / "DLLs"
 pyside_package_dir = Path(PySide6.__file__).resolve().parent
 shiboken_package_dir = Path(shiboken6.__file__).resolve().parent
 numpy_libs_dir = Path(numpy.__file__).resolve().parent.parent / "numpy.libs"
-
-# The active environment may contain broken entry points that crash hook
-# auto-discovery. We bypass the entry-point scan and provide the needed hook
-# directories explicitly.
-build_main.discover_hook_directories = lambda: []
-
-# In some environments, PyInstaller's isolated package import used during
-# find_binary_dependencies() crashes when importing astroview.core. We bypass
-# that late scan and add the needed runtime DLLs explicitly below.
-build_main.find_binary_dependencies = lambda *args, **kwargs: []
 
 hookspath = [str(spec_dir / "hooks")]
 numpy_hook_dir = site_packages / "numpy" / "_pyinstaller"
@@ -70,10 +60,34 @@ def _append_binary_if_exists(source_dir: Path, dll_name: str, dest: str = ".") -
         binaries.append((str(dll_path), dest))
 
 
-def _append_binary_glob_if_exists(source_dir: Path, pattern: str, dest: str = ".") -> None:
-    for dll_path in source_dir.glob(pattern):
+def _require_binary(source_dirs: list[Path], dll_name: str, dest: str = ".") -> list[Path]:
+    """Collect every matching critical binary and fail the build if absent."""
+
+    matches = []
+    for source_dir in source_dirs:
+        dll_path = source_dir / dll_name
         if dll_path.is_file():
+            matches.append(dll_path)
             binaries.append((str(dll_path), dest))
+    if not matches:
+        searched = ", ".join(str(source_dir / dll_name) for source_dir in source_dirs)
+        raise FileNotFoundError(f"Required runtime binary {dll_name!r} was not found; searched: {searched}")
+    return matches
+
+
+def _require_binary_glob(source_dirs: list[Path], pattern: str, dest: str = ".") -> list[Path]:
+    """Collect critical binaries matching a platform-dependent filename."""
+
+    matches = []
+    for source_dir in source_dirs:
+        for dll_path in source_dir.glob(pattern):
+            if dll_path.is_file():
+                matches.append(dll_path)
+                binaries.append((str(dll_path), dest))
+    if not matches:
+        searched = ", ".join(str(source_dir / pattern) for source_dir in source_dirs)
+        raise FileNotFoundError(f"Required runtime binary pattern {pattern!r} had no matches; searched: {searched}")
+    return matches
 
 
 def _binary_contains_ascii_tokens(dll_path: Path, tokens: tuple[bytes, ...]) -> bool:
@@ -86,30 +100,43 @@ def _binary_contains_ascii_tokens(dll_path: Path, tokens: tuple[bytes, ...]) -> 
 def _collect_blas_runtime_binaries(source_dir: Path) -> str:
     # Conda BLAS shims forward to the real backend via exported ASCII names, so
     # PyInstaller cannot discover the backend DLLs automatically.
-    for dll_name in blas_shim_dlls:
-        _append_binary_if_exists(source_dir, dll_name)
-
     shim_paths = [source_dir / dll_name for dll_name in blas_shim_dlls]
+    existing_shims = [shim_path for shim_path in shim_paths if shim_path.is_file()]
+    for shim_path in existing_shims:
+        binaries.append((str(shim_path), "."))
+    if not existing_shims:
+        return "none"
+
     if any(
         _binary_contains_ascii_tokens(shim_path, (b"openblas.dll", b"openblas"))
-        for shim_path in shim_paths
+        for shim_path in existing_shims
     ):
+        backend_matches = []
         for pattern in openblas_dll_patterns:
-            _append_binary_glob_if_exists(source_dir, pattern)
+            for dll_path in source_dir.glob(pattern):
+                if dll_path.is_file():
+                    backend_matches.append(dll_path)
+                    binaries.append((str(dll_path), "."))
+        if not backend_matches:
+            raise FileNotFoundError("Conda BLAS shims require OpenBLAS, but no OpenBLAS runtime DLL was found")
         return "openblas"
 
     if any(
         _binary_contains_ascii_tokens(shim_path, (b"mkl_rt", b"mkl_core", b"mkl_vml"))
-        for shim_path in shim_paths
+        for shim_path in existing_shims
     ):
+        _require_binary([source_dir], "mkl_rt.2.dll")
+        _require_binary([source_dir], "mkl_core.2.dll")
         for dll_name in mkl_runtime_dlls:
             _append_binary_if_exists(source_dir, dll_name)
         return "mkl"
 
-    return "unknown"
+    raise RuntimeError(
+        "Conda BLAS forwarding shims were found, but their runtime backend could not be identified"
+    )
 
 
-_append_binary_if_exists(python_dlls_dir, "_ssl.pyd")
+_require_binary([python_dlls_dir], "_ssl.pyd")
 
 # Conda BLAS uses forwarding shims (libcblas/libblas/liblapack); collect only
 # the runtime backend actually referenced by those shims.
@@ -123,14 +150,9 @@ for dll_name in [
     "Qt6Gui.dll",
     "Qt6Widgets.dll",
 ]:
-    _append_binary_if_exists(pyside_package_dir, dll_name)
-    _append_binary_if_exists(qt_bin, dll_name)
+    _require_binary([pyside_package_dir, qt_bin], dll_name)
 
-for pattern in [
-    "pyside6*.dll",
-]:
-    _append_binary_glob_if_exists(pyside_package_dir, pattern)
-    _append_binary_glob_if_exists(qt_bin, pattern)
+_require_binary_glob([pyside_package_dir, qt_bin], "pyside6*.dll")
 
 for dll_name in [
     "concrt140.dll",
@@ -147,37 +169,74 @@ for dll_name in [
     _append_binary_if_exists(qt_shiboken_dir, dll_name)
     _append_binary_if_exists(qt_bin, dll_name)
 
-for pattern in [
+_require_binary_glob(
+    [shiboken_package_dir, qt_shiboken_dir, qt_bin],
     "shiboken6*.dll",
-]:
-    _append_binary_glob_if_exists(shiboken_package_dir, pattern)
-    _append_binary_glob_if_exists(qt_shiboken_dir, pattern)
-    _append_binary_glob_if_exists(qt_bin, pattern)
+)
 
-# ICU and Qt6 transitive dependencies usually live under Library/bin.
-for dll_name in [
-    "icudt78.dll",
-    "icuin78.dll",
-    "icuuc78.dll",
-    "freetype.dll",
-    "libpng16.dll",
-    "pcre2-16.dll",
-    "double-conversion.dll",
-    "zstd.dll",
-    "libssl-3-x64.dll",
-    "libcrypto-3-x64.dll",
-    "libgomp-1.dll",
-    "libquadmath-0.dll",
-    "libgcc_s_seh-1.dll",
-]:
-    _append_binary_if_exists(qt_bin, dll_name)
+
+def _collect_conda_icu_binaries(source_dir: Path) -> str | None:
+    """Collect a complete versioned ICU trio without assuming an ICU release."""
+
+    # PyPI PySide wheels bundle a self-contained Qt.  Conda Qt places Qt6Core
+    # and its versioned ICU dependencies in Library/bin.
+    if not (source_dir / "Qt6Core.dll").is_file():
+        return None
+
+    versions: dict[str, dict[str, Path]] = {}
+    pattern = re.compile(r"^icu(dt|in|uc)(\d+)\.dll$", re.IGNORECASE)
+    for dll_path in source_dir.glob("icu*.dll"):
+        match = pattern.match(dll_path.name)
+        if match:
+            component, version = match.groups()
+            versions.setdefault(version, {})[component.lower()] = dll_path
+
+    complete_versions = [
+        version
+        for version, components in versions.items()
+        if {"dt", "in", "uc"}.issubset(components)
+    ]
+    if not complete_versions:
+        raise FileNotFoundError(
+            f"Conda Qt was found in {source_dir}, but no complete versioned ICU runtime trio was found"
+        )
+
+    selected_version = max(complete_versions, key=int)
+    for component in ("dt", "in", "uc"):
+        binaries.append((str(versions[selected_version][component]), "."))
+    return selected_version
+
+
+# ICU and other Qt6 transitive dependencies usually live under Library/bin.
+_collect_conda_icu_binaries(qt_bin)
+if (qt_bin / "Qt6Core.dll").is_file():
+    for dll_name in [
+        "freetype.dll",
+        "libpng16.dll",
+        "pcre2-16.dll",
+        "double-conversion.dll",
+        "zstd.dll",
+        "libssl-3-x64.dll",
+        "libcrypto-3-x64.dll",
+        "libgomp-1.dll",
+        "libquadmath-0.dll",
+        "libgcc_s_seh-1.dll",
+        "yaml.dll",
+    ]:
+        _require_binary([qt_bin], dll_name)
 
 # Conda/PyPI numpy wheels often depend on hashed OpenBLAS runtime DLLs under
-# numpy.libs; collect them explicitly because binary dependency discovery is
-# bypassed above.
+# numpy.libs; collect them explicitly in addition to PyInstaller's dependency
+# analysis, then fail if neither a Conda nor wheel BLAS runtime was found.
+numpy_runtime_dlls = []
 if numpy_libs_dir.is_dir():
     for dll_path in numpy_libs_dir.glob("*.dll"):
+        numpy_runtime_dlls.append(dll_path)
         binaries.append((str(dll_path), "."))
+if blas_backend == "none" and not numpy_runtime_dlls:
+    raise FileNotFoundError(
+        "No external NumPy BLAS runtime was found in the Conda environment or numpy.libs"
+    )
 
 seen_binaries = set()
 unique_binaries = []
@@ -192,12 +251,16 @@ binaries = unique_binaries
 
 datas = []
 runtime_icon = spec_dir / "resources" / "icons" / "main_icon.png"
-if runtime_icon.is_file():
-    datas.append((str(runtime_icon), "astroview/resources/icons"))
+if not runtime_icon.is_file():
+    raise FileNotFoundError(f"Required runtime icon is missing: {runtime_icon}")
+datas.append((str(runtime_icon), "astroview/resources/icons"))
 version_file = spec_dir / "VERSION"
-if version_file.is_file():
-    datas.append((str(version_file), "astroview"))
-app_version = version_file.read_text(encoding="utf-8").strip() if version_file.is_file() else "0.0.0"
+if not version_file.is_file():
+    raise FileNotFoundError(f"Required VERSION file is missing: {version_file}")
+datas.append((str(version_file), "astroview"))
+app_version = version_file.read_text(encoding="utf-8").strip()
+if not re.fullmatch(r"\d+\.\d+\.\d+", app_version):
+    raise ValueError(f"VERSION must be an x.y.z numeric version, got {app_version!r}")
 
 
 def _prepare_source_package_alias() -> Path:
@@ -213,6 +276,7 @@ def _prepare_source_package_alias() -> Path:
         "__init__.py",
         "__main__.py",
         "main.py",
+        "metadata.py",
         "diagnostics.py",
         "version.py",
         "VERSION",
@@ -333,7 +397,6 @@ a = Analysis(
 # ---------------------------------------------------------------------------
 # Strip oversized / unnecessary files from the bundle
 # ---------------------------------------------------------------------------
-import re
 
 # Keep only the MKL DLLs that numpy actually loads at runtime; strip the rest.
 _mkl_keep = {
@@ -344,7 +407,7 @@ _mkl_keep = {
 _strip_patterns = [
     re.compile(r"^mkl_", re.I),  # caught first, but _should_strip checks _mkl_keep
     re.compile(r"^icudt\.dll$", re.I),
-    # Duplicate unversioned ICU DLLs (keep only versioned icuXX78.dll variants)
+    # Duplicate unversioned ICU DLLs (the dynamically selected versioned trio is kept)
     re.compile(r"^icu(in|uc)\.dll$", re.I),
     # ICU DLLs not needed by PySide6
     re.compile(r"^icu(io|test|tu)", re.I),

@@ -8,7 +8,7 @@ import re
 from urllib.error import HTTPError
 from urllib.request import ProxyHandler, Request, build_opener
 
-from PySide6.QtCore import QObject, Signal, Slot
+from PySide6.QtCore import QObject, QThread, Signal, Slot
 
 from .. import APP_RELEASES_API_URL, APP_RELEASES_URL, APP_TAGS_API_URL
 from ..diagnostics import log_current_exception
@@ -115,11 +115,25 @@ class UpdateCheckWorker(QObject):
     def __init__(self, current_version: str) -> None:
         super().__init__()
         self.current_version = normalize_version(current_version)
+        self._cancelled = False
+
+    def cancel(self) -> None:
+        """Suppress delivery when the window is closing."""
+
+        self._cancelled = True
+
+    def _is_cancelled(self) -> bool:
+        return self._cancelled or QThread.currentThread().isInterruptionRequested()
 
     @Slot()
     def run(self) -> None:
+        result: UpdateCheckResult | None = None
         try:
+            if self._is_cancelled():
+                return
             latest_version, release_url = fetch_latest_version_info()
+            if self._is_cancelled():
+                return
             if latest_version is None:
                 result = UpdateCheckResult(
                     status="unavailable",
@@ -148,6 +162,8 @@ class UpdateCheckWorker(QObject):
                     ),
                 )
         except Exception as exc:
+            if self._is_cancelled():
+                return
             logger.warning("Update check failed: %s", exc)
             log_current_exception(__name__, "Update check failed")
             result = UpdateCheckResult(
@@ -157,5 +173,7 @@ class UpdateCheckWorker(QObject):
                 release_url=APP_RELEASES_URL,
             )
 
-        self.result_ready.emit(result)
-        self.finished.emit()
+        finally:
+            if not self._is_cancelled() and result is not None:
+                self.result_ready.emit(result)
+            self.finished.emit()

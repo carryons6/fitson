@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param(
     [switch]$SkipTests,
-    [switch]$SkipInstaller
+    [switch]$SkipInstaller,
+    [string]$CondaLockPath
 )
 
 $ErrorActionPreference = "Stop"
@@ -53,7 +54,19 @@ function Resolve-BuildPython {
 
     foreach ($candidate in $candidates | Select-Object -Unique) {
         if ($candidate -and (Test-Path -LiteralPath $candidate)) {
-            return (Resolve-Path -LiteralPath $candidate).Path
+            $resolvedCandidate = (Resolve-Path -LiteralPath $candidate).Path
+            try {
+                & $resolvedCandidate -c "import sys; raise SystemExit(0)" *> $null
+                if ($LASTEXITCODE -eq 0) {
+                    return $resolvedCandidate
+                }
+            }
+            catch {
+                # Windows exposes an inaccessible Microsoft Store python.exe
+                # shim on PATH on some machines. Skip unusable candidates and
+                # continue to an activated/configured environment.
+                continue
+            }
         }
     }
 
@@ -95,6 +108,107 @@ function Resolve-IsccPath {
     }
 
     return $null
+}
+
+function Assert-InnoSetupMajorVersion {
+    param([string]$IsccPath)
+
+    # ISCC /? intentionally exits with code 1 and its executable metadata is
+    # 0.0.0.0. Capture the complete output (avoiding a broken pipeline), then
+    # scan it for the reliable banner while deliberately ignoring that exit
+    # code. stdout/stderr merging does not guarantee which line arrives first.
+    $helpOutput = @(& $IsccPath /? 2>&1)
+    $versionBanner = @(
+        $helpOutput |
+            ForEach-Object { $_.ToString() } |
+            Where-Object { $_ -match '^Inno Setup \d+(?:\s|$)' }
+    ) | Select-Object -First 1
+    if ($versionBanner -notmatch '^Inno Setup 6(?:\s|$)') {
+        $summary = ($helpOutput | Select-Object -First 3 | Out-String).Trim()
+        throw "The installer compiler must be Inno Setup 6.x; no matching version banner was found in '$IsccPath'.`n$summary"
+    }
+}
+
+function Assert-CondaEnvironmentMatchesLock {
+    param(
+        [string]$RepoRoot,
+        [string]$BuildPython,
+        [string]$LockPath
+    )
+
+    if (-not $env:CONDA_PREFIX) {
+        throw "-CondaLockPath requires an activated Conda environment."
+    }
+
+    $resolvedLockPath = if ([System.IO.Path]::IsPathRooted($LockPath)) {
+        $LockPath
+    } else {
+        Join-Path $RepoRoot $LockPath
+    }
+    if (-not (Test-Path -LiteralPath $resolvedLockPath)) {
+        throw "Conda lock file was not found at '$resolvedLockPath'."
+    }
+
+    $activePython = Join-Path $env:CONDA_PREFIX "python.exe"
+    if (-not (Test-Path -LiteralPath $activePython)) {
+        throw "The active Conda environment has no python.exe at '$activePython'."
+    }
+    $resolvedBuildPython = (Resolve-Path -LiteralPath $BuildPython).Path
+    $resolvedActivePython = (Resolve-Path -LiteralPath $activePython).Path
+    if ($resolvedBuildPython -ne $resolvedActivePython) {
+        throw "Build Python '$resolvedBuildPython' is not the locked active-environment Python '$resolvedActivePython'."
+    }
+
+    $lockContent = @(
+        Get-Content -LiteralPath $resolvedLockPath |
+            ForEach-Object { $_.Trim() } |
+            Where-Object { $_ -and -not $_.StartsWith("#") }
+    )
+    if (-not $lockContent -or $lockContent[0] -ne "@EXPLICIT") {
+        throw "Conda lock '$resolvedLockPath' must begin with @EXPLICIT."
+    }
+    $invalidLockLines = @(
+        $lockContent |
+            Select-Object -Skip 1 |
+            Where-Object { $_ -notmatch '^https://conda\.anaconda\.org/conda-forge/(win-64|noarch)/[^/]+#[0-9a-fA-F]{64}$' }
+    )
+    if ($invalidLockLines) {
+        throw "Conda lock '$resolvedLockPath' contains malformed or non-conda-forge package URLs."
+    }
+    $expected = @(
+        $lockContent |
+            Select-Object -Skip 1 |
+            ForEach-Object { $_.ToLowerInvariant() } |
+            Sort-Object
+    )
+    if (-not $expected) {
+        throw "Conda lock '$resolvedLockPath' contains no hash-locked package URLs."
+    }
+
+    $conda = Get-Command conda -ErrorAction SilentlyContinue
+    if (-not $conda) {
+        throw "Could not locate conda to verify the active release environment."
+    }
+    # Invoke by command name so both setup-miniconda's PowerShell function and
+    # a regular conda executable are supported.
+    $actualOutput = & conda list --prefix $env:CONDA_PREFIX --explicit --sha256
+    $condaExitCode = $LASTEXITCODE
+    if ($condaExitCode -ne 0) {
+        throw "conda list failed while verifying the release environment (exit $condaExitCode)."
+    }
+    $actual = @(
+        $actualOutput |
+            ForEach-Object { $_.Trim() } |
+            Where-Object { $_ -match '^https://.+#[0-9a-fA-F]{64}$' } |
+            ForEach-Object { $_.ToLowerInvariant() } |
+            Sort-Object
+    )
+
+    $difference = @(Compare-Object -ReferenceObject $expected -DifferenceObject $actual)
+    if ($difference.Count -ne 0) {
+        $preview = ($difference | Select-Object -First 10 | Out-String).Trim()
+        throw "The active Conda environment does not exactly match '$resolvedLockPath'.`n$preview"
+    }
 }
 
 function Assert-BundledVersion {
@@ -139,9 +253,77 @@ function Assert-BundledExeVersionInfo {
     }
 }
 
+function Invoke-BundledSmokeTest {
+    param([string]$RepoRoot)
+
+    $bundledExePath = Join-Path $RepoRoot "dist\AstroView\AstroView.exe"
+    if (-not (Test-Path -LiteralPath $bundledExePath)) {
+        throw "Bundled executable was not produced at '$bundledExePath'."
+    }
+
+    $reportDir = Join-Path $RepoRoot "build\smoke-test"
+    $reportPath = Join-Path $reportDir "result.txt"
+    New-Item -ItemType Directory -Path $reportDir -Force | Out-Null
+    if (Test-Path -LiteralPath $reportPath) {
+        Remove-Item -LiteralPath $reportPath -Force
+    }
+
+    $previousReportPath = [Environment]::GetEnvironmentVariable("ASTROVIEW_SMOKE_REPORT", "Process")
+    [Environment]::SetEnvironmentVariable("ASTROVIEW_SMOKE_REPORT", $reportPath, "Process")
+    $process = $null
+    try {
+        $process = Start-Process -FilePath $bundledExePath -ArgumentList "--smoke-test" -PassThru -WindowStyle Hidden
+        if (-not $process.WaitForExit(60000)) {
+            $process.Kill()
+            $process.WaitForExit(5000) | Out-Null
+            throw "Bundled executable smoke test timed out after 60 seconds."
+        }
+        $smokeExitCode = $process.ExitCode
+    }
+    finally {
+        [Environment]::SetEnvironmentVariable("ASTROVIEW_SMOKE_REPORT", $previousReportPath, "Process")
+    }
+
+    $report = if (Test-Path -LiteralPath $reportPath) {
+        (Get-Content -LiteralPath $reportPath -Raw).Trim()
+    } else {
+        "<no smoke-test report was produced>"
+    }
+    if ($smokeExitCode -ne 0 -or -not $report.StartsWith("OK ")) {
+        throw "Bundled executable smoke test failed with exit code $smokeExitCode.`n$report"
+    }
+}
+
+function Write-ReleaseChecksums {
+    param([string]$RepoRoot)
+
+    $sourceVersion = (Get-Content -LiteralPath (Join-Path $RepoRoot "VERSION") | Select-Object -First 1).Trim()
+    $installerPath = Join-Path $RepoRoot "installer_output\AstroView_Setup_$sourceVersion.exe"
+    if (-not (Test-Path -LiteralPath $installerPath)) {
+        throw "Expected installer was not produced at '$installerPath'."
+    }
+
+    $checksumPath = Join-Path $RepoRoot "installer_output\SHA256SUMS.txt"
+    $hash = (Get-FileHash -LiteralPath $installerPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    $line = "$hash  $([System.IO.Path]::GetFileName($installerPath))"
+    [System.IO.File]::WriteAllText(
+        $checksumPath,
+        # Release verification runs on Linux. Use a literal LF so GNU
+        # sha256sum never interprets a trailing CR as part of the filename.
+        $line + "`n",
+        [System.Text.Encoding]::ASCII
+    )
+}
+
 $buildPython = Resolve-BuildPython -RepoRoot $repoRoot
 if (-not $buildPython) {
     throw "Could not locate a usable python.exe for the build."
+}
+if ($CondaLockPath) {
+    Assert-CondaEnvironmentMatchesLock `
+        -RepoRoot $repoRoot `
+        -BuildPython $buildPython `
+        -LockPath $CondaLockPath
 }
 
 Push-Location $repoRoot
@@ -160,6 +342,7 @@ try {
 
     Assert-BundledVersion -RepoRoot $repoRoot
     Assert-BundledExeVersionInfo -RepoRoot $repoRoot
+    Invoke-BundledSmokeTest -RepoRoot $repoRoot
 
     if (-not $SkipInstaller) {
         $iscc = Resolve-IsccPath
@@ -167,10 +350,12 @@ try {
             throw "Inno Setup compiler 'iscc' was not found on PATH."
         }
 
+        Assert-InnoSetupMajorVersion -IsccPath $iscc
         & $iscc installer.iss
         if ($LASTEXITCODE -ne 0) {
             throw "Installer build failed."
         }
+        Write-ReleaseChecksums -RepoRoot $repoRoot
     }
 }
 finally {
