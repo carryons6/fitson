@@ -1,23 +1,83 @@
 """Core domain and service modules for AstroView."""
 
 from .contracts import OpenFileRequest, PixelSample, ROISelection, RenderRequest, RenderResult, ZoomState
+from .catalog_service import (
+    CatalogQuery,
+    CatalogQueryCancelled,
+    CatalogSource,
+    query_gaia,
+)
+from .ds9_regions import (
+    DEFAULT_DS9_REGION_LIMITS,
+    DS9Attribute,
+    DS9Diagnostic,
+    DS9Region,
+    DS9RegionDocument,
+    DS9RegionError,
+    DS9RegionIOError,
+    DS9RegionLimitError,
+    DS9RegionLimits,
+    DS9RegionSyntaxError,
+    parse_ds9_regions,
+    read_ds9_region_file,
+    serialize_ds9_regions,
+    write_ds9_region_file,
+)
 from .fits_data import FITSData, HDUInfo
 from .fits_service import FITSService
+from .image_comparison import (
+    ComparisonAlignment,
+    ComparisonFailureCode,
+    ComparisonMode,
+    ImageComparisonResult,
+    compare_fits_images,
+)
+from .measurement_service import ApertureMeasurement, MeasurementService, ROIStatistics
 from .sep_service import SEPParameters, SEPService
 from .source_catalog import SourceCatalog, SourceRecord
+from .wcs_grid import WCSGrid, WCSGridLine, build_wcs_grid
 
 __all__ = [
     "FITSData",
     "FITSService",
     "HDUInfo",
+    "CatalogQuery",
+    "CatalogQueryCancelled",
+    "CatalogSource",
+    "ComparisonAlignment",
+    "ComparisonFailureCode",
+    "ComparisonMode",
+    "ImageComparisonResult",
+    "ApertureMeasurement",
+    "MeasurementService",
     "OpenFileRequest",
     "PixelSample",
     "ROISelection",
     "RenderRequest",
     "RenderResult",
+    "ROIStatistics",
     "SEPParameters",
     "SEPService",
     "SourceCatalog",
     "SourceRecord",
     "ZoomState",
+    "WCSGrid",
+    "WCSGridLine",
+    "DEFAULT_DS9_REGION_LIMITS",
+    "DS9Attribute",
+    "DS9Diagnostic",
+    "DS9Region",
+    "DS9RegionDocument",
+    "DS9RegionError",
+    "DS9RegionIOError",
+    "DS9RegionLimitError",
+    "DS9RegionLimits",
+    "DS9RegionSyntaxError",
+    "parse_ds9_regions",
+    "read_ds9_region_file",
+    "serialize_ds9_regions",
+    "write_ds9_region_file",
+    "compare_fits_images",
+    "build_wcs_grid",
+    "query_gaia",
 ]

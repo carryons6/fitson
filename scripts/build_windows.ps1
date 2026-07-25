@@ -264,6 +264,62 @@ function Assert-BundledExeVersionInfo {
     }
 }
 
+function Invoke-BundledSmokeAttempt {
+    param(
+        [string]$BundledExePath,
+        [string]$ReportPath,
+        [string]$AttemptName,
+        [int]$TimeoutMilliseconds
+    )
+
+    if (Test-Path -LiteralPath $ReportPath) {
+        Remove-Item -LiteralPath $ReportPath -Force
+    }
+
+    $process = Start-Process `
+        -FilePath $BundledExePath `
+        -ArgumentList "--smoke-test" `
+        -PassThru `
+        -WindowStyle Hidden
+    if (-not $process.WaitForExit($TimeoutMilliseconds)) {
+        # A newly built, unsigned executable can spend several minutes in the
+        # host's first-run endpoint scan. Terminate the exact smoke-test tree
+        # if even the bounded cold-start allowance is exhausted.
+        try {
+            $process.Kill($true)
+        }
+        catch {
+            # Windows PowerShell 5.1 runs on .NET Framework, whose Process
+            # type lacks Kill(bool). Use taskkill there so descendants are
+            # not left holding files in the frozen distribution.
+            $taskkillPath = Join-Path $env:SystemRoot "System32\taskkill.exe"
+            if (Test-Path -LiteralPath $taskkillPath) {
+                & $taskkillPath /PID $process.Id /T /F 2>$null | Out-Null
+            }
+            if (-not $process.HasExited) {
+                $process.Kill()
+            }
+        }
+        $process.WaitForExit(5000) | Out-Null
+        $report = if (Test-Path -LiteralPath $ReportPath) {
+            (Get-Content -LiteralPath $ReportPath -Raw).Trim()
+        } else {
+            "<no smoke-test report was produced>"
+        }
+        $timeoutSeconds = [math]::Round($TimeoutMilliseconds / 1000)
+        throw "Bundled executable $AttemptName smoke test timed out after $timeoutSeconds seconds.`n$report"
+    }
+
+    $report = if (Test-Path -LiteralPath $ReportPath) {
+        (Get-Content -LiteralPath $ReportPath -Raw).Trim()
+    } else {
+        "<no smoke-test report was produced>"
+    }
+    if ($process.ExitCode -ne 0 -or -not $report.StartsWith("OK ")) {
+        throw "Bundled executable $AttemptName smoke test failed with exit code $($process.ExitCode).`n$report"
+    }
+}
+
 function Invoke-BundledSmokeTest {
     param([string]$RepoRoot)
 
@@ -275,33 +331,25 @@ function Invoke-BundledSmokeTest {
     $reportDir = Join-Path $RepoRoot "build\smoke-test"
     $reportPath = Join-Path $reportDir "result.txt"
     New-Item -ItemType Directory -Path $reportDir -Force | Out-Null
-    if (Test-Path -LiteralPath $reportPath) {
-        Remove-Item -LiteralPath $reportPath -Force
-    }
 
     $previousReportPath = [Environment]::GetEnvironmentVariable("ASTROVIEW_SMOKE_REPORT", "Process")
     [Environment]::SetEnvironmentVariable("ASTROVIEW_SMOKE_REPORT", $reportPath, "Process")
-    $process = $null
     try {
-        $process = Start-Process -FilePath $bundledExePath -ArgumentList "--smoke-test" -PassThru -WindowStyle Hidden
-        if (-not $process.WaitForExit(60000)) {
-            $process.Kill()
-            $process.WaitForExit(5000) | Out-Null
-            throw "Bundled executable smoke test timed out after 60 seconds."
-        }
-        $smokeExitCode = $process.ExitCode
+        # The first launch covers cold endpoint scanning; the second proves
+        # that normal warmed startup still stays within the strict budget.
+        Invoke-BundledSmokeAttempt `
+            -BundledExePath $bundledExePath `
+            -ReportPath $reportPath `
+            -AttemptName "cold-start" `
+            -TimeoutMilliseconds 300000
+        Invoke-BundledSmokeAttempt `
+            -BundledExePath $bundledExePath `
+            -ReportPath $reportPath `
+            -AttemptName "warm-start" `
+            -TimeoutMilliseconds 60000
     }
     finally {
         [Environment]::SetEnvironmentVariable("ASTROVIEW_SMOKE_REPORT", $previousReportPath, "Process")
-    }
-
-    $report = if (Test-Path -LiteralPath $reportPath) {
-        (Get-Content -LiteralPath $reportPath -Raw).Trim()
-    } else {
-        "<no smoke-test report was produced>"
-    }
-    if ($smokeExitCode -ne 0 -or -not $report.StartsWith("OK ")) {
-        throw "Bundled executable smoke test failed with exit code $smokeExitCode.`n$report"
     }
 }
 

@@ -4,12 +4,24 @@ import math
 from typing import Any
 
 from PySide6.QtCore import QPoint, QPointF, QRect, QRectF, Qt, Signal
-from PySide6.QtGui import QBrush, QColor, QFont, QImage, QMouseEvent, QPainter, QPen, QPixmap, QTransform
+from PySide6.QtGui import (
+    QBrush,
+    QColor,
+    QFont,
+    QImage,
+    QMouseEvent,
+    QPainter,
+    QPainterPath,
+    QPen,
+    QPixmap,
+    QTransform,
+)
 from PySide6.QtWidgets import (
     QFrame,
     QGraphicsEllipseItem,
     QGraphicsItem,
     QGraphicsPixmapItem,
+    QGraphicsPathItem,
     QGraphicsRectItem,
     QGraphicsScene,
     QGraphicsTextItem,
@@ -33,11 +45,16 @@ class ImageCanvas(QGraphicsView):
     """
 
     mouse_moved = Signal(float, float)
+    pixel_clicked = Signal(float, float)
     roi_selected = Signal(int, int, int, int)
     source_double_clicked = Signal(int)
+    catalog_source_double_clicked = Signal(int)
+    region_double_clicked = Signal(int)
     zoom_changed = Signal(float)
     files_dropped = Signal(list)
     _SOURCE_INDEX_DATA_KEY = 1
+    _CATALOG_INDEX_DATA_KEY = 2
+    _REGION_INDEX_DATA_KEY = 3
 
     def __init__(self, parent: Any | None = None) -> None:
         super().__init__(parent)
@@ -55,6 +72,14 @@ class ImageCanvas(QGraphicsView):
         self._drag_origin: QPoint | None = None
         self._marker_items: list[QGraphicsEllipseItem] = []
         self._source_items: list[QGraphicsEllipseItem] = []
+        self._catalog_items: list[QGraphicsPathItem] = []
+        self._wcs_grid_items: list[QGraphicsItem] = []
+        self._measurement_roi_item: QGraphicsRectItem | None = None
+        self._aperture_items: list[QGraphicsEllipseItem] = []
+        self._region_path_items: list[QGraphicsPathItem] = []
+        self._region_label_items: list[QGraphicsTextItem] = []
+        self._region_items_by_index: dict[int, list[QGraphicsPathItem]] = {}
+        self._region_base_pens: dict[int, QPen] = {}
         self._roi_color = QColor(255, 0, 0)
         self._roi_line_width = 5
         self._source_pen = QPen(QColor(255, 0, 0))
@@ -437,6 +462,262 @@ class ImageCanvas(QGraphicsView):
             self._scene.removeItem(item)
         self._marker_items.clear()
 
+    def set_wcs_grid(self, grid: Any, transform=None) -> None:
+        """Draw a projected WCS grid supplied in original-image coordinates."""
+
+        self.clear_wcs_grid()
+        if grid is None:
+            return
+        point_transform = transform or (lambda x, y: (x, y))
+        pen = QPen(QColor(74, 205, 255, 205))
+        pen.setWidth(1)
+        pen.setCosmetic(True)
+        pen.setStyle(Qt.PenStyle.DashLine)
+
+        for line in getattr(grid, "lines", ()):
+            label_position: tuple[float, float] | None = None
+            for segment in getattr(line, "segments", ()):
+                if len(segment) < 2:
+                    continue
+                path = QPainterPath()
+                x0, y0 = point_transform(*segment[0])
+                path.moveTo(float(x0), float(y0))
+                for point in segment[1:]:
+                    x, y = point_transform(*point)
+                    path.lineTo(float(x), float(y))
+                item = QGraphicsPathItem(path)
+                item.setPen(pen)
+                item.setZValue(1.0)
+                self._scene.addItem(item)
+                self._wcs_grid_items.append(item)
+                if label_position is None:
+                    midpoint = segment[len(segment) // 2]
+                    label_position = point_transform(*midpoint)
+
+            if label_position is not None:
+                label = QGraphicsTextItem(str(getattr(line, "label", "")))
+                label.setDefaultTextColor(QColor(144, 226, 255))
+                label.setFont(QFont("Segoe UI", 8))
+                label.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations, True)
+                label.setPos(float(label_position[0]) + 3.0, float(label_position[1]) + 3.0)
+                label.setZValue(1.1)
+                self._scene.addItem(label)
+                self._wcs_grid_items.append(label)
+
+    def clear_wcs_grid(self) -> None:
+        for item in self._wcs_grid_items:
+            self._scene.removeItem(item)
+        self._wcs_grid_items.clear()
+
+    def set_catalog_sources(
+        self,
+        sources: list[Any],
+        pixel_coords: list[tuple[float, float]],
+        *,
+        transform=None,
+    ) -> None:
+        """Draw bounded Gaia catalog markers at projected original-image pixels."""
+
+        self.clear_catalog_sources()
+        point_transform = transform or (lambda x, y: (x, y))
+        base_color = QColor(50, 255, 170)
+        for index, (source, point) in enumerate(zip(sources, pixel_coords)):
+            x, y = point_transform(float(point[0]), float(point[1]))
+            magnitude = getattr(source, "g_mag", None)
+            radius = 6.0
+            if magnitude is not None and math.isfinite(float(magnitude)):
+                radius = max(3.0, min(8.0, 8.0 - 0.22 * (float(magnitude) - 8.0)))
+            path = QPainterPath()
+            path.addEllipse(QRectF(-radius, -radius, radius * 2.0, radius * 2.0))
+            path.moveTo(-radius - 3.0, 0.0)
+            path.lineTo(radius + 3.0, 0.0)
+            path.moveTo(0.0, -radius - 3.0)
+            path.lineTo(0.0, radius + 3.0)
+            item = QGraphicsPathItem(path)
+            pen = QPen(base_color)
+            pen.setWidth(1)
+            pen.setCosmetic(True)
+            item.setPen(pen)
+            item.setPos(float(x), float(y))
+            item.setZValue(3.0)
+            item.setData(self._CATALOG_INDEX_DATA_KEY, index)
+            source_id = str(getattr(source, "source_id", index + 1))
+            tooltip = f"Gaia DR3 {source_id}"
+            if magnitude is not None:
+                tooltip += f"\nG = {float(magnitude):.3f} mag"
+            item.setToolTip(tooltip)
+            self._scene.addItem(item)
+            self._catalog_items.append(item)
+
+    def clear_catalog_sources(self) -> None:
+        for item in self._catalog_items:
+            self._scene.removeItem(item)
+        self._catalog_items.clear()
+
+    def set_measurement_roi(self, selection: ROISelection, *, transform=None) -> None:
+        """Persist the most recently measured rectangular ROI on the canvas."""
+
+        self.clear_measurement_roi()
+        point_transform = transform or (lambda x, y: (x, y))
+        corners = (
+            point_transform(selection.x0, selection.y0),
+            point_transform(selection.x0 + selection.width, selection.y0 + selection.height),
+        )
+        x0, x1 = sorted((float(corners[0][0]), float(corners[1][0])))
+        y0, y1 = sorted((float(corners[0][1]), float(corners[1][1])))
+        item = QGraphicsRectItem(QRectF(x0, y0, x1 - x0, y1 - y0))
+        pen = QPen(QColor(255, 196, 64))
+        pen.setWidth(2)
+        pen.setCosmetic(True)
+        pen.setStyle(Qt.PenStyle.DashLine)
+        item.setPen(pen)
+        item.setZValue(2.0)
+        self._scene.addItem(item)
+        self._measurement_roi_item = item
+
+    def clear_measurement_roi(self) -> None:
+        if self._measurement_roi_item is not None:
+            self._scene.removeItem(self._measurement_roi_item)
+            self._measurement_roi_item = None
+
+    def set_aperture_overlay(
+        self,
+        center_x: float,
+        center_y: float,
+        radii: tuple[float, float, float],
+        *,
+        transform=None,
+    ) -> None:
+        """Draw a circular source aperture plus the two background-annulus edges."""
+
+        self.clear_aperture_overlay()
+        point_transform = transform or (lambda x, y: (x, y))
+        x, y = point_transform(float(center_x), float(center_y))
+        colors = (QColor(255, 225, 80), QColor(80, 220, 255), QColor(80, 220, 255))
+        for radius, color in zip(radii, colors):
+            normalized_radius = float(radius)
+            if not math.isfinite(normalized_radius) or normalized_radius <= 0:
+                continue
+            item = QGraphicsEllipseItem(
+                float(x) - normalized_radius,
+                float(y) - normalized_radius,
+                normalized_radius * 2.0,
+                normalized_radius * 2.0,
+            )
+            pen = QPen(color)
+            pen.setWidth(2 if not self._aperture_items else 1)
+            pen.setCosmetic(True)
+            pen.setStyle(Qt.PenStyle.DashLine if self._aperture_items else Qt.PenStyle.SolidLine)
+            item.setPen(pen)
+            item.setZValue(2.2)
+            self._scene.addItem(item)
+            self._aperture_items.append(item)
+
+    def clear_aperture_overlay(self) -> None:
+        for item in self._aperture_items:
+            self._scene.removeItem(item)
+        self._aperture_items.clear()
+
+    def set_region_overlays(self, overlays: list[dict[str, Any]]) -> None:
+        """Draw already-projected, bounded DS9 geometries in display coordinates."""
+
+        self.clear_region_overlays()
+        for overlay in overlays:
+            try:
+                index = int(overlay["index"])
+                points = [(float(x), float(y)) for x, y in overlay["points"]]
+            except (KeyError, TypeError, ValueError, OverflowError):
+                continue
+            if not points or any(not (math.isfinite(x) and math.isfinite(y)) for x, y in points):
+                continue
+            is_point = bool(overlay.get("point", False))
+            closed = bool(overlay.get("closed", not is_point))
+            path = QPainterPath()
+            if is_point:
+                x, y = points[0]
+                radius = 6.0
+                path.moveTo(x - radius, y)
+                path.lineTo(x + radius, y)
+                path.moveTo(x, y - radius)
+                path.lineTo(x, y + radius)
+                path.addEllipse(QRectF(x - 2.0, y - 2.0, 4.0, 4.0))
+            else:
+                path.moveTo(*points[0])
+                for point in points[1:]:
+                    path.lineTo(*point)
+                if closed:
+                    path.closeSubpath()
+
+            color = QColor(str(overlay.get("color", "green")))
+            if not color.isValid():
+                color = QColor(80, 255, 120)
+            include = bool(overlay.get("include", True))
+            width = max(1, min(int(overlay.get("width", 1)), 10))
+            pen = QPen(color)
+            pen.setWidth(width)
+            pen.setCosmetic(True)
+            pen.setStyle(Qt.PenStyle.SolidLine if include else Qt.PenStyle.DashLine)
+            item = QGraphicsPathItem(path)
+            item.setPen(pen)
+            item.setZValue(2.5)
+            item.setData(self._REGION_INDEX_DATA_KEY, index)
+            tooltip = str(overlay.get("tooltip", "DS9 Region"))
+            item.setToolTip(tooltip)
+            self._scene.addItem(item)
+            self._region_path_items.append(item)
+            self._region_items_by_index.setdefault(index, []).append(item)
+            self._region_base_pens[id(item)] = QPen(pen)
+
+            label_text = str(overlay.get("label", "")).strip()
+            if label_text:
+                label = QGraphicsTextItem(label_text)
+                label.setDefaultTextColor(color)
+                label.setFont(QFont("Segoe UI", 8))
+                label.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations, True)
+                bounds = path.boundingRect()
+                label.setPos(bounds.left() + 3.0, bounds.top() + 3.0)
+                label.setZValue(2.6)
+                label.setToolTip(tooltip)
+                label.setData(self._REGION_INDEX_DATA_KEY, index)
+                self._scene.addItem(label)
+                self._region_label_items.append(label)
+
+    def clear_region_overlays(self) -> None:
+        for item in self._region_path_items:
+            self._scene.removeItem(item)
+        for item in self._region_label_items:
+            self._scene.removeItem(item)
+        self._region_path_items.clear()
+        self._region_label_items.clear()
+        self._region_items_by_index.clear()
+        self._region_base_pens.clear()
+
+    def highlight_region(self, index: int | None) -> None:
+        for region_index, items in self._region_items_by_index.items():
+            for item in items:
+                base = self._region_base_pens.get(id(item), item.pen())
+                pen = QPen(base)
+                if index is not None and region_index == int(index):
+                    pen.setColor(QColor(255, 230, 80))
+                    pen.setWidth(min(12, max(2, base.width() + 2)))
+                item.setPen(pen)
+
+    def center_on_region(self, index: int) -> None:
+        items = self._region_items_by_index.get(int(index), [])
+        if items:
+            self.centerOn(items[0].sceneBoundingRect().center())
+
+    def highlight_catalog_source(self, index: int | None) -> None:
+        for item_index, item in enumerate(self._catalog_items):
+            pen = QPen(QColor(255, 230, 80) if item_index == index else QColor(50, 255, 170))
+            pen.setWidth(2 if item_index == index else 1)
+            pen.setCosmetic(True)
+            item.setPen(pen)
+
+    def center_on_catalog_source(self, index: int) -> None:
+        if 0 <= index < len(self._catalog_items):
+            self.centerOn(self._catalog_items[index].scenePos())
+
     def set_roi_color(self, color: QColor | None) -> None:
         """Update the right-drag ROI rubber-band color."""
 
@@ -553,6 +834,20 @@ class ImageCanvas(QGraphicsView):
                 return int(source_index)
         return None
 
+    def _catalog_index_at_view_pos(self, view_pos: QPoint) -> int | None:
+        for item in self.items(view_pos):
+            catalog_index = item.data(self._CATALOG_INDEX_DATA_KEY)
+            if catalog_index is not None:
+                return int(catalog_index)
+        return None
+
+    def _region_index_at_view_pos(self, view_pos: QPoint) -> int | None:
+        for item in self.items(view_pos):
+            region_index = item.data(self._REGION_INDEX_DATA_KEY)
+            if region_index is not None:
+                return int(region_index)
+        return None
+
     def mousePressEvent(self, event: QMouseEvent) -> None:
         """Start rubber-band ROI selection on right-click."""
 
@@ -561,6 +856,9 @@ class ImageCanvas(QGraphicsView):
             self._rubber_band.setGeometry(QRect(self._drag_origin, self._drag_origin))
             self._rubber_band.show()
         else:
+            if event.button() == Qt.MouseButton.LeftButton and self.current_image is not None:
+                scene_pos = self._scene_pos_from_view_pos(event.position())
+                self.pixel_clicked.emit(scene_pos.x(), scene_pos.y())
             super().mousePressEvent(event)
 
     def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:
@@ -570,6 +868,16 @@ class ImageCanvas(QGraphicsView):
             source_index = self._source_index_at_view_pos(event.position().toPoint())
             if source_index is not None:
                 self.source_double_clicked.emit(source_index)
+                event.accept()
+                return
+            catalog_index = self._catalog_index_at_view_pos(event.position().toPoint())
+            if catalog_index is not None:
+                self.catalog_source_double_clicked.emit(catalog_index)
+                event.accept()
+                return
+            region_index = self._region_index_at_view_pos(event.position().toPoint())
+            if region_index is not None:
+                self.region_double_clicked.emit(region_index)
                 event.accept()
                 return
         super().mouseDoubleClickEvent(event)

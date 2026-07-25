@@ -82,6 +82,25 @@ class TestI18n(unittest.TestCase):
         finally:
             window.deleteLater()
 
+    def test_v18_workbenches_are_localized(self) -> None:
+        install_translator(self._app, "zh_CN")
+        window = MainWindow()
+        try:
+            window.initialize(apply_startup_request=False)
+            self.assertEqual(window.measurement_dock.windowTitle(), "测量工作台")
+            self.assertEqual(window.comparison_dock.windowTitle(), "图像比较")
+            self.assertEqual(window.catalog_overlay_dock.windowTitle(), "WCS 与星表")
+            self.assertEqual(window.ds9_region_dock.windowTitle(), "DS9 区域")
+            self.assertEqual(window.catalog_overlay_dock.query_button.text(), "查询 Gaia")
+            self.assertEqual(window.ds9_region_dock.capture_roi_button.text(), "添加当前 ROI")
+            self.assertEqual(
+                window.tr("Exit image comparison before selecting a ROI."),
+                "请先退出图像比较，再选择 ROI。",
+            )
+        finally:
+            window.close()
+            window.deleteLater()
+
 
 if __name__ == "__main__":
     unittest.main()

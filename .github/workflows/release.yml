@@ -91,7 +91,9 @@ jobs:
             RELEASE_NOTES.md
 
   publish-release:
-    if: github.ref_type == 'tag'
+    # Manual dispatches are preflight builds only, even when a tag is selected
+    # as the ref. Publishing requires the deliberate push of a release tag.
+    if: github.event_name == 'push' && github.ref_type == 'tag'
     needs: windows-build
     runs-on: ubuntu-latest
     permissions:

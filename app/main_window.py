@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import logging
+import math
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +26,7 @@ from PySide6.QtWidgets import (
     QDockWidget,
     QFileDialog,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QMainWindow,
     QMessageBox,
@@ -36,8 +38,13 @@ from PySide6.QtWidgets import (
 
 from .. import APP_NAME, APP_RELEASES_URL, __version__
 from ..core import FITSService, OpenFileRequest, PixelSample, ROISelection, SEPService, SourceCatalog
+from ..core.catalog_service import CatalogQuery, CatalogSource
 from ..core.fits_data import open_fits_container
+from ..core.measurement_service import MeasurementService
+from ..core.image_comparison import ComparisonMode
+from ..core.ds9_regions import DS9Attribute, DS9Region, DS9RegionDocument
 from ..core.sep_service import SEPParameters
+from ..core.wcs_grid import WCSGrid, build_wcs_grid
 from ..diagnostics import log_current_exception
 from .contracts import (
     CanvasImageState,
@@ -53,7 +60,13 @@ from .contracts import (
     ViewFeedbackState,
 )
 from .catalog_field_dialog import CatalogFieldDialog
+from .catalog_overlay_dock import CatalogOverlayDock
+from .catalog_query_worker import GaiaQueryWorker
 from .canvas import ImageCanvas
+from .comparison_dock import ComparisonDock
+from .comparison_worker import ComparisonDisplayResult, ComparisonWorker
+from .ds9_overlay import build_ds9_overlays
+from .ds9_region_dock import DS9RegionDock
 from .file_load_worker import FITSLoadWorker
 from .frame_player_dock import FramePlayerDock
 from .frame_bkg_worker import FrameBkgWorker
@@ -63,6 +76,7 @@ from .header_parser import parse_header_text
 from .histogram_dock import HistogramDock
 from .i18n import available_locales, current_language, language_display_name, load_preferred_language, save_preferred_language
 from .marker_dock import MarkerDock
+from .measurement_dock import MeasurementDock
 from .sep_extract_worker import SEPExtractWorker
 from .sep_panel import SEPParamsPanel
 from .source_table import SourceTableDock
@@ -194,6 +208,98 @@ class _UpdateCheckSignalRelay(QObject):
         )
 
 
+class _CatalogQuerySignalRelay(QObject):
+    """Deliver Gaia query results and finalization on the GUI thread."""
+
+    def __init__(
+        self,
+        window: Any,
+        request_id: int,
+        frame_index: int,
+        thread: QThread,
+        worker: GaiaQueryWorker,
+    ) -> None:
+        super().__init__(window)
+        self._window = window
+        self._request_id = request_id
+        self._frame_index = frame_index
+        self._thread = thread
+        self._worker = worker
+
+    @Slot(object)
+    def handle_result(self, sources: list[CatalogSource]) -> None:
+        self._window._handle_gaia_result_for_request(
+            self._request_id,
+            self._frame_index,
+            self._worker,
+            sources,
+        )
+
+    @Slot(str)
+    def handle_error(self, detail: str) -> None:
+        self._window._handle_gaia_error_for_request(
+            self._request_id,
+            self._frame_index,
+            self._worker,
+            detail,
+        )
+
+    @Slot()
+    def handle_thread_finished(self) -> None:
+        self._window._clear_gaia_query_refs(
+            self._request_id,
+            self._thread,
+            self._worker,
+        )
+
+
+class _ComparisonSignalRelay(QObject):
+    """Deliver one comparison job back to the owning GUI thread."""
+
+    def __init__(
+        self,
+        window: Any,
+        request_id: int,
+        left_index: int,
+        right_index: int,
+        thread: QThread,
+        worker: ComparisonWorker,
+    ) -> None:
+        super().__init__(window)
+        self._window = window
+        self._request_id = request_id
+        self._left_index = left_index
+        self._right_index = right_index
+        self._thread = thread
+        self._worker = worker
+
+    @Slot(object)
+    def handle_result(self, display: ComparisonDisplayResult) -> None:
+        self._window._handle_comparison_result_for_request(
+            self._request_id,
+            self._left_index,
+            self._right_index,
+            self._worker,
+            display,
+        )
+
+    @Slot(str)
+    def handle_error(self, detail: str) -> None:
+        self._window._handle_comparison_error_for_request(
+            self._request_id,
+            self._worker,
+            detail,
+        )
+
+    @Slot()
+    def handle_thread_finished(self) -> None:
+        self._window._clear_comparison_worker_refs(
+            self._request_id,
+            self._thread,
+            self._worker,
+        )
+
+
 class _SEPThreadFinishRelay(QObject):
     """Run SEP thread-finalization bookkeeping on the GUI thread."""
 
@@ -284,7 +390,7 @@ class MainWindow(QMainWindow):
     BKG_PREWARM_QUEUE_LIMIT = 8
     UPDATE_CHECK_THREAD_WAIT_MS = 6_000
     THREAD_JOIN_WAIT_MS = 6_000
-    WORKSPACE_LAYOUT_VERSION = 4
+    WORKSPACE_LAYOUT_VERSION = 5
     SEP_ESTIMATE_THRESHOLD_SIGMA = 15.0
     SEP_LARGE_COUNT_WARNING = 5000
     SEP_DENSE_FIELD_PER_MPX = 150
@@ -307,6 +413,10 @@ class MainWindow(QMainWindow):
         self.sep_panel: SEPParamsPanel | None = None
         self.sep_panel_dock: QDockWidget | None = None
         self.marker_dock: MarkerDock | None = None
+        self.measurement_dock: MeasurementDock | None = None
+        self.catalog_overlay_dock: CatalogOverlayDock | None = None
+        self.comparison_dock: ComparisonDock | None = None
+        self.ds9_region_dock: DS9RegionDock | None = None
         self.frame_player_dock: FramePlayerDock | None = None
         self.histogram_dock: HistogramDock | None = None
         self.header_dialog: HeaderDialog | None = None
@@ -355,6 +465,7 @@ class MainWindow(QMainWindow):
 
         self.fits_service = fits_service or FITSService()
         self.sep_service = sep_service or SEPService()
+        self.measurement_service = MeasurementService()
         self.current_catalog: SourceCatalog | None = None
         self._settings = QSettings("AstroView", "AstroView")
         self._preview_profile_name = self.DEFAULT_PREVIEW_PROFILE
@@ -441,6 +552,29 @@ class MainWindow(QMainWindow):
         self._latest_error_detail: str = ""
         self._catalog_results_stale: bool = False
         self._pending_session_restore_frame_index: int | None = None
+        self._current_wcs_grid: WCSGrid | None = None
+        self._current_wcs_center: tuple[float, float] | None = None
+        self._current_wcs_radius_deg: float = 0.0
+        self._wcs_grid_cache: dict[tuple[int, int, int], WCSGrid] = {}
+        self._gaia_sources: list[CatalogSource] = []
+        self._gaia_pixel_coords: list[tuple[float, float]] = []
+        self._last_measurement_roi: ROISelection | None = None
+        self._last_aperture_measurement: Any = None
+        self._comparison_left_index: int | None = None
+        self._comparison_right_index: int | None = None
+        self._comparison_active: bool = False
+        self._comparison_display_images: tuple[QImage | None, QImage | None] = (None, None)
+        self._comparison_original_view_state: dict[str, float | str] | None = None
+        self._comparison_thread: QThread | None = None
+        self._comparison_worker: ComparisonWorker | None = None
+        self._comparison_request_id: int = 0
+        self._active_comparison_request_id: int | None = None
+        self._comparison_results_enabled: bool = False
+        self._gaia_query_thread: QThread | None = None
+        self._gaia_query_worker: GaiaQueryWorker | None = None
+        self._gaia_query_request_id: int = 0
+        self._active_gaia_query_request_id: int | None = None
+        self._gaia_results_enabled: bool = False
 
     def initialize(self, *, apply_startup_request: bool = True) -> None:
         """High-level bootstrap entry for the window skeleton.
@@ -622,6 +756,35 @@ class MainWindow(QMainWindow):
             | Qt.DockWidgetArea.RightDockWidgetArea
         )
 
+        self.measurement_dock = MeasurementDock(self)
+        self.measurement_dock.setMinimumWidth(320)
+        self.measurement_dock.setAllowedAreas(
+            Qt.DockWidgetArea.LeftDockWidgetArea
+            | Qt.DockWidgetArea.RightDockWidgetArea
+        )
+
+        self.comparison_dock = ComparisonDock(self)
+        self.comparison_dock.setMinimumWidth(320)
+        self.comparison_dock.setAllowedAreas(
+            Qt.DockWidgetArea.LeftDockWidgetArea
+            | Qt.DockWidgetArea.RightDockWidgetArea
+        )
+
+        self.ds9_region_dock = DS9RegionDock(self)
+        self.ds9_region_dock.setMinimumWidth(340)
+        self.ds9_region_dock.setAllowedAreas(
+            Qt.DockWidgetArea.LeftDockWidgetArea
+            | Qt.DockWidgetArea.RightDockWidgetArea
+            | Qt.DockWidgetArea.BottomDockWidgetArea
+        )
+
+        self.catalog_overlay_dock = CatalogOverlayDock(self)
+        self.catalog_overlay_dock.setMinimumWidth(320)
+        self.catalog_overlay_dock.setAllowedAreas(
+            Qt.DockWidgetArea.LeftDockWidgetArea
+            | Qt.DockWidgetArea.RightDockWidgetArea
+        )
+
         self.histogram_dock = HistogramDock(self)
         self.histogram_dock.setMinimumWidth(280)
         self.histogram_dock.setAllowedAreas(
@@ -639,6 +802,10 @@ class MainWindow(QMainWindow):
             self.source_table_dock,
             self.sep_panel_dock,
             self.marker_dock,
+            self.measurement_dock,
+            self.comparison_dock,
+            self.ds9_region_dock,
+            self.catalog_overlay_dock,
             self.histogram_dock,
             self.frame_player_dock,
         ):
@@ -650,6 +817,10 @@ class MainWindow(QMainWindow):
         self.source_table_dock.hide()
         self.sep_panel_dock.hide()
         self.marker_dock.hide()
+        self.measurement_dock.hide()
+        self.comparison_dock.hide()
+        self.ds9_region_dock.hide()
+        self.catalog_overlay_dock.hide()
         self.histogram_dock.hide()
         self.frame_player_dock.hide()
 
@@ -662,6 +833,10 @@ class MainWindow(QMainWindow):
                 self.source_table_dock,
                 self.sep_panel_dock,
                 self.marker_dock,
+                self.measurement_dock,
+                self.comparison_dock,
+                self.ds9_region_dock,
+                self.catalog_overlay_dock,
                 self.histogram_dock,
                 self.frame_player_dock,
             )
@@ -690,6 +865,22 @@ class MainWindow(QMainWindow):
             self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.marker_dock)
             if self.source_table_dock is not None:
                 self.tabifyDockWidget(self.source_table_dock, self.marker_dock)
+        if self.measurement_dock is not None:
+            self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.measurement_dock)
+            if self.source_table_dock is not None:
+                self.tabifyDockWidget(self.source_table_dock, self.measurement_dock)
+        if self.comparison_dock is not None:
+            self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.comparison_dock)
+            if self.source_table_dock is not None:
+                self.tabifyDockWidget(self.source_table_dock, self.comparison_dock)
+        if self.ds9_region_dock is not None:
+            self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.ds9_region_dock)
+            if self.source_table_dock is not None:
+                self.tabifyDockWidget(self.source_table_dock, self.ds9_region_dock)
+        if self.catalog_overlay_dock is not None:
+            self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.catalog_overlay_dock)
+            if self.source_table_dock is not None:
+                self.tabifyDockWidget(self.source_table_dock, self.catalog_overlay_dock)
         if self.frame_player_dock is not None:
             self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self.frame_player_dock)
 
@@ -863,6 +1054,14 @@ class MainWindow(QMainWindow):
             self.menu_view.addAction(self.sep_panel_dock.toggleViewAction())
         if self.marker_dock is not None:
             self.menu_view.addAction(self.marker_dock.toggleViewAction())
+        if self.measurement_dock is not None:
+            self.menu_view.addAction(self.measurement_dock.toggleViewAction())
+        if self.comparison_dock is not None:
+            self.menu_view.addAction(self.comparison_dock.toggleViewAction())
+        if self.ds9_region_dock is not None:
+            self.menu_view.addAction(self.ds9_region_dock.toggleViewAction())
+        if self.catalog_overlay_dock is not None:
+            self.menu_view.addAction(self.catalog_overlay_dock.toggleViewAction())
         if self.frame_player_dock is not None:
             self.menu_view.addAction(self.frame_player_dock.toggleViewAction())
         if self.histogram_dock is not None:
@@ -1099,8 +1298,11 @@ class MainWindow(QMainWindow):
         if self.canvas is None:
             return
         self.canvas.mouse_moved.connect(self.update_status_from_cursor)
+        self.canvas.pixel_clicked.connect(self._handle_canvas_pixel_clicked)
         self.canvas.roi_selected.connect(self.handle_roi_selected)
         self.canvas.source_double_clicked.connect(self.handle_source_clicked)
+        self.canvas.catalog_source_double_clicked.connect(self._focus_gaia_source)
+        self.canvas.region_double_clicked.connect(self._focus_ds9_region)
         self.canvas.zoom_changed.connect(self.handle_zoom_changed)
         self.canvas.files_dropped.connect(self._handle_dropped_paths)
 
@@ -1220,6 +1422,45 @@ class MainWindow(QMainWindow):
             self.marker_dock.source_color_changed.connect(self._handle_source_color_changed)
             self.marker_dock.source_line_width_changed.connect(self._handle_source_line_width_changed)
             self._sync_marker_visual_style()
+        if self.catalog_overlay_dock is not None:
+            self.catalog_overlay_dock.grid_toggled.connect(self._handle_wcs_grid_toggled)
+            self.catalog_overlay_dock.query_requested.connect(self._start_gaia_query)
+            self.catalog_overlay_dock.clear_requested.connect(self._clear_gaia_sources)
+            self.catalog_overlay_dock.source_selected.connect(self._focus_gaia_source)
+        if self.measurement_dock is not None:
+            self.measurement_dock.aperture_measurement_requested.connect(self._measure_aperture)
+            self.measurement_dock.clear_requested.connect(self._clear_measurements)
+            for spin in (
+                self.measurement_dock.center_x_spin,
+                self.measurement_dock.center_y_spin,
+                self.measurement_dock.aperture_radius_spin,
+                self.measurement_dock.background_inner_radius_spin,
+                self.measurement_dock.background_outer_radius_spin,
+            ):
+                spin.valueChanged.connect(self._invalidate_aperture_measurement)
+        if self.comparison_dock is not None:
+            self.comparison_dock.image_selection_requested.connect(self._select_comparison_frame)
+            self.comparison_dock.swap_requested.connect(self._swap_comparison_frames)
+            self.comparison_dock.clear_requested.connect(self._clear_comparison)
+            self.comparison_dock.comparison_requested.connect(self._start_comparison)
+            self.comparison_dock.blink_phase_changed.connect(self._show_comparison_blink_phase)
+            self.comparison_dock.mode_changed.connect(
+                lambda _mode: self._end_comparison_display(restore=True)
+            )
+            self.comparison_dock.alignment_changed.connect(
+                lambda _alignment: self._end_comparison_display(restore=True)
+            )
+        if self.ds9_region_dock is not None:
+            self.ds9_region_dock.document_changed.connect(self._handle_ds9_document_changed)
+            self.ds9_region_dock.overlay_visibility_changed.connect(
+                lambda _visible: self._redraw_ds9_regions()
+            )
+            self.ds9_region_dock.region_selected.connect(self._focus_ds9_region)
+            self.ds9_region_dock.capture_roi_requested.connect(self._capture_roi_as_region)
+            self.ds9_region_dock.capture_aperture_requested.connect(
+                self._capture_aperture_as_region
+            )
+            self.ds9_region_dock.operation_failed.connect(self._handle_ds9_operation_failed)
         if self.frame_player_dock is not None:
             self.frame_player_dock.frame_changed.connect(self._switch_frame)
             self.frame_player_dock.playback_started.connect(self._on_playback_started)
@@ -1726,6 +1967,927 @@ class MainWindow(QMainWindow):
             self.tr("Update Check Failed"),
             result.detail or self.tr("Unable to check for updates."),
         )
+
+    def _sync_wcs_catalog_state(self) -> None:
+        """Refresh cheap WCS context; build the detailed grid only on demand."""
+
+        data = self.fits_service.current_data
+        unavailable = (
+            self._is_composite_frame_layout_active()
+            or data is None
+            or data.data is None
+            or not data.has_wcs
+            or data.wcs is None
+        )
+        if unavailable:
+            self._current_wcs_grid = None
+            self._current_wcs_center = None
+            self._current_wcs_radius_deg = 0.0
+            if self.catalog_overlay_dock is not None:
+                self.catalog_overlay_dock.set_wcs_state(False)
+            if self.canvas is not None:
+                self.canvas.clear_wcs_grid()
+                self.canvas.clear_catalog_sources()
+            return
+
+        height, width = data.data.shape[:2]
+        try:
+            center_ra_values, center_dec_values = data.wcs.pixel_to_world_values(
+                np.asarray([(width - 1.0) * 0.5]),
+                np.asarray([(height - 1.0) * 0.5]),
+            )
+            center_ra = float(np.asarray(center_ra_values).reshape(-1)[0]) % 360.0
+            center_dec = float(np.asarray(center_dec_values).reshape(-1)[0])
+            xs = np.asarray([0.0, width - 1.0, width - 1.0, 0.0])
+            ys = np.asarray([0.0, 0.0, height - 1.0, height - 1.0])
+            ras, decs = data.wcs.pixel_to_world_values(xs, ys)
+            ras = np.asarray(ras, dtype=float)
+            decs = np.asarray(decs, dtype=float)
+            finite = np.isfinite(ras) & np.isfinite(decs)
+            if not (np.isfinite(center_ra) and np.isfinite(center_dec)) or not np.any(finite):
+                raise ValueError("WCS center or footprint is not finite.")
+            delta_ra = ((ras[finite] - center_ra + 180.0) % 360.0) - 180.0
+            offsets = np.hypot(
+                delta_ra * max(math.cos(math.radians(center_dec)), 1e-6),
+                decs[finite] - center_dec,
+            )
+            radius_deg = float(np.max(offsets)) if offsets.size else 0.0
+        except Exception as exc:
+            logger.warning("WCS context unavailable: %s", exc)
+            self._current_wcs_grid = None
+            self._current_wcs_center = None
+            self._current_wcs_radius_deg = 0.0
+            if self.catalog_overlay_dock is not None:
+                self.catalog_overlay_dock.set_wcs_state(False)
+                self.catalog_overlay_dock.set_error(str(exc))
+            if self.canvas is not None:
+                self.canvas.clear_wcs_grid()
+                self.canvas.clear_catalog_sources()
+            return
+
+        self._current_wcs_grid = None
+        self._current_wcs_center = (center_ra, center_dec)
+        self._current_wcs_radius_deg = radius_deg
+        if self.catalog_overlay_dock is not None:
+            self.catalog_overlay_dock.set_wcs_state(
+                True,
+                center_ra_deg=center_ra,
+                center_dec_deg=center_dec,
+                suggested_radius_arcmin=max(0.1, min(120.0, radius_deg * 60.0)),
+            )
+            if self.catalog_overlay_dock.grid_checkbox.isChecked():
+                self._ensure_current_wcs_grid()
+        self._redraw_wcs_catalog_overlays()
+
+    def _ensure_current_wcs_grid(self) -> bool:
+        if self._current_wcs_grid is not None:
+            return True
+        data = self.fits_service.current_data
+        if data is None or data.data is None or data.wcs is None or not data.has_wcs:
+            return False
+        height, width = data.data.shape[:2]
+        key = (id(data.wcs), width, height)
+        cached = self._wcs_grid_cache.get(key)
+        if cached is not None:
+            self._current_wcs_grid = cached
+            return True
+        try:
+            grid = build_wcs_grid(data.wcs, width, height)
+        except Exception as exc:
+            logger.warning("WCS grid unavailable: %s", exc)
+            if self.catalog_overlay_dock is not None:
+                self.catalog_overlay_dock.set_error(str(exc))
+            return False
+        self._current_wcs_grid = grid
+        self._wcs_grid_cache[key] = grid
+        while len(self._wcs_grid_cache) > 8:
+            self._wcs_grid_cache.pop(next(iter(self._wcs_grid_cache)))
+        return True
+
+    def _redraw_wcs_catalog_overlays(self) -> None:
+        """Apply current WCS and catalog overlays using the active orientation."""
+
+        if self.canvas is None:
+            return
+        if self._comparison_active or self._is_composite_frame_layout_active():
+            self.canvas.clear_wcs_grid()
+            self.canvas.clear_catalog_sources()
+            return
+
+        shape = self._current_original_shape()
+        if shape is None:
+            self.canvas.clear_wcs_grid()
+            self.canvas.clear_catalog_sources()
+            return
+        width, height = shape
+        transform = lambda x, y, w=width, h=height: self._orient_point(x, y, w, h)
+
+        show_grid = (
+            self.catalog_overlay_dock is not None
+            and self.catalog_overlay_dock.grid_checkbox.isChecked()
+            and self._current_wcs_grid is not None
+        )
+        if show_grid:
+            self.canvas.set_wcs_grid(self._current_wcs_grid, transform=transform)
+        else:
+            self.canvas.clear_wcs_grid()
+
+        if self._gaia_sources and len(self._gaia_sources) == len(self._gaia_pixel_coords):
+            self.canvas.set_catalog_sources(
+                self._gaia_sources,
+                self._gaia_pixel_coords,
+                transform=transform,
+            )
+        else:
+            self.canvas.clear_catalog_sources()
+
+    def _handle_wcs_grid_toggled(self, visible: bool) -> None:
+        if visible:
+            self._ensure_current_wcs_grid()
+        self._redraw_wcs_catalog_overlays()
+
+    def _start_gaia_query(self, radius_arcmin: float, max_rows: int, faint_limit_mag: float) -> None:
+        """Launch a bounded Gaia DR3 cone search for the active WCS frame."""
+
+        if self._is_closing or self._comparison_active or self._is_composite_frame_layout_active():
+            return
+        data = self.fits_service.current_data
+        center = self._current_wcs_center
+        if data is None or data.wcs is None or not data.has_wcs or center is None:
+            if self.catalog_overlay_dock is not None:
+                self.catalog_overlay_dock.set_error(self.tr("No celestial WCS is available."))
+            return
+        thread = self._gaia_query_thread
+        if thread is not None:
+            try:
+                if thread.isRunning():
+                    return
+            except RuntimeError:
+                pass
+        if self._status_activity_kind in ("load", "sep", "compare"):
+            if self.catalog_overlay_dock is not None:
+                self.catalog_overlay_dock.set_error(self.tr("Wait for the current task to finish before querying Gaia."))
+            return
+
+        try:
+            query = CatalogQuery(
+                ra_deg=center[0],
+                dec_deg=center[1],
+                radius_deg=float(radius_arcmin) / 60.0,
+                max_rows=int(max_rows),
+                faint_limit_mag=float(faint_limit_mag),
+            ).validated()
+        except ValueError as exc:
+            if self.catalog_overlay_dock is not None:
+                self.catalog_overlay_dock.set_error(str(exc))
+            return
+
+        self._gaia_query_request_id += 1
+        request_id = self._gaia_query_request_id
+        frame_index = self._current_frame_index
+        thread = QThread(self)
+        worker = GaiaQueryWorker(query)
+        relay = _CatalogQuerySignalRelay(self, request_id, frame_index, thread, worker)
+        self._active_gaia_query_request_id = request_id
+        self._gaia_results_enabled = True
+        self._gaia_query_thread = thread
+        self._gaia_query_worker = worker
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.result_ready.connect(relay.handle_result)
+        worker.query_error.connect(relay.handle_error)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(relay.handle_thread_finished)
+        thread.finished.connect(relay.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+
+        if self.catalog_overlay_dock is not None:
+            self.catalog_overlay_dock.set_query_running(True)
+        self._set_status_activity(
+            kind="catalog",
+            text=self.tr("Querying Gaia DR3..."),
+            progress_value=0,
+            progress_max=0,
+            cancellable=True,
+        )
+        thread.start()
+
+    def _handle_gaia_result_for_request(
+        self,
+        request_id: int,
+        frame_index: int,
+        worker: GaiaQueryWorker,
+        sources: list[CatalogSource],
+    ) -> None:
+        if self._is_closing:
+            return
+        if (
+            not self._gaia_results_enabled
+            or request_id != self._active_gaia_query_request_id
+            or worker is not self._gaia_query_worker
+        ):
+            return
+        if frame_index != self._current_frame_index:
+            return
+        data = self.fits_service.current_data
+        if data is None or data.data is None or data.wcs is None or not data.has_wcs:
+            return
+
+        try:
+            ras = np.asarray([source.ra_deg for source in sources], dtype=float)
+            decs = np.asarray([source.dec_deg for source in sources], dtype=float)
+            xs, ys = data.wcs.world_to_pixel_values(ras, decs)
+            xs = np.asarray(xs, dtype=float).reshape(-1)
+            ys = np.asarray(ys, dtype=float).reshape(-1)
+        except Exception as exc:
+            self._handle_gaia_error_for_request(request_id, frame_index, worker, str(exc))
+            return
+
+        height, width = data.data.shape[:2]
+        visible_sources: list[CatalogSource] = []
+        visible_coords: list[tuple[float, float]] = []
+        for source, x, y in zip(sources, xs.tolist(), ys.tolist()):
+            if not (np.isfinite(x) and np.isfinite(y)):
+                continue
+            if not (0.0 <= x < width and 0.0 <= y < height):
+                continue
+            visible_sources.append(source)
+            visible_coords.append((float(x), float(y)))
+
+        self._gaia_sources = visible_sources
+        self._gaia_pixel_coords = visible_coords
+        self._redraw_wcs_catalog_overlays()
+        if self.catalog_overlay_dock is not None:
+            self.catalog_overlay_dock.set_sources(visible_sources)
+        if self.app_status_bar is not None:
+            self.app_status_bar.showMessage(
+                self.tr("Showing {count} Gaia source(s) inside the image.").format(
+                    count=len(visible_sources)
+                ),
+                4000,
+            )
+
+    def _handle_gaia_error_for_request(
+        self,
+        request_id: int,
+        frame_index: int,
+        worker: GaiaQueryWorker,
+        detail: str,
+    ) -> None:
+        if (
+            not self._gaia_results_enabled
+            or request_id != self._active_gaia_query_request_id
+            or worker is not self._gaia_query_worker
+        ):
+            return
+        if frame_index != self._current_frame_index or self._is_closing:
+            return
+        if self.catalog_overlay_dock is not None:
+            self.catalog_overlay_dock.set_error(detail)
+        self.show_error(self.tr("Gaia query failed"), detail)
+
+    def _clear_gaia_query_refs(
+        self,
+        request_id: int,
+        thread: QThread,
+        worker: GaiaQueryWorker,
+    ) -> None:
+        if request_id != self._active_gaia_query_request_id:
+            return
+        if thread is not self._gaia_query_thread or worker is not self._gaia_query_worker:
+            return
+        self._active_gaia_query_request_id = None
+        self._gaia_results_enabled = False
+        self._gaia_query_thread = None
+        self._gaia_query_worker = None
+        if self.catalog_overlay_dock is not None:
+            self.catalog_overlay_dock.set_query_running(False)
+        self._clear_status_activity(kind="catalog")
+
+    def _stop_gaia_query(self, *, wait: bool = False) -> bool:
+        thread = self._gaia_query_thread
+        worker = self._gaia_query_worker
+        request_id = self._active_gaia_query_request_id
+        self._gaia_results_enabled = False
+        if thread is None or worker is None or request_id is None:
+            return True
+        worker.cancel()
+        try:
+            running = thread.isRunning()
+        except RuntimeError:
+            running = False
+        if running:
+            thread.requestInterruption()
+            thread.quit()
+        if wait and running:
+            thread.wait(self.THREAD_JOIN_WAIT_MS)
+        try:
+            running = thread.isRunning()
+        except RuntimeError:
+            running = False
+        if not running:
+            self._clear_gaia_query_refs(request_id, thread, worker)
+            return True
+        return False
+
+    def _clear_gaia_sources(self) -> None:
+        self._gaia_sources = []
+        self._gaia_pixel_coords = []
+        if self.canvas is not None:
+            self.canvas.clear_catalog_sources()
+        if self.catalog_overlay_dock is not None:
+            self.catalog_overlay_dock.clear_sources()
+
+    def _focus_gaia_source(self, index: int) -> None:
+        if not 0 <= int(index) < len(self._gaia_sources):
+            return
+        if self.canvas is not None:
+            self.canvas.highlight_catalog_source(int(index))
+            self.canvas.center_on_catalog_source(int(index))
+        if self.catalog_overlay_dock is not None and self.catalog_overlay_dock.table.currentRow() != int(index):
+            self.catalog_overlay_dock.table.selectRow(int(index))
+
+    def _measurement_transform(self):
+        shape = self._current_original_shape()
+        if shape is None:
+            return None
+        width, height = shape
+        return lambda x, y, w=width, h=height: self._orient_point(x, y, w, h)
+
+    def _measurement_edge_transform(self):
+        shape = self._current_original_shape()
+        if shape is None:
+            return None
+        width, height = shape
+        return lambda x, y, w=width, h=height: self._orient_edge_point(x, y, w, h)
+
+    def _redraw_measurement_overlays(self) -> None:
+        if self.canvas is None:
+            return
+        if self._comparison_active or self._is_composite_frame_layout_active():
+            self.canvas.clear_measurement_roi()
+            self.canvas.clear_aperture_overlay()
+            return
+        transform = self._measurement_transform()
+        edge_transform = self._measurement_edge_transform()
+        if transform is None or edge_transform is None:
+            self.canvas.clear_measurement_roi()
+            self.canvas.clear_aperture_overlay()
+            return
+        if self._last_measurement_roi is not None:
+            self.canvas.set_measurement_roi(self._last_measurement_roi, transform=edge_transform)
+        else:
+            self.canvas.clear_measurement_roi()
+        result = self._last_aperture_measurement
+        if result is not None:
+            self.canvas.set_aperture_overlay(
+                result.center_x,
+                result.center_y,
+                (
+                    result.aperture_radius,
+                    result.background_inner_radius,
+                    result.background_outer_radius,
+                ),
+                transform=transform,
+            )
+        else:
+            self.canvas.clear_aperture_overlay()
+
+    def _handle_canvas_pixel_clicked(self, x: float, y: float) -> None:
+        """Use a left-click as the next aperture center in original pixels."""
+
+        if (
+            self.measurement_dock is None
+            or self._comparison_active
+            or self._is_composite_frame_layout_active()
+        ):
+            return
+        shape = self._current_original_shape()
+        if shape is None:
+            return
+        width, height = shape
+        original_x, original_y = self._unorient_point(x, y, width, height)
+        if 0.0 <= original_x < width and 0.0 <= original_y < height:
+            self.measurement_dock.set_center(original_x, original_y)
+
+    def _measure_roi(self, roi: ROISelection) -> None:
+        data = self.fits_service.current_data
+        if data is None or data.data is None or self.measurement_dock is None:
+            return
+        self._last_measurement_roi = None
+        if self.canvas is not None:
+            self.canvas.clear_measurement_roi()
+        self.measurement_dock.set_roi_statistics(None)
+        self._update_region_capture_enabled()
+        try:
+            result = self.measurement_service.measure_roi(data.data, roi)
+        except Exception as exc:
+            self.measurement_dock.set_error(str(exc))
+            self.measurement_dock.show()
+            self.measurement_dock.raise_()
+            if self.app_status_bar is not None:
+                self.app_status_bar.showMessage(self.tr("ROI measurement failed: {detail}").format(detail=exc), 4000)
+            return
+        self._last_measurement_roi = result.roi
+        self._update_region_capture_enabled()
+        self.measurement_dock.set_roi_statistics(result)
+        self._redraw_measurement_overlays()
+        self.measurement_dock.show()
+        self.measurement_dock.raise_()
+
+    def _measure_aperture(
+        self,
+        center_x: float,
+        center_y: float,
+        aperture_radius: float,
+        background_inner_radius: float,
+        background_outer_radius: float,
+    ) -> None:
+        data = self.fits_service.current_data
+        if (
+            data is None
+            or data.data is None
+            or self.measurement_dock is None
+            or self._comparison_active
+        ):
+            return
+        self._invalidate_aperture_measurement()
+        self.measurement_dock.set_busy(True)
+        try:
+            result = self.measurement_service.measure_aperture(
+                data.data,
+                center_x=center_x,
+                center_y=center_y,
+                aperture_radius=aperture_radius,
+                background_inner_radius=background_inner_radius,
+                background_outer_radius=background_outer_radius,
+            )
+        except Exception as exc:
+            self.measurement_dock.set_error(str(exc))
+            return
+        self._last_aperture_measurement = result
+        self._update_region_capture_enabled()
+        self.measurement_dock.set_aperture_measurement(result)
+        self._redraw_measurement_overlays()
+
+    def _clear_measurements(self) -> None:
+        self._last_measurement_roi = None
+        self._last_aperture_measurement = None
+        self._update_region_capture_enabled()
+        if self.canvas is not None:
+            self.canvas.clear_measurement_roi()
+            self.canvas.clear_aperture_overlay()
+        if self.measurement_dock is not None:
+            self.measurement_dock.clear_results()
+
+    def _invalidate_aperture_measurement(self, *_args: Any) -> None:
+        if self._last_aperture_measurement is None:
+            return
+        self._last_aperture_measurement = None
+        if self.canvas is not None:
+            self.canvas.clear_aperture_overlay()
+        if self.measurement_dock is not None:
+            self.measurement_dock.set_aperture_measurement(None)
+            self.measurement_dock.status_label.setText(
+                self.tr("Aperture parameters changed; measure again.")
+            )
+        self._update_region_capture_enabled()
+
+    def _comparison_frame_label(self, index: int) -> str:
+        if not 0 <= index < len(self._frames):
+            return self.tr("Unavailable frame")
+        frame = self._frames[index]
+        name = Path(frame.path).name if frame.path else self.tr("Frame {index}").format(index=index + 1)
+        if frame.frame_count > 1:
+            name = f"{name} [{frame.frame_index + 1}/{frame.frame_count}]"
+        return f"{index + 1}: {name}"
+
+    def _sync_comparison_inputs(self) -> None:
+        if self._comparison_left_index is not None and not 0 <= self._comparison_left_index < len(self._frames):
+            self._comparison_left_index = None
+        if self._comparison_right_index is not None and not 0 <= self._comparison_right_index < len(self._frames):
+            self._comparison_right_index = None
+        if self.comparison_dock is not None:
+            left = (
+                self._comparison_frame_label(self._comparison_left_index)
+                if self._comparison_left_index is not None
+                else None
+            )
+            right = (
+                self._comparison_frame_label(self._comparison_right_index)
+                if self._comparison_right_index is not None
+                else None
+            )
+            self.comparison_dock.set_inputs(left, right)
+
+    def _select_comparison_frame(self, pane: int) -> None:
+        if pane not in (0, 1) or not self._frames:
+            if self.comparison_dock is not None:
+                self.comparison_dock.set_status(self.tr("Load at least two frames to compare."))
+            return
+        labels = [self._comparison_frame_label(index) for index in range(len(self._frames))]
+        current_index = (
+            self._comparison_left_index if pane == 0 else self._comparison_right_index
+        )
+        if current_index is None:
+            current_index = min(self._current_frame_index + pane, len(labels) - 1)
+        selected, accepted = QInputDialog.getItem(
+            self,
+            self.tr("Choose Comparison Frame"),
+            self.tr("Left frame:") if pane == 0 else self.tr("Right frame:"),
+            labels,
+            int(current_index),
+            False,
+        )
+        if not accepted:
+            return
+        selected_index = labels.index(selected)
+        self._stop_comparison_worker(wait=False)
+        self._end_comparison_display(restore=True)
+        if pane == 0:
+            self._comparison_left_index = selected_index
+        else:
+            self._comparison_right_index = selected_index
+        self._sync_comparison_inputs()
+
+    def _swap_comparison_frames(self) -> None:
+        self._stop_comparison_worker(wait=False)
+        self._end_comparison_display(restore=True)
+        self._comparison_left_index, self._comparison_right_index = (
+            self._comparison_right_index,
+            self._comparison_left_index,
+        )
+        self._sync_comparison_inputs()
+
+    def _start_comparison(self, mode: str, alignment: str) -> None:
+        left_index = self._comparison_left_index
+        right_index = self._comparison_right_index
+        if (
+            left_index is None
+            or right_index is None
+            or not 0 <= left_index < len(self._frames)
+            or not 0 <= right_index < len(self._frames)
+        ):
+            if self.comparison_dock is not None:
+                self.comparison_dock.set_status(self.tr("Choose two valid frames to compare."))
+            return
+        if self._comparison_thread is not None:
+            try:
+                if self._comparison_thread.isRunning():
+                    return
+            except RuntimeError:
+                pass
+        if self._status_activity_kind in ("load", "sep", "catalog"):
+            if self.comparison_dock is not None:
+                self.comparison_dock.set_status(self.tr("Wait for the current task to finish before comparing."))
+            return
+
+        self._end_comparison_display(restore=True)
+        self._comparison_request_id += 1
+        request_id = self._comparison_request_id
+        thread = QThread(self)
+        worker = ComparisonWorker(
+            self._frames[left_index],
+            self._frames[right_index],
+            mode=mode,
+            alignment=alignment,
+            stretch_name=self.fits_service.current_stretch,
+            interval_name=self.fits_service.current_interval,
+            manual_limits=self.fits_service.manual_interval_limits,
+        )
+        relay = _ComparisonSignalRelay(
+            self,
+            request_id,
+            left_index,
+            right_index,
+            thread,
+            worker,
+        )
+        self._active_comparison_request_id = request_id
+        self._comparison_results_enabled = True
+        self._comparison_thread = thread
+        self._comparison_worker = worker
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.result_ready.connect(relay.handle_result)
+        worker.comparison_error.connect(relay.handle_error)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(relay.handle_thread_finished)
+        thread.finished.connect(relay.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        if self.comparison_dock is not None:
+            self.comparison_dock.set_busy(True)
+            self.comparison_dock.set_status(self.tr("Preparing comparison..."))
+        self._set_status_activity(
+            kind="compare",
+            text=self.tr("Preparing image comparison..."),
+            progress_value=0,
+            progress_max=0,
+            cancellable=True,
+        )
+        thread.start()
+
+    def _handle_comparison_result_for_request(
+        self,
+        request_id: int,
+        left_index: int,
+        right_index: int,
+        worker: ComparisonWorker,
+        display: ComparisonDisplayResult,
+    ) -> None:
+        if self._is_closing:
+            return
+        if (
+            not self._comparison_results_enabled
+            or request_id != self._active_comparison_request_id
+            or worker is not self._comparison_worker
+        ):
+            return
+        if (left_index, right_index) != (
+            self._comparison_left_index,
+            self._comparison_right_index,
+        ):
+            return
+        if self.comparison_dock is not None:
+            self.comparison_dock.set_comparison_result(display.result)
+        if not display.result.success:
+            return
+
+        left_image = self._qimage_from_u8(display.left_u8)
+        right_image = self._qimage_from_u8(display.right_u8)
+        difference_image = self._qimage_from_u8(display.difference_u8)
+        left_image = self._orient_qimage(left_image) if left_image is not None else None
+        right_image = self._orient_qimage(right_image) if right_image is not None else None
+        difference_image = self._orient_qimage(difference_image) if difference_image is not None else None
+
+        if self.canvas is not None and self._comparison_original_view_state is None:
+            self._comparison_original_view_state = self.canvas.capture_view_state()
+        self._comparison_active = True
+        self._comparison_display_images = (left_image, right_image)
+        if self.canvas is not None:
+            self.canvas.compass.hide()
+            self.canvas.clear_sources()
+            self.canvas.clear_markers()
+            self.canvas.clear_wcs_grid()
+            self.canvas.clear_catalog_sources()
+            self.canvas.clear_measurement_roi()
+            self.canvas.clear_aperture_overlay()
+            self.canvas.clear_region_overlays()
+
+        mode = display.result.mode
+        if mode is ComparisonMode.DIFFERENCE and difference_image is not None:
+            self._set_canvas_image_preserving_view(difference_image)
+        elif mode is ComparisonMode.SIDE_BY_SIDE and left_image is not None and right_image is not None:
+            self._set_canvas_image_preserving_view(self._compose_side_by_side(left_image, right_image))
+        elif mode is ComparisonMode.BLINK and left_image is not None and right_image is not None:
+            self._set_canvas_image_preserving_view(left_image)
+        else:
+            self._end_comparison_display(restore=True)
+            if self.comparison_dock is not None:
+                self.comparison_dock.set_comparison_available(
+                    False,
+                    self.tr("Comparison renderer produced no display image."),
+                )
+
+    @staticmethod
+    def _compose_side_by_side(left: QImage, right: QImage) -> QImage:
+        separator = 2
+        output = QImage(
+            left.width() + separator + right.width(),
+            max(left.height(), right.height()),
+            QImage.Format.Format_Grayscale8,
+        )
+        output.fill(0)
+        painter = QPainter(output)
+        try:
+            painter.drawImage(0, 0, left)
+            painter.fillRect(left.width(), 0, separator, output.height(), Qt.GlobalColor.white)
+            painter.drawImage(left.width() + separator, 0, right)
+        finally:
+            painter.end()
+        return output
+
+    def _show_comparison_blink_phase(self, phase: int) -> None:
+        if not self._comparison_active or self.canvas is None:
+            return
+        image = self._comparison_display_images[1 if int(phase) else 0]
+        if image is not None:
+            self._set_canvas_image_preserving_view(image)
+
+    def _handle_comparison_error_for_request(
+        self,
+        request_id: int,
+        worker: ComparisonWorker,
+        detail: str,
+    ) -> None:
+        if (
+            not self._comparison_results_enabled
+            or request_id != self._active_comparison_request_id
+            or worker is not self._comparison_worker
+        ):
+            return
+        if self.comparison_dock is not None:
+            self.comparison_dock.set_comparison_available(False, detail)
+        self.show_error(self.tr("Image comparison failed"), detail)
+
+    def _clear_comparison_worker_refs(
+        self,
+        request_id: int,
+        thread: QThread,
+        worker: ComparisonWorker,
+    ) -> None:
+        if request_id != self._active_comparison_request_id:
+            return
+        if thread is not self._comparison_thread or worker is not self._comparison_worker:
+            return
+        self._active_comparison_request_id = None
+        self._comparison_results_enabled = False
+        self._comparison_thread = None
+        self._comparison_worker = None
+        if self.comparison_dock is not None:
+            self.comparison_dock.set_busy(False)
+        self._clear_status_activity(kind="compare")
+
+    def _stop_comparison_worker(self, *, wait: bool = False) -> bool:
+        thread = self._comparison_thread
+        worker = self._comparison_worker
+        request_id = self._active_comparison_request_id
+        self._comparison_results_enabled = False
+        if thread is None or worker is None or request_id is None:
+            return True
+        worker.cancel()
+        try:
+            running = thread.isRunning()
+        except RuntimeError:
+            running = False
+        if running:
+            thread.requestInterruption()
+            thread.quit()
+        if wait and running:
+            thread.wait(self.THREAD_JOIN_WAIT_MS)
+        try:
+            running = thread.isRunning()
+        except RuntimeError:
+            running = False
+        if not running:
+            self._clear_comparison_worker_refs(request_id, thread, worker)
+            return True
+        return False
+
+    def _end_comparison_display(self, *, restore: bool) -> None:
+        was_active = self._comparison_active
+        original_state = self._comparison_original_view_state
+        self._comparison_active = False
+        self._comparison_display_images = (None, None)
+        self._comparison_original_view_state = None
+        if self.comparison_dock is not None:
+            self.comparison_dock.stop_blinking()
+        if restore and was_active and self.canvas is not None:
+            self._show_current_frame_image()
+            self._apply_canvas_display_context()
+            self.canvas.restore_view_state(original_state)
+
+    def _clear_comparison(self) -> None:
+        self._stop_comparison_worker(wait=False)
+        self._end_comparison_display(restore=True)
+        self._comparison_left_index = None
+        self._comparison_right_index = None
+        if self.comparison_dock is not None:
+            self.comparison_dock.set_inputs(None, None)
+
+    def _handle_ds9_document_changed(self, _document: DS9RegionDocument) -> None:
+        self._redraw_ds9_regions()
+
+    def _redraw_ds9_regions(self) -> None:
+        if self.canvas is None or self.ds9_region_dock is None:
+            return
+        if (
+            self._comparison_active
+            or self._is_composite_frame_layout_active()
+            or not self.ds9_region_dock.overlay_visible()
+        ):
+            self.canvas.clear_region_overlays()
+            return
+        data = self.fits_service.current_data
+        if data is None or data.data is None:
+            self.canvas.clear_region_overlays()
+            return
+        height, width = data.data.shape[:2]
+        transform = lambda x, y, w=width, h=height: self._orient_point(x, y, w, h)
+        result = build_ds9_overlays(
+            self.ds9_region_dock.document(),
+            width=width,
+            height=height,
+            wcs=data.wcs if data.has_wcs else None,
+            point_transform=transform,
+        )
+        self.canvas.set_region_overlays(list(result.overlays))
+        if result.skipped_without_wcs:
+            self.ds9_region_dock.set_status(
+                self.tr("Skipped {count} sky region(s): the current frame has no WCS.").format(
+                    count=result.skipped_without_wcs
+                )
+            )
+        elif result.skipped_regions:
+            self.ds9_region_dock.set_status(
+                self.tr("Rendered regions with {count} unsupported or off-image item(s) skipped.").format(
+                    count=result.skipped_regions
+                )
+            )
+        elif result.physical_as_image_regions:
+            self.ds9_region_dock.set_status(
+                self.tr("Physical regions are displayed using image-pixel coordinates.")
+            )
+
+    def _focus_ds9_region(self, index: int) -> None:
+        if self.canvas is None:
+            return
+        if int(index) < 0:
+            self.canvas.highlight_region(None)
+            return
+        self.canvas.highlight_region(int(index))
+        self.canvas.center_on_region(int(index))
+        if (
+            self.ds9_region_dock is not None
+            and int(index) < self.ds9_region_dock.table.rowCount()
+            and self.ds9_region_dock.table.currentRow() != int(index)
+        ):
+            self.ds9_region_dock.table.selectRow(int(index))
+
+    def _append_captured_region(self, region: DS9Region, message: str) -> None:
+        if self.ds9_region_dock is None:
+            return
+        document = self.ds9_region_dock.document()
+        updated = DS9RegionDocument(
+            regions=(*document.regions, region),
+            global_attributes=document.global_attributes,
+            diagnostics=document.diagnostics,
+        )
+        try:
+            self.ds9_region_dock.set_document(updated)
+        except Exception as exc:
+            self.ds9_region_dock.set_status(str(exc))
+            return
+        self.ds9_region_dock.set_status(message)
+        self.ds9_region_dock.show()
+        self.ds9_region_dock.raise_()
+
+    def _capture_roi_as_region(self) -> None:
+        roi = self._last_measurement_roi
+        if roi is None:
+            return
+        region = DS9Region(
+            "image",
+            "box",
+            (
+                roi.x0 + roi.width / 2.0 + 1.0,
+                roi.y0 + roi.height / 2.0 + 1.0,
+                float(roi.width),
+                float(roi.height),
+                0.0,
+            ),
+            attributes=(
+                DS9Attribute("color", "yellow"),
+                DS9Attribute("text", "AstroView ROI"),
+            ),
+        )
+        self._append_captured_region(region, self.tr("Current ROI added to DS9 regions."))
+
+    def _capture_aperture_as_region(self) -> None:
+        result = self._last_aperture_measurement
+        if result is None:
+            return
+        region = DS9Region(
+            "image",
+            "circle",
+            (
+                result.center_x + 1.0,
+                result.center_y + 1.0,
+                result.aperture_radius,
+            ),
+            attributes=(
+                DS9Attribute("color", "cyan"),
+                DS9Attribute("text", "AstroView aperture"),
+            ),
+        )
+        self._append_captured_region(
+            region,
+            self.tr("Current aperture added to DS9 regions."),
+        )
+
+    def _update_region_capture_enabled(self) -> None:
+        if self.ds9_region_dock is not None:
+            self.ds9_region_dock.set_capture_enabled(
+                roi=self._last_measurement_roi is not None,
+                aperture=self._last_aperture_measurement is not None,
+            )
+
+    def _handle_ds9_operation_failed(self, operation: str, detail: str) -> None:
+        if self.app_status_bar is not None:
+            title = self.tr("Region import failed") if operation == "import" else self.tr("Region export failed")
+            self.app_status_bar.showMessage(f"{title}: {detail}", 5000)
 
 
     def _start_frame_load(
@@ -2546,6 +3708,19 @@ class MainWindow(QMainWindow):
             y = (h - 1) - y
         return x, y
 
+    def _orient_edge_point(self, x: float, y: float, w: int, h: int) -> tuple[float, float]:
+        """Map half-open image-edge coordinates through the active D4 transform."""
+
+        fh, fv, tr = self._orientation
+        if tr:
+            x, y = y, x
+            w, h = h, w
+        if fh:
+            x = w - x
+        if fv:
+            y = h - y
+        return x, y
+
     def _unorient_point(self, x: float, y: float, w: int, h: int) -> tuple[float, float]:
         """Map displayed coords back to original (w, h are ORIGINAL dims)."""
         fh, fv, tr = self._orientation
@@ -2554,6 +3729,19 @@ class MainWindow(QMainWindow):
             x = (wd - 1) - x
         if fv:
             y = (hd - 1) - y
+        if tr:
+            x, y = y, x
+        return x, y
+
+    def _unorient_edge_point(self, x: float, y: float, w: int, h: int) -> tuple[float, float]:
+        """Map displayed half-open rectangle edges back to original image edges."""
+
+        fh, fv, tr = self._orientation
+        displayed_width, displayed_height = (h, w) if tr else (w, h)
+        if fh:
+            x = displayed_width - x
+        if fv:
+            y = displayed_height - y
         if tr:
             x, y = y, x
         return x, y
@@ -2743,12 +3931,27 @@ class MainWindow(QMainWindow):
         if self.canvas is None:
             return
 
+        if self._comparison_active:
+            self.canvas.compass.hide()
+            self.canvas.set_source_position_transform(None)
+            self.canvas.clear_wcs_grid()
+            self.canvas.clear_catalog_sources()
+            self.canvas.clear_measurement_roi()
+            self.canvas.clear_aperture_overlay()
+            self.canvas.clear_region_overlays()
+            return
+
         self.canvas.compass.setVisible(not self._is_composite_frame_layout_active())
         x_axis, y_axis = self._axis_directions()
         self.canvas.compass.set_axes(x_axis, y_axis)
 
         if self._is_composite_frame_layout_active():
             self.canvas.set_source_position_transform(None)
+            self.canvas.clear_wcs_grid()
+            self.canvas.clear_catalog_sources()
+            self.canvas.clear_measurement_roi()
+            self.canvas.clear_aperture_overlay()
+            self.canvas.clear_region_overlays()
             return
 
         shape = self._current_original_shape()
@@ -2759,6 +3962,9 @@ class MainWindow(QMainWindow):
             )
         else:
             self.canvas.set_source_position_transform(None)
+        self._redraw_wcs_catalog_overlays()
+        self._redraw_measurement_overlays()
+        self._redraw_ds9_regions()
 
     def _build_composite_frame_image(self) -> QImage | None:
         """Build the currently requested composite frame image from cached frame renders."""
@@ -2861,10 +4067,13 @@ class MainWindow(QMainWindow):
 
         if mode == self._frame_layout_mode:
             return
+        self._stop_comparison_worker(wait=False)
+        self._end_comparison_display(restore=True)
         self._frame_layout_mode = mode
         self._sync_frame_layout_actions()
         self._refresh_view_mode_indicators()
         self._apply_canvas_display_context()
+        self._sync_wcs_catalog_state()
         self._show_current_frame_image()
         self._sync_canvas_source_overlays()
         self._sync_current_canvas_image_state()
@@ -3266,6 +4475,34 @@ class MainWindow(QMainWindow):
                 progress_max=0,
                 cancellable=False,
             )
+        elif self._status_activity_kind == "catalog":
+            stopped = self._stop_gaia_query(wait=False)
+            if stopped:
+                self._clear_status_activity(kind="catalog")
+                if self.app_status_bar is not None:
+                    self.app_status_bar.showMessage(self.tr("Gaia query cancelled."), 3000)
+            else:
+                self._set_status_activity(
+                    kind="catalog",
+                    text=self.tr("Cancelling Gaia query..."),
+                    progress_value=0,
+                    progress_max=0,
+                    cancellable=False,
+                )
+        elif self._status_activity_kind == "compare":
+            stopped = self._stop_comparison_worker(wait=False)
+            if stopped:
+                self._clear_status_activity(kind="compare")
+                if self.app_status_bar is not None:
+                    self.app_status_bar.showMessage(self.tr("Image comparison cancelled."), 3000)
+            else:
+                self._set_status_activity(
+                    kind="compare",
+                    text=self.tr("Cancelling image comparison..."),
+                    progress_value=0,
+                    progress_max=0,
+                    cancellable=False,
+                )
 
     def _handle_status_bar_continue_requested(self) -> None:
         """Accept a non-modal confirmation prompt surfaced in the status bar."""
@@ -3317,6 +4554,7 @@ class MainWindow(QMainWindow):
             self._activate_frame(0)
 
         self._sync_frame_player()
+        self._sync_comparison_inputs()
         self._schedule_next_composite_dirty_frame()
         if self.app_status_bar is not None and self._frames:
             self.app_status_bar.set_frame_info(self._current_frame_index, len(self._frames))
@@ -3469,6 +4707,9 @@ class MainWindow(QMainWindow):
         self._bkg_generation += 1
         self._cancel_bkg_workers(wait=False)
         self._cancel_active_sep_extract(wait=False)
+        self._stop_gaia_query(wait=False)
+        self._stop_comparison_worker(wait=False)
+        self._end_comparison_display(restore=False)
         self._render_generation += 1
         self._render_request_index_by_id.clear()
         self._latest_render_request_by_index.clear()
@@ -3485,6 +4726,16 @@ class MainWindow(QMainWindow):
         self._frame_residual_cache.clear()
         self._frame_cached_preview_dim.clear()
         self._next_source_group_id = 0
+        self._current_wcs_grid = None
+        self._current_wcs_center = None
+        self._current_wcs_radius_deg = 0.0
+        self._wcs_grid_cache.clear()
+        self._gaia_sources.clear()
+        self._gaia_pixel_coords.clear()
+        self._last_measurement_roi = None
+        self._last_aperture_measurement = None
+        self._comparison_left_index = None
+        self._comparison_right_index = None
         if self._view_mode != "original":
             self._view_mode = "original"
             if self.app_status_bar is not None:
@@ -3497,6 +4748,11 @@ class MainWindow(QMainWindow):
             self.canvas.clear_image()
             self.canvas.clear_sources()
             self.canvas.clear_markers()
+            self.canvas.clear_wcs_grid()
+            self.canvas.clear_catalog_sources()
+            self.canvas.clear_measurement_roi()
+            self.canvas.clear_aperture_overlay()
+            self.canvas.clear_region_overlays()
             self.canvas.set_image_state(self.build_canvas_image_state())
             self.canvas.set_overlay_state(self.build_canvas_overlay_state())
         if self.source_table_dock is not None:
@@ -3512,6 +4768,16 @@ class MainWindow(QMainWindow):
             self.frame_player_dock.hide()
         if self.histogram_dock is not None:
             self.histogram_dock.clear_histogram()
+        if self.catalog_overlay_dock is not None:
+            self.catalog_overlay_dock.clear_sources()
+            self.catalog_overlay_dock.set_wcs_state(False)
+        if self.measurement_dock is not None:
+            self.measurement_dock.set_image_shape(None, None)
+        if self.comparison_dock is not None:
+            self.comparison_dock.set_inputs(None, None)
+        if self.ds9_region_dock is not None:
+            self.ds9_region_dock.clear_regions()
+            self.ds9_region_dock.set_capture_enabled(roi=False, aperture=False)
         self.sync_sep_panel_state()
         self.sync_render_controls()
 
@@ -4433,6 +5699,11 @@ class MainWindow(QMainWindow):
             self.canvas.clear_image()
             self.canvas.clear_sources()
             self.canvas.clear_markers()
+            self.canvas.clear_wcs_grid()
+            self.canvas.clear_catalog_sources()
+            self.canvas.clear_measurement_roi()
+            self.canvas.clear_aperture_overlay()
+            self.canvas.clear_region_overlays()
             self.canvas.set_image_state(self.build_canvas_image_state())
             self.canvas.set_overlay_state(self.build_canvas_overlay_state())
         if self.source_table_dock is not None:
@@ -4445,6 +5716,16 @@ class MainWindow(QMainWindow):
             self.app_status_bar.clear_data()
         if self.histogram_dock is not None:
             self.histogram_dock.clear_histogram()
+        if self.catalog_overlay_dock is not None:
+            self.catalog_overlay_dock.clear_sources()
+            self.catalog_overlay_dock.set_wcs_state(False)
+        if self.measurement_dock is not None:
+            self.measurement_dock.set_image_shape(None, None)
+        if self.comparison_dock is not None:
+            self.comparison_dock.set_inputs(None, None)
+        if self.ds9_region_dock is not None:
+            self.ds9_region_dock.clear_regions()
+            self.ds9_region_dock.set_capture_enabled(roi=False, aperture=False)
         self._histogram_axis_limits = None
         self.sync_sep_panel_state()
         self.sync_render_controls()
@@ -4784,6 +6065,14 @@ class MainWindow(QMainWindow):
         always operates on the unrotated data.
         """
 
+        if self._comparison_active:
+            if self.app_status_bar is not None:
+                self.app_status_bar.showMessage(
+                    self.tr("Exit image comparison before selecting a ROI."),
+                    3000,
+                )
+            return
+
         if self._is_composite_frame_layout_active():
             if self.app_status_bar is not None:
                 self.app_status_bar.showMessage(
@@ -4798,12 +6087,14 @@ class MainWindow(QMainWindow):
         if shape is not None and self._orientation != (False, False, False):
             w, h = shape
             x1d, y1d = x0 + width, y0 + height
-            ox0, oy0 = self._unorient_point(x0, y0, w, h)
-            ox1, oy1 = self._unorient_point(x1d, y1d, w, h)
+            ox0, oy0 = self._unorient_edge_point(x0, y0, w, h)
+            ox1, oy1 = self._unorient_edge_point(x1d, y1d, w, h)
             ox0, ox1 = sorted((int(round(ox0)), int(round(ox1))))
             oy0, oy1 = sorted((int(round(oy0)), int(round(oy1))))
             x0, y0, width, height = ox0, oy0, ox1 - ox0, oy1 - oy0
-        self._start_sep_extract(ROISelection(x0=x0, y0=y0, width=width, height=height))
+        selection = ROISelection(x0=x0, y0=y0, width=width, height=height)
+        self._measure_roi(selection)
+        self._start_sep_extract(selection)
 
     def handle_roi_selection(self, selection: ROISelection) -> None:
         """Structured wrapper around the primitive ROI signal contract."""
@@ -4869,6 +6160,8 @@ class MainWindow(QMainWindow):
         -> `FITSData.sample_pixel()` -> `AppStatusBar.set_sample()`.
         """
 
+        if self._comparison_active:
+            return
         if self._is_composite_frame_layout_active():
             sample = self._sample_composite_frame(x, y)
         else:
@@ -4909,6 +6202,8 @@ class MainWindow(QMainWindow):
             "has_status_bar": self.app_status_bar is not None,
             "has_file_loaded": self.fits_service.current_data is not None,
             "has_catalog": self.current_catalog is not None,
+            "has_wcs_grid": self._current_wcs_grid is not None,
+            "gaia_source_count": len(self._gaia_sources),
             "current_stretch": self.fits_service.current_stretch,
             "current_interval": self.fits_service.current_interval,
         }
@@ -4927,6 +6222,7 @@ class MainWindow(QMainWindow):
         """Update the selected stretch mode from the toolbar and re-render."""
 
         if name:
+            self._end_comparison_display(restore=True)
             self.fits_service.set_stretch(name)
             self._persist_render_preferences()
             if self.fits_service.current_data is not None:
@@ -4942,6 +6238,7 @@ class MainWindow(QMainWindow):
         """
 
         if name:
+            self._end_comparison_display(restore=True)
             if name == "Manual":
                 if self.fits_service.manual_interval_limits is None:
                     data_range = self.fits_service.finite_data_range()
@@ -4964,6 +6261,8 @@ class MainWindow(QMainWindow):
         profile_name = self._normalize_preview_profile_name(name)
         if profile_name == self._preview_profile_name:
             return
+
+        self._end_comparison_display(restore=True)
 
         self._preview_profile_name = profile_name
         self._persist_render_preferences()
@@ -5213,6 +6512,11 @@ class MainWindow(QMainWindow):
         playing = self._is_playback_active()
 
         self._cancel_active_sep_extract(wait=False)
+        self._stop_comparison_worker(wait=False)
+        self._end_comparison_display(restore=False)
+        self._stop_gaia_query(wait=False)
+        self._clear_gaia_sources()
+        self._clear_measurements()
         self.current_catalog = None
         self._catalog_results_stale = False
         if self.canvas is not None:
@@ -5225,6 +6529,10 @@ class MainWindow(QMainWindow):
         self._current_frame_index = index
         data = self._frames[index]
         self.fits_service.current_data = data
+        if self.measurement_dock is not None and data.data is not None:
+            height, width = data.data.shape[:2]
+            self.measurement_dock.set_image_shape(width, height)
+        self._sync_wcs_catalog_state()
 
         label = data.path or f"Frame {index}"
         if len(self._frames) > 1:
@@ -5269,6 +6577,8 @@ class MainWindow(QMainWindow):
         """Push the cached QImage for the current frame into the canvas."""
 
         if self.canvas is None:
+            return
+        if self._comparison_active:
             return
 
         if self._is_composite_frame_layout_active():
@@ -5463,6 +6773,8 @@ class MainWindow(QMainWindow):
             *self._bkg_threads.values(),
             self._sep_thread,
             self._update_check_thread,
+            self._gaia_query_thread,
+            self._comparison_thread,
         ]
         running: list[QThread] = []
         seen: set[int] = set()
@@ -5500,6 +6812,8 @@ class MainWindow(QMainWindow):
         self._cancel_bkg_workers(wait=False)
         self._cancel_active_sep_extract(wait=False)
         self._stop_update_check(wait=False)
+        self._stop_gaia_query(wait=False)
+        self._stop_comparison_worker(wait=False)
 
         running_threads = self._running_background_threads()
         if running_threads:

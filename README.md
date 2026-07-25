@@ -23,6 +23,34 @@ A desktop FITS astronomical image viewer built with PySide6.
 - Tunable SEP background mesh (`bkg_box_size`, `bkg_filter_size`); changes invalidate the cached background and refresh the view
 - Export catalog to CSV
 
+### Measurement Workbench
+- Every right-drag ROI selection reports finite/invalid pixel counts, minimum, maximum, mean, median, standard deviation, and sum
+- Circular-aperture photometry with a configurable background annulus
+- Background-subtracted net flux, robust background RMS, uncertainty, SNR, centroid, FWHM, and peak measurements
+- Click the image to set the aperture center; ROI and aperture footprints remain visible as overlays
+- NaN/Inf values are excluded and sampled areas are constrained by a configurable pixel budget
+
+### WCS and Gaia DR3
+- Optional projected RA/Dec grid with sexagesimal labels for celestial-WCS frames
+- Cancellable Gaia DR3 cone search through the fixed ESA HTTPS TAP service; an internet connection is required
+- Configurable search radius, maximum result count, and faint G-magnitude limit
+- In-frame Gaia sources appear as selectable canvas overlays and table rows
+- Grid geometry, catalog response size, row count, query radius, and query duration are bounded
+
+### DS9 Region Interchange
+- Import and export DS9 `.reg` files without evaluating commands or loading external resources
+- Supports `image`, `physical`, `fk5`, and `icrs` coordinates with circle, box, ellipse, polygon, and point shapes; physical-region pixel values are displayed as image coordinates
+- Region table, visibility toggle, import warning summary, and canvas overlays that follow image orientation; parser results retain line-level diagnostics for API callers
+- Capture the current AstroView ROI or aperture into the active Region document
+- Parsing and serialization enforce file-size, line, region, vertex, attribute, and numeric-value limits
+
+### Image Comparison
+- Select any two loaded frames as A and B
+- Side-by-side, timed blink, and A-minus-B difference modes
+- Direct pixel comparison for equal image shapes, with optional bounded nearest-neighbour WCS alignment onto frame A's grid
+- A/B display rendering uses shared interval limits for a visually fair comparison
+- Comparison preparation runs in a cancellable background worker and rejects stale results
+
 ### Coordinate Markers
 - Draw circle markers on the image at specified coordinates
 - Supports both pixel (x, y) and WCS (RA, Dec) coordinate input
@@ -47,12 +75,15 @@ A desktop FITS astronomical image viewer built with PySide6.
 - Keyword filter for quick lookup
 
 ### Workspace
-- Each dock (source table, SEP params, markers, histogram, frame player) has a custom title bar with dock/undock and close buttons
+- Each dock (source table, SEP params, markers, histogram, frame player, measurement, image comparison, DS9 Regions, and WCS/catalog) has a custom title bar with dock/undock and close buttons
 - Floating docks gain native window controls (minimize / maximize / close) and behave as standalone windows
 
 ### Performance and safety
 - Header-based allocation budgets are enforced before pixel decoding
 - Decoded arrays are detached from file mappings when needed, so source files can be closed or overwritten safely on Windows
+- Measurements, image comparison, WCS grids, Gaia responses, and DS9 Region interchange use feature-specific resource budgets
+- Gaia queries and comparison rendering run outside the GUI thread and ignore cancelled or stale results
+- WCS grids are generated on demand, bounded, and cached for reuse
 - Subsampled interval calculation for large images (stride to ~1000x1000)
 - Background multi-file FITS loading keeps the UI responsive during large imports
 - Progressive first-frame preview rendering for faster time-to-first-image
@@ -101,6 +132,14 @@ FITS tile compression (`CompImageHDU`) remains supported and is checked against
 the same decoded-size budget. Whole-file gzip/ZIP/bzip2/xz/LZW wrappers are
 rejected before decompression; safely decompress those files first.
 
+### Windows release installer
+
+Download `AstroView_Setup_1.8.0.exe` and `SHA256SUMS.txt` from the
+[GitHub Releases page](https://github.com/carryons6/fitson/releases). The
+Windows installer is **not Authenticode-signed**, so Windows SmartScreen may
+display a warning. Verify the installer against the release checksum before
+running it.
+
 ## Testing
 
 The project test baseline is expected to run in an activated environment created from `environment.yml`.
@@ -135,6 +174,11 @@ SHA-256 hashes before using them.
 - **`core/`**: domain logic (no Qt dependency)
   - `fits_data.py`: FITS loading, WCS, pixel sampling
   - `fits_service.py`: rendering pipeline, preview render helpers, normalization
+  - `measurement_service.py`: bounded ROI statistics and aperture photometry
+  - `wcs_grid.py`: bounded RA/Dec grid projection
+  - `catalog_service.py`: validated Gaia DR3 TAP queries and response parsing
+  - `ds9_regions.py`: safe DS9 Region parsing and serialization
+  - `image_comparison.py`: bounded pixel/WCS comparison and difference output
   - `sep_service.py`: SEP source extraction wrapper
   - `source_catalog.py`: source catalog data model
   - `contracts.py`: typed dataclasses shared across layers
@@ -148,6 +192,10 @@ SHA-256 hashes before using them.
   - `source_table.py`: source catalog table dock
   - `marker_dock.py`: coordinate marker input dock
   - `frame_player_dock.py`: multi-frame playback controls
+  - `measurement_dock.py`: ROI statistics and aperture-photometry controls
+  - `catalog_overlay_dock.py`: WCS-grid and Gaia-query controls
+  - `ds9_region_dock.py`: DS9 Region import/export and document controls
+  - `comparison_dock.py`: frame A/B comparison and blink controls
   - `header_dialog.py`: FITS header viewer dialog
   - `status_bar.py`: cursor/zoom/frame status display
 

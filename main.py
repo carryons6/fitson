@@ -53,22 +53,29 @@ def _write_smoke_report(message: str) -> None:
 def run_smoke_test() -> int:
     """Exercise frozen GUI and scientific dependencies without opening a window."""
 
+    _write_smoke_report("RUNNING scientific imports")
     try:
         import numpy as np
         import sep
         from astropy.io import fits
 
+        _write_smoke_report("RUNNING QApplication")
         app = QApplication.instance() or QApplication([APP_NAME, "--smoke-test"])
+        _write_smoke_report("RUNNING theme")
         apply_theme(app, "light")
 
+        _write_smoke_report("RUNNING icon")
         icon_path = _resource_path() / "icons" / "main_icon.png"
         if not icon_path.is_file():
             raise FileNotFoundError(f"Bundled application icon is missing: {icon_path}")
         app.setWindowIcon(QIcon(str(icon_path)))
 
+        _write_smoke_report("RUNNING FITS")
         sample = np.zeros((16, 16), dtype=np.float32)
         fits.PrimaryHDU(data=sample).verify("exception")
+        _write_smoke_report("RUNNING SEP")
         sep.extract(sample, 1.0)
+        _write_smoke_report("RUNNING Qt events")
         app.processEvents()
     except Exception:
         _write_smoke_report("FAILED\n" + traceback.format_exc())

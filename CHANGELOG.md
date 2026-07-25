@@ -2,6 +2,36 @@
 
 ## Unreleased
 
+## 1.8.0 - 2026-07-25
+
+### English
+
+#### Added
+- Added a Measurement Workbench with bounded, NaN-safe ROI statistics and circular-aperture photometry, including annulus background subtraction, robust background RMS, net flux, uncertainty, SNR, centroid, FWHM, and peak measurements.
+- Added a WCS & Catalog dock with a projected RA/Dec grid and cancellable Gaia DR3 cone searches. Query results can be filtered by radius, row count, and faint G-magnitude limit, then inspected as on-canvas overlays and table rows.
+- Added safe DS9 Region import/export and on-canvas overlays for `image`, `physical`, `fk5`, and `icrs` coordinates with circle, box, ellipse, polygon, and point shapes. Physical regions are displayed using their pixel values as image coordinates, and the current ROI or aperture can be captured into the region document.
+- Added two-frame comparison with side-by-side, blink, and A-minus-B difference modes. Equal-shaped images support direct pixel comparison, while images with validated 2D WCS can use bounded nearest-neighbour alignment onto frame A's grid.
+
+#### Security and performance
+- Enforced finite-value, dimensional, pixel-count, memory, line, vertex, attribute, and output-size budgets across measurements, comparison, WCS grids, and DS9 Region interchange; malformed or unsupported inputs fail with actionable diagnostics instead of unbounded work.
+- Restricted Gaia access to a fixed HTTPS TAP endpoint with validated numeric-only ADQL, bounded radius and row counts, a 2 MiB response limit, total timeout, strict CSV parsing, and responsive cancellation.
+- Moved Gaia queries and image comparison/render preparation off the GUI thread, rejected stale or cancelled worker results, reused shared display limits for fair A/B comparison, and cached bounded WCS grids while transforming overlays for the active orientation.
+- Hardened Windows release verification with staged cold- and warm-start frozen-app smoke tests, whole-process-tree timeout cleanup, and manual-dispatch preflight builds that cannot publish a Release.
+
+### 简体中文
+
+#### 新增
+- 新增“测量工作台”，提供受限且 NaN 安全的 ROI 统计与圆形孔径测光，包括背景环扣除、稳健背景 RMS、净流量、不确定度、信噪比、质心、FWHM 和峰值测量。
+- 新增“WCS 与星表”面板，可绘制投影后的 RA/Dec 网格并执行可取消的 Gaia DR3 锥形检索。查询支持半径、返回行数和 G 星等暗限设置，结果可在画布与表格中叠加、选择和定位。
+- 新增安全的 DS9 Region 导入、导出与画布叠加，支持 `image`、`physical`、`fk5`、`icrs` 坐标系以及圆、矩形、椭圆、多边形和点；`physical` Region 显示时会将其像素值按图像坐标处理，还可将当前 ROI 或测光孔径捕获到 Region 文档中。
+- 新增双帧图像比较，支持并排、闪烁和 A−B 差分。相同尺寸图像可直接逐像素比较；具有可靠二维 WCS 的图像可受限地使用最近邻方式对齐到帧 A 网格。
+
+#### 安全与性能
+- 为测量、图像比较、WCS 网格和 DS9 Region 交换统一加入有限值、维度、像素数、内存、行数、顶点数、属性数与输出大小预算；异常或不支持的输入会返回可操作诊断，不会触发无界工作。
+- Gaia 访问仅使用固定 HTTPS TAP 端点，并采用纯数值校验后的 ADQL、受限查询半径与行数、2 MiB 响应上限、总超时、严格 CSV 解析和可响应取消机制。
+- 将 Gaia 查询与图像比较/显示准备移出 GUI 线程，拒绝过期或已取消的 worker 结果，为 A/B 图像复用同一显示区间，缓存受限 WCS 网格并按当前图像方向变换叠加层。
+- 加固 Windows 发布验证：分阶段执行冻结程序冷启动与热启动 smoke test，超时后清理完整进程树，并确保手动触发的预构建不会意外发布 Release。
+
 ## 1.7.5 - 2026-07-25
 
 ### English

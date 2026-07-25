@@ -19,6 +19,34 @@
 - 源列表表格，支持排序
 - 导出源表为 CSV
 
+### 测量工作台
+- 每次右键拖选 ROI 后显示有限值/无效值像素数、最小值、最大值、均值、中位数、标准差和总和
+- 带可配置背景环的圆形孔径测光
+- 显示扣除背景后的净流量、稳健背景 RMS、不确定度、信噪比、质心、FWHM 和峰值
+- 单击图像可设置孔径中心，ROI 与孔径范围会保留为画布叠加层
+- 自动排除 NaN/Inf，并使用可配置像素预算限制采样区域
+
+### WCS 与 Gaia DR3
+- 对包含天球 WCS 的图像绘制带六十进制标签的 RA/Dec 投影网格
+- 通过固定的 ESA HTTPS TAP 服务执行可取消的 Gaia DR3 锥形检索；使用此功能需要联网
+- 可配置查询半径、最大返回数量和 G 星等暗限
+- 图像范围内的 Gaia 源会同时显示为可选择的画布叠加与表格行
+- 网格几何、星表响应大小、返回行数、查询半径和查询时长均受预算限制
+
+### DS9 Region 交换
+- 导入和导出 DS9 `.reg` 文件，不执行命令，也不加载外部资源
+- 支持 `image`、`physical`、`fk5`、`icrs` 坐标系以及圆、矩形、椭圆、多边形和点；`physical` Region 的像素值显示时按图像坐标处理
+- 提供 Region 表格、显隐开关、导入警告摘要，以及随图像方向变换的画布叠加；解析结果会为 API 调用方保留逐行诊断
+- 可将 AstroView 当前 ROI 或测光孔径捕获到活动 Region 文档
+- 解析与序列化均限制文件大小、行数、Region 数、顶点数、属性数和数值范围
+
+### 图像比较
+- 从已加载帧中选择任意两帧作为 A 和 B
+- 支持并排、定时闪烁和 A−B 差分
+- 相同尺寸图像可直接逐像素比较；也可将具有可靠二维 WCS 的图像受限地用最近邻方式对齐到帧 A 网格
+- A/B 显示渲染复用同一显示区间，便于公平比较亮度差异
+- 比较准备在可取消的后台 worker 中执行，并会拒绝过期结果
+
 ### 坐标标记
 - 在图像上绘制圆形标记
 - 支持像素坐标 (x, y) 和 WCS 坐标 (RA, Dec) 输入
@@ -44,6 +72,9 @@
 ### 性能与安全
 - 在解码像素前根据 Header 执行内存与帧数预算
 - 必要时将数组与文件映射脱离，确保 Windows 下可安全关闭或覆盖源文件
+- 测量、图像比较、WCS 网格、Gaia 响应和 DS9 Region 交换分别执行专项资源预算
+- Gaia 查询与比较渲染在 GUI 线程之外运行，并忽略已取消或过期的结果
+- WCS 网格按需生成、限制复杂度并缓存复用
 - 大图区间计算采用子采样（步幅缩减至约 1000x1000）
 - 帧懒渲染机制，仅渲染当前可见帧
 
@@ -92,11 +123,23 @@ python -m astroview image.fits --hdu 1  # 指定 HDU 打开
 FITS 内部的分块压缩 (`CompImageHDU`) 仍受支持，并使用相同的解码预算。外层
 gzip/ZIP/bzip2/xz/LZW 压缩会在解压前被拒绝；请先在确认展开大小安全后解压。
 
+### Windows 发布安装包
+
+请从 [GitHub Releases 页面](https://github.com/carryons6/fitson/releases) 下载
+`AstroView_Setup_1.8.0.exe` 与 `SHA256SUMS.txt`。Windows 安装包**尚未进行
+Authenticode 数字签名**，因此 Windows SmartScreen 可能显示警告。运行前请使用
+Release 中的校验清单核验安装包。
+
 ## 项目结构
 
 - **`core/`** — 领域逻辑层（不依赖 Qt）
   - `fits_data.py` — FITS 加载、WCS、像素采样
   - `fits_service.py` — 渲染管线（拉伸/区间/归一化）
+  - `measurement_service.py` — 受限 ROI 统计与孔径测光
+  - `wcs_grid.py` — 受限 RA/Dec 网格投影
+  - `catalog_service.py` — 经校验的 Gaia DR3 TAP 查询与响应解析
+  - `ds9_regions.py` — 安全 DS9 Region 解析与序列化
+  - `image_comparison.py` — 受限像素/WCS 比较与差分输出
   - `sep_service.py` — SEP 源提取封装
   - `source_catalog.py` — 源表数据模型
   - `contracts.py` — 跨层共享的类型化数据类
@@ -108,6 +151,10 @@ gzip/ZIP/bzip2/xz/LZW 压缩会在解压前被拒绝；请先在确认展开大�
   - `source_table.py` — 源表 Dock 面板
   - `marker_dock.py` — 坐标标记输入面板
   - `frame_player_dock.py` — 多帧播放控制面板
+  - `measurement_dock.py` — ROI 统计与孔径测光面板
+  - `catalog_overlay_dock.py` — WCS 网格与 Gaia 查询面板
+  - `ds9_region_dock.py` — DS9 Region 导入、导出与文档面板
+  - `comparison_dock.py` — 帧 A/B 比较与闪烁控制面板
   - `header_dialog.py` — FITS Header 查看对话框
   - `status_bar.py` — 光标/缩放/帧状态显示
 
