@@ -117,7 +117,18 @@ function Assert-InnoSetupMajorVersion {
     # 0.0.0.0. Capture the complete output (avoiding a broken pipeline), then
     # scan it for the reliable banner while deliberately ignoring that exit
     # code. stdout/stderr merging does not guarantee which line arrives first.
-    $helpOutput = @(& $IsccPath /? 2>&1)
+    # Windows PowerShell 5 promotes native stderr to NativeCommandError when
+    # ErrorActionPreference is Stop. ISCC writes its /? banner to stderr and
+    # exits with code 1 by design, so capture it under Continue and restore the
+    # caller's fail-fast policy immediately afterwards.
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        $helpOutput = @(& $IsccPath /? 2>&1)
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
     $versionBanner = @(
         $helpOutput |
             ForEach-Object { $_.ToString() } |
