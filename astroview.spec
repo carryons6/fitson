@@ -339,6 +339,7 @@ windows_version_info = _build_windows_version_info(app_version)
 
 hiddenimports = [
     "astroview.main",
+    "astropy.time",
     "sep",
     "numpy._core._multiarray_tests",
     "secrets",

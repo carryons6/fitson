@@ -63,6 +63,17 @@ A desktop FITS astronomical image viewer built with PySide6.
 - Frame player dock with play/pause, FPS control, and loop/bounce modes
 - Keyboard shortcuts: `[` previous frame, `]` next frame
 
+### Moving Target Detection
+- Analyze at least five equal-sized loaded frames through `Tools -> Moving Targets...`
+- Capture a one-shot cross-frame ROI with right-drag, or use the full frame when it fits the resource budget
+- Per-frame SEP extraction, robust stellar translation, temporal-median subtraction, static-source masking, and constant-velocity track fitting
+- Prefer one consistent FITS timestamp convention (`DATE-AVG`, `MJD-AVG`, and similar); valid timestamps must be unique and strictly increasing in the loaded frame order
+- Use an explicit fixed cadence when timestamps are unavailable, or deliberately disable header timing for an already ordered sequence
+- Red circles show recovered SEP centroids when matched and fitted track predictions otherwise; they follow playback and image orientation
+- Inspect hits, current position, velocity, speed, and fit RMS; export one target/frame row per observation to CSV
+- Pure-translation registration rejects sequences with too few stellar matches or excessive residual RMS (for example, incompatible fields, rotation, or scale changes)
+- The default 4,000,000-pixel ROI, 384 MiB sequence stack, 250,000 total SEP sources, and bounded intermediate-track budgets reject unsafe work
+
 ### Status Bar
 - Real-time pixel coordinates and value under the cursor
 - WCS RA/Dec display (when WCS is available)
@@ -75,14 +86,14 @@ A desktop FITS astronomical image viewer built with PySide6.
 - Keyword filter for quick lookup
 
 ### Workspace
-- Each dock (source table, SEP params, markers, histogram, frame player, measurement, image comparison, DS9 Regions, and WCS/catalog) has a custom title bar with dock/undock and close buttons
+- Each dock (source table, SEP params, markers, histogram, frame player, measurement, moving targets, image comparison, DS9 Regions, and WCS/catalog) has a custom title bar with dock/undock and close buttons
 - Floating docks gain native window controls (minimize / maximize / close) and behave as standalone windows
 
 ### Performance and safety
 - Header-based allocation budgets are enforced before pixel decoding
 - Decoded arrays are detached from file mappings when needed, so source files can be closed or overwritten safely on Windows
-- Measurements, image comparison, WCS grids, Gaia responses, and DS9 Region interchange use feature-specific resource budgets
-- Gaia queries and comparison rendering run outside the GUI thread and ignore cancelled or stale results
+- Measurements, moving-target detection, image comparison, WCS grids, Gaia responses, and DS9 Region interchange use feature-specific resource budgets
+- Gaia queries, moving-target analysis, and comparison rendering run outside the GUI thread and ignore cancelled or stale results
 - WCS grids are generated on demand, bounded, and cached for reuse
 - Subsampled interval calculation for large images (stride to ~1000x1000)
 - Background multi-file FITS loading keeps the UI responsive during large imports
@@ -134,7 +145,7 @@ rejected before decompression; safely decompress those files first.
 
 ### Windows release installer
 
-Download `AstroView_Setup_1.8.0.exe` and `SHA256SUMS.txt` from the
+Download `AstroView_Setup_1.9.0.exe` and `SHA256SUMS.txt` from the
 [GitHub Releases page](https://github.com/carryons6/fitson/releases). The
 Windows installer is **not Authenticode-signed**, so Windows SmartScreen may
 display a warning. Verify the installer against the release checksum before
@@ -179,6 +190,7 @@ SHA-256 hashes before using them.
   - `catalog_service.py`: validated Gaia DR3 TAP queries and response parsing
   - `ds9_regions.py`: safe DS9 Region parsing and serialization
   - `image_comparison.py`: bounded pixel/WCS comparison and difference output
+  - `moving_targets.py`: bounded registration, temporal differencing, and linear-track recovery
   - `sep_service.py`: SEP source extraction wrapper
   - `source_catalog.py`: source catalog data model
   - `contracts.py`: typed dataclasses shared across layers
@@ -196,6 +208,8 @@ SHA-256 hashes before using them.
   - `catalog_overlay_dock.py`: WCS-grid and Gaia-query controls
   - `ds9_region_dock.py`: DS9 Region import/export and document controls
   - `comparison_dock.py`: frame A/B comparison and blink controls
+  - `moving_target_dock.py`: cross-frame ROI, detection controls, and trajectory table
+  - `moving_target_worker.py`: cancellable subprocess adapter for SEP-heavy sequence analysis
   - `header_dialog.py`: FITS header viewer dialog
   - `status_bar.py`: cursor/zoom/frame status display
 

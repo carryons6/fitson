@@ -12,13 +12,23 @@ from PySide6.QtWidgets import QApplication
 import sys
 from pathlib import Path
 
+import numpy as np
+
 REPO_PARENT = Path(__file__).resolve().parents[2]
 if str(REPO_PARENT) not in sys.path:
     sys.path.insert(0, str(REPO_PARENT))
 
-from astroview.app.i18n import install_translator, load_preferred_language, save_preferred_language
+from astroview.app.i18n import (
+    install_translator,
+    load_preferred_language,
+    localize_moving_target_text,
+    save_preferred_language,
+)
 from astroview.app.main_window import MainWindow
 from astroview.app.status_bar import AppStatusBar
+from astroview.core.contracts import ROISelection
+from astroview.core.fits_data import FITSData
+from astroview.core.moving_targets import MovingTargetParameters
 
 
 class TestI18n(unittest.TestCase):
@@ -96,6 +106,58 @@ class TestI18n(unittest.TestCase):
             self.assertEqual(
                 window.tr("Exit image comparison before selecting a ROI."),
                 "请先退出图像比较，再选择 ROI。",
+            )
+        finally:
+            window.close()
+            window.deleteLater()
+
+    def test_moving_target_runtime_messages_are_localized(self) -> None:
+        install_translator(self._app, "zh_CN")
+        window = MainWindow()
+        try:
+            window.initialize(apply_startup_request=False)
+            self.assertEqual(window.moving_target_dock.export_button.text(), "导出 CSV...")
+            self.assertEqual(
+                localize_moving_target_text("SEP extraction 3/15", window.tr),
+                "SEP 提取 3/15",
+            )
+            self.assertEqual(
+                localize_moving_target_text(
+                    "MovingTargetError: Moving-target analysis requires an ROI of at least 16 x 16 pixels.",
+                    window.tr,
+                ),
+                "动目标分析要求 ROI 至少为 16 x 16 像素。",
+            )
+            registration_errors = {
+                "MovingTargetError: Too few mutual registration matches: 7 (need at least 10).": "相互配准匹配过少：当前 7 个（至少需要 10 个）。",
+                "MovingTargetError: Robust registration retained only 8 source matches (need at least 10).": "稳健配准仅保留 8 个源匹配（至少需要 10 个）。",
+                "MovingTargetError: Frame registration RMS is 1.500 px; the pure-translation limit is 1.000 px.": "帧配准 RMS 为 1.500 px；纯平移模型上限为 1.000 px。",
+            }
+            for source, expected in registration_errors.items():
+                with self.subTest(source=source):
+                    self.assertEqual(
+                        localize_moving_target_text(source, window.tr),
+                        expected,
+                    )
+            self.assertEqual(
+                localize_moving_target_text(
+                    "Not every frame has a usable FITS timestamp; using the explicit 2.5 s frame cadence.",
+                    window.tr,
+                ),
+                "并非每一帧都有可用的 FITS 时间戳；将使用显式设置的 2.5 秒帧间隔。",
+            )
+
+            frames = [
+                FITSData(path=f"small-{index}.fits", data=np.zeros((8, 8)))
+                for index in range(5)
+            ]
+            window._frames = frames
+            window.fits_service.current_data = frames[0]
+            window._moving_target_roi = ROISelection(0, 0, 8, 8)
+            window._start_moving_target_detection(MovingTargetParameters(), 1.0, False)
+            self.assertEqual(
+                window.moving_target_dock.status_label.text(),
+                "动目标分析要求 ROI 至少为 16 x 16 像素。",
             )
         finally:
             window.close()

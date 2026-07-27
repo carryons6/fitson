@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+## 1.9.0 - 2026-07-27
+
+### English
+
+#### Added
+- Added a Moving Targets dock for equal-shaped multi-frame sequences. After an optional one-shot ROI capture, the Detect action runs bounded per-frame SEP extraction, robust stellar translation, temporal-median differencing, static-source masking, constant-velocity association, and recovery against original SEP centroids.
+- Added per-frame red-circle overlays that follow playback and all eight image orientations, a trajectory table with hits/velocity/RMS, FITS-header or explicit-cadence timing, and long-form CSV export.
+
+#### Security and performance
+- Runs SEP-heavy sequence analysis in a cancellable spawn subprocess, rejects stale results by request, context, and dataset identity, preserves frozen Windows DLL search handles, and reaps children before deleting file-backed ROI stacks.
+- Rejects unordered, duplicated, or semantically mixed FITS times and low-quality pure-translation registration. Enforces frame-count, ROI-pixel, stack-byte, per-frame/total source, candidate, seed, raw-track, unique-track, and output budgets; the defaults accept the validated 15 x 2000 x 2000 ROI while rejecting an 8120 x 8120 full-frame sequence.
+
+### 简体中文
+
+#### 新增
+- 新增“动目标检测”面板，用于尺寸相同的多帧序列。可先进行一次性 ROI 捕获，再点击“检测”执行受限逐帧 SEP、恒星场稳健平移配准、时间中值差分、静态源掩膜、恒速轨迹关联，并回到原始 SEP 星表恢复质心。
+- 新增随播放和八种图像方向更新的逐帧红圈叠加、包含命中帧/速度/RMS 的轨迹表、FITS 时间或显式帧间隔选择，以及逐目标逐帧 CSV 导出。
+
+#### 安全与性能
+- 将 SEP 密集的序列分析放入可取消的 spawn 子进程，通过请求、上下文和数据集身份拒绝过期结果，保持冻结版 Windows DLL 搜索句柄，并确保回收子进程后再删除文件映射 ROI 栈。
+- 拒绝乱序、重复或时间语义混用的 FITS 时间，以及质量不足的纯平移配准；对帧数、ROI 像素、序列栈字节、逐帧/总源数、候选、seed、原始轨迹、唯一轨迹和输出实施预算。默认值可接受已验证的 15 x 2000 x 2000 ROI，同时在分配前拒绝 8120 x 8120 全幅序列。
+
 ## 1.8.0 - 2026-07-25
 
 ### English

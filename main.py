@@ -58,6 +58,7 @@ def run_smoke_test() -> int:
         import numpy as np
         import sep
         from astropy.io import fits
+        from astropy.time import Time
 
         _write_smoke_report("RUNNING QApplication")
         app = QApplication.instance() or QApplication([APP_NAME, "--smoke-test"])
@@ -73,6 +74,7 @@ def run_smoke_test() -> int:
         _write_smoke_report("RUNNING FITS")
         sample = np.zeros((16, 16), dtype=np.float32)
         fits.PrimaryHDU(data=sample).verify("exception")
+        Time("2026-01-01T00:00:00", scale="utc")
         _write_smoke_report("RUNNING SEP")
         sep.extract(sample, 1.0)
         _write_smoke_report("RUNNING Qt events")

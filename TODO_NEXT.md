@@ -1,6 +1,11 @@
 ﻿# Next-Step Todo
 
-This file tracks the next performance and product-quality tasks worth doing after AstroView 1.8.0.
+This file tracks the next performance and product-quality tasks worth doing after AstroView 1.9.0.
+
+## Completed in 1.9.0
+- ~~Add bounded multi-frame moving-target detection with stellar registration, temporal differencing, constant-velocity track association, per-frame overlays, and CSV export.~~ Done.
+- ~~Run SEP-heavy moving-target analysis in a cancellable spawn subprocess with stale-result rejection and Windows-safe temporary-data cleanup.~~ Done.
+- ~~Add strict timestamp, registration-quality, common-valid-area, source-count, candidate, seed, and intermediate-track limits.~~ Done.
 
 ## Completed in 1.8.0
 - ~~Add bounded ROI statistics and circular-aperture photometry with background subtraction, SNR, centroid, and FWHM.~~ Done.
@@ -39,7 +44,7 @@ This file tracks the next performance and product-quality tasks worth doing afte
 - ~~Add integration-style Qt tests that exercise real `QThread` worker scheduling and signal delivery without relying only on mocked call paths.~~ Done.
 - ~~Add regression tests around repeated stretch/interval changes while background renders are in flight.~~ Done.
 - ~~Add tests for cancellation behavior when closing the window or opening a new file set during active background loading/rendering.~~ Done.
-- Validate packaged Windows builds after the 1.8.0 worker, WCS, catalog, Region, measurement, and comparison changes.
+- Validate the packaged Windows moving-target spawn path after the 1.9.0 worker and DLL-search changes.
 - Harden PyInstaller packaging so PySide6/numpy/conda runtime dependencies are collected reliably across environment variants, then review bundle size for safe trimming.
 - Add Authenticode signing for the Windows installer and executable; until then, continue publishing SHA-256 manifests and the explicit SmartScreen warning.
 - Consider signed update metadata, an SBOM, and reproducible macOS/Linux packages after the Windows release path is stable.

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import Any
+import re
+from typing import Any, Callable
 
 from PySide6.QtCore import QLocale, QSettings, QTranslator
 
@@ -41,6 +42,7 @@ _TRANSLATIONS: dict[str, dict[str, str]] = {
         "Image Orientation": "图像方向",
         "Open": "打开",
         "Export CSV": "导出 CSV",
+        "Export CSV...": "导出 CSV...",
         "Export Image...": "导出图像...",
         "Export Raw Image...": "导出原始图像...",
         "Show Header": "显示 Header",
@@ -71,6 +73,91 @@ _TRANSLATIONS: dict[str, dict[str, str]] = {
         "SEP Extract": "SEP 提取",
         "Rerun SEP Extract": "重新运行 SEP 提取",
         "Markers": "标记",
+        "Moving Targets...": "动目标检测...",
+        "Moving Targets": "动目标检测",
+        "Load at least 5 equal-sized frames.": "请加载至少 5 帧尺寸相同的图像。",
+        "Analysis area: full frame": "分析区域：全幅",
+        "Select ROI": "选择 ROI",
+        "Use Full Frame": "使用全幅",
+        "SEP threshold:": "SEP 阈值：",
+        "Minimum hits:": "最少命中帧：",
+        "Minimum speed:": "最小速度：",
+        "Maximum speed:": "最大速度：",
+        "Maximum track RMS:": "最大轨迹 RMS：",
+        "Prefer FITS timestamps": "优先使用 FITS 时间戳",
+        "Fallback cadence:": "备用帧间隔：",
+        "Auto": "自动",
+        "Detect": "检测",
+        "Ready.": "就绪。",
+        "Hits": "命中",
+        "Speed": "速度",
+        "Frames: {count}; common size: {width} x {height}": "帧数：{count}；共同尺寸：{width} x {height}",
+        "Analysis ROI: x=[{x0},{x1}), y=[{y0},{y1}) ({width} x {height})": "分析 ROI：x=[{x0},{x1})，y=[{y0},{y1})（{width} x {height}）",
+        "Found {count} moving target(s). Time source: {source}.": "发现 {count} 个动目标。时间来源：{source}。",
+        "No moving-target results.": "暂无动目标结果。",
+        "Load a FITS sequence before selecting an analysis ROI.": "请先加载 FITS 序列，再选择分析 ROI。",
+        "Switch to Single Frame View before selecting a moving-target ROI.": "选择动目标 ROI 前请切换到单帧显示。",
+        "Right-drag once on the image to select the cross-frame analysis ROI.": "请在图像上右键拖拽一次，以选择跨帧分析 ROI。",
+        "Right-drag the moving-target analysis ROI.": "请右键拖拽动目标分析 ROI。",
+        "Full-frame analysis selected; large sequences may require a smaller ROI.": "已选择全幅分析；较大序列可能需要更小的 ROI。",
+        "Wait for the current task to finish before detecting moving targets.": "请等待当前任务结束后再检测动目标。",
+        "All moving-target input frames must be equal-sized 2D images.": "所有动目标输入帧必须是尺寸相同的二维图像。",
+        "Analysis ROI contains {pixels} pixels; the limit is {limit}. Select a smaller ROI.": "分析 ROI 包含 {pixels} 个像素；上限为 {limit}。请选择更小的 ROI。",
+        "Preparing moving-target analysis...": "正在准备动目标分析...",
+        "Detecting moving targets...": "正在检测动目标...",
+        "Detecting moving targets: {detail}": "正在检测动目标：{detail}",
+        "Found {count} moving target(s).": "发现 {count} 个动目标。",
+        "Moving-target detection failed": "动目标检测失败",
+        "Moving-target detection cancelled.": "动目标检测已取消。",
+        "Cancelling moving-target detection...": "正在取消动目标检测...",
+        "Moving-target ROI selected. Press Detect to analyze the loaded sequence.": "已选择动目标 ROI。点击“检测”分析已加载序列。",
+        "Export Moving Targets": "导出动目标",
+        "Moving-target export failed": "动目标导出失败",
+        "Moving-target CSV exported: {path}": "动目标 CSV 已导出：{path}",
+        "Moving-target analysis ROI": "动目标分析 ROI",
+        "Preparing ROI frame {current}/{total}": "正在准备 ROI 帧 {current}/{total}",
+        "SEP extraction {current}/{total}": "SEP 提取 {current}/{total}",
+        "Frame registration {current}/{total}": "帧配准 {current}/{total}",
+        "Difference candidates {current}/{total}": "差分候选 {current}/{total}",
+        "Temporal median ready": "时间中值图已就绪",
+        "Linear tracks fitted": "线性轨迹拟合完成",
+        "Moving-target detection complete": "动目标检测完成",
+        "Not every frame has a usable FITS timestamp; using the explicit {cadence} s frame cadence.": "并非每一帧都有可用的 FITS 时间戳；将使用显式设置的 {cadence} 秒帧间隔。",
+        "Using the user-selected fixed frame cadence of {cadence} s.": "使用用户选择的固定帧间隔 {cadence} 秒。",
+        "Fixed cadence ({cadence} s)": "固定帧间隔（{cadence} 秒）",
+        "FITS average timestamps": "FITS 平均时刻时间戳",
+        "FITS exposure-midpoint timestamps": "FITS 曝光中点时间戳",
+        "FITS observation-start timestamps": "FITS 曝光起点时间戳",
+        "FITS header timestamps": "FITS Header 时间戳",
+        "Moving-target analysis requires an ROI of at least 16 x 16 pixels.": "动目标分析要求 ROI 至少为 16 x 16 像素。",
+        "Moving-target detection requires at least 5 frames.": "动目标检测至少需要 5 帧。",
+        "Moving-target detection requires at least 5 loaded frames.": "动目标检测至少需要 5 个已加载帧。",
+        "min_track_speed must be less than max_track_speed.": "最小轨迹速度必须小于最大轨迹速度。",
+        "Frame times must be strictly increasing.": "帧时间必须严格递增。",
+        "FITS timestamps must be finite, unique, and strictly increasing in the loaded frame order. Reorder the sequence, or disable header times and specify a fixed cadence.": "FITS 时间戳必须有限、唯一，并按当前加载顺序严格递增。请重新排列序列，或关闭 Header 时间并指定固定帧间隔。",
+        "FITS observation timestamps mix exposure-start and exposure-midpoint semantics because EXPTIME/EXPOSURE is missing or invalid in some frames. Supply valid exposure times for every frame, remove them from every frame, or use a fixed cadence.": "部分帧缺少或具有无效的 EXPTIME/EXPOSURE，导致 FITS 观测时间混用曝光起点与曝光中点。请为每帧提供有效曝光时间、从所有帧移除曝光时间，或使用固定帧间隔。",
+        "FITS timestamp semantics differ between frames ({labels}). Use one timestamp convention for the sequence, or disable header times and specify a fixed cadence.": "各帧 FITS 时间戳语义不一致（{labels}）。请统一序列的时间戳约定，或关闭 Header 时间并指定固定帧间隔。",
+        "Too few SEP sources for frame registration (need at least 10).": "用于帧配准的 SEP 源过少（至少需要 10 个）。",
+        "Frame count {frames} exceeds the moving-target limit of {limit}.": "帧数 {frames} 超过动目标上限 {limit}。",
+        "The {frames}-frame ROI stack requires {required} MiB; the limit is {limit} MiB. Select a smaller ROI or load fewer frames.": "{frames} 帧 ROI 栈需要 {required} MiB；上限为 {limit} MiB。请选择更小的 ROI 或加载更少帧。",
+        "SEP found more than {limit} sources across the sequence; increase the threshold or select a smaller ROI.": "SEP 在整个序列中发现超过 {limit} 个源；请提高阈值或选择更小的 ROI。",
+        "SEP found {count} sources in one frame; the limit is {limit}. Increase the threshold or select a smaller ROI.": "SEP 在单帧中发现 {count} 个源；上限为 {limit}。请提高阈值或选择更小的 ROI。",
+        "Difference frame {frame} produced {count} candidates; the limit is {limit}. Increase the detection threshold or select a smaller ROI.": "第 {frame} 个差分帧产生 {count} 个候选；上限为 {limit}。请提高检测阈值或选择更小的 ROI。",
+        "Track seed count exceeded {limit}; increase detection thresholds or select a smaller ROI.": "轨迹 seed 数超过 {limit}；请提高检测阈值或选择更小的 ROI。",
+        "Raw moving-track count exceeded {limit}; increase detection thresholds or select a smaller ROI.": "原始动目标轨迹数超过 {limit}；请提高检测阈值或选择更小的 ROI。",
+        "Unique moving-track count exceeded {limit}; increase detection thresholds or select a smaller ROI.": "唯一动目标轨迹数超过 {limit}；请提高检测阈值或选择更小的 ROI。",
+        "Moving-target output contains {count} tracks; the limit is {limit}.": "动目标输出包含 {count} 条轨迹；上限为 {limit}。",
+        "Frame {frame} registration retained {matches} matches; at least {required} are required.": "第 {frame} 帧配准保留了 {matches} 个匹配；至少需要 {required} 个。",
+        "Frame {frame} registration RMS is {rms} px; the limit is {limit} px.": "第 {frame} 帧配准 RMS 为 {rms} px；上限为 {limit} px。",
+        "Too few mutual registration matches: {matches} (need at least {required}).": "相互配准匹配过少：当前 {matches} 个（至少需要 {required} 个）。",
+        "Robust registration retained only {matches} source matches (need at least {required}).": "稳健配准仅保留 {matches} 个源匹配（至少需要 {required} 个）。",
+        "Frame registration RMS is {rms} px; the pure-translation limit is {limit} px.": "帧配准 RMS 为 {rms} px；纯平移模型上限为 {limit} px。",
+        "Frame {current}/{total}": "帧 {current}/{total}",
+        "hits={hits}, rms={rms} px": "命中={hits}，RMS={rms} px",
+        "position={kind}": "位置={kind}",
+        "SEP centroid": "SEP 质心",
+        "track prediction": "轨迹预测",
+        "Wait for moving-target detection to finish before running SEP.": "请等待动目标检测结束后再运行 SEP。",
         "Target Info Fields...": "目标信息字段...",
         "Check for Updates...": "检查更新...",
         "Reopen Session": "重新打开会话",
@@ -548,6 +635,164 @@ def current_language(app: Any | None = None) -> str:
     return _installed_locale
 
 
+_MOVING_TARGET_RUNTIME_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"^Preparing ROI frame (?P<current>\d+)/(?P<total>\d+)$"), "Preparing ROI frame {current}/{total}"),
+    (re.compile(r"^SEP extraction (?P<current>\d+)/(?P<total>\d+)$"), "SEP extraction {current}/{total}"),
+    (re.compile(r"^Frame registration (?P<current>\d+)/(?P<total>\d+)$"), "Frame registration {current}/{total}"),
+    (re.compile(r"^Difference candidates (?P<current>\d+)/(?P<total>\d+)$"), "Difference candidates {current}/{total}"),
+    (
+        re.compile(
+            r"^Not every frame has a usable FITS timestamp; using the explicit "
+            r"(?P<cadence>[^ ]+) s frame cadence\.$"
+        ),
+        "Not every frame has a usable FITS timestamp; using the explicit {cadence} s frame cadence.",
+    ),
+    (
+        re.compile(r"^Using the user-selected fixed frame cadence of (?P<cadence>[^ ]+) s\.$"),
+        "Using the user-selected fixed frame cadence of {cadence} s.",
+    ),
+    (re.compile(r"^Fixed cadence \((?P<cadence>[^ ]+) s\)$"), "Fixed cadence ({cadence} s)"),
+    (
+        re.compile(r"^Frame count (?P<frames>[\d,]+) exceeds the moving-target limit of (?P<limit>[\d,]+)\.$"),
+        "Frame count {frames} exceeds the moving-target limit of {limit}.",
+    ),
+    (
+        re.compile(
+            r"^Analysis ROI contains (?P<pixels>[\d,]+) pixels; the limit is "
+            r"(?P<limit>[\d,]+)\. Select a smaller ROI\.$"
+        ),
+        "Analysis ROI contains {pixels} pixels; the limit is {limit}. Select a smaller ROI.",
+    ),
+    (
+        re.compile(
+            r"^The (?P<frames>[\d,]+)-frame ROI stack requires (?P<required>[\d.]+) MiB; "
+            r"the limit is (?P<limit>[\d.]+) MiB\. Select a smaller ROI or load fewer frames\.$"
+        ),
+        "The {frames}-frame ROI stack requires {required} MiB; the limit is {limit} MiB. Select a smaller ROI or load fewer frames.",
+    ),
+    (
+        re.compile(
+            r"^SEP found more than (?P<limit>[\d,]+) sources across the sequence; "
+            r"increase the threshold or select a smaller ROI\.$"
+        ),
+        "SEP found more than {limit} sources across the sequence; increase the threshold or select a smaller ROI.",
+    ),
+    (
+        re.compile(
+            r"^SEP found (?P<count>[\d,]+) sources in one frame; the limit is "
+            r"(?P<limit>[\d,]+)\. Increase the threshold or select a smaller ROI\.$"
+        ),
+        "SEP found {count} sources in one frame; the limit is {limit}. Increase the threshold or select a smaller ROI.",
+    ),
+    (
+        re.compile(
+            r"^Difference frame (?P<frame>\d+) produced (?P<count>[\d,]+) candidates; "
+            r"the limit is (?P<limit>[\d,]+)\. Increase the detection threshold or "
+            r"select a smaller ROI\.$"
+        ),
+        "Difference frame {frame} produced {count} candidates; the limit is {limit}. Increase the detection threshold or select a smaller ROI.",
+    ),
+    (
+        re.compile(
+            r"^Track seed count exceeded (?P<limit>[\d,]+); increase detection thresholds "
+            r"or select a smaller ROI\.$"
+        ),
+        "Track seed count exceeded {limit}; increase detection thresholds or select a smaller ROI.",
+    ),
+    (
+        re.compile(
+            r"^Raw moving-track count exceeded (?P<limit>[\d,]+); increase detection "
+            r"thresholds or select a smaller ROI\.$"
+        ),
+        "Raw moving-track count exceeded {limit}; increase detection thresholds or select a smaller ROI.",
+    ),
+    (
+        re.compile(
+            r"^Unique moving-track count exceeded (?P<limit>[\d,]+); increase detection "
+            r"thresholds or select a smaller ROI\.$"
+        ),
+        "Unique moving-track count exceeded {limit}; increase detection thresholds or select a smaller ROI.",
+    ),
+    (
+        re.compile(
+            r"^Moving-target output contains (?P<count>[\d,]+) tracks; the limit is "
+            r"(?P<limit>[\d,]+)\.$"
+        ),
+        "Moving-target output contains {count} tracks; the limit is {limit}.",
+    ),
+    (
+        re.compile(
+            r"^Frame (?P<frame>\d+) registration retained (?P<matches>[\d,]+) matches; "
+            r"at least (?P<required>[\d,]+) are required\.$"
+        ),
+        "Frame {frame} registration retained {matches} matches; at least {required} are required.",
+    ),
+    (
+        re.compile(
+            r"^Frame (?P<frame>\d+) registration RMS is (?P<rms>[\d.]+) px; "
+            r"the limit is (?P<limit>[\d.]+) px\.$"
+        ),
+        "Frame {frame} registration RMS is {rms} px; the limit is {limit} px.",
+    ),
+    (
+        re.compile(
+            r"^Too few mutual registration matches: (?P<matches>[\d,]+) "
+            r"\(need at least (?P<required>[\d,]+)\)\.$"
+        ),
+        "Too few mutual registration matches: {matches} (need at least {required}).",
+    ),
+    (
+        re.compile(
+            r"^Robust registration retained only (?P<matches>[\d,]+) source matches "
+            r"\(need at least (?P<required>[\d,]+)\)\.$"
+        ),
+        "Robust registration retained only {matches} source matches (need at least {required}).",
+    ),
+    (
+        re.compile(
+            r"^Frame registration RMS is (?P<rms>[\d.]+) px; the pure-translation "
+            r"limit is (?P<limit>[\d.]+) px\.$"
+        ),
+        "Frame registration RMS is {rms} px; the pure-translation limit is {limit} px.",
+    ),
+    (
+        re.compile(
+            r"^FITS timestamp semantics differ between frames \((?P<labels>.+)\)\. "
+            r"Use one timestamp convention for the sequence, or disable header times "
+            r"and specify a fixed cadence\.$"
+        ),
+        "FITS timestamp semantics differ between frames ({labels}). Use one timestamp convention for the sequence, or disable header times and specify a fixed cadence.",
+    ),
+)
+
+
+def localize_moving_target_text(
+    message: str,
+    translate: Callable[[str], str],
+) -> str:
+    """Translate bounded runtime messages whose numeric values are filled in by workers."""
+
+    source = str(message)
+    direct = translate(source)
+    if direct != source:
+        return direct
+    prefixed = re.fullmatch(
+        r"(?:MovingTarget(?:Limit)?Error|ValueError|RuntimeError): (?P<detail>.+)",
+        source,
+        flags=re.DOTALL,
+    )
+    if prefixed is not None:
+        detail = prefixed.group("detail")
+        localized_detail = localize_moving_target_text(detail, translate)
+        if localized_detail != detail:
+            return localized_detail
+    for pattern, template in _MOVING_TARGET_RUNTIME_PATTERNS:
+        match = pattern.fullmatch(source)
+        if match is not None:
+            return translate(template).format(**match.groupdict())
+    return source
+
+
 __all__ = [
     "LANGUAGE_KEY",
     "available_locales",
@@ -555,6 +800,7 @@ __all__ = [
     "install_translator",
     "language_display_name",
     "load_preferred_language",
+    "localize_moving_target_text",
     "normalize_locale",
     "save_preferred_language",
     "system_locale",

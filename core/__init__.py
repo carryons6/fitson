@@ -33,6 +33,18 @@ from .image_comparison import (
     compare_fits_images,
 )
 from .measurement_service import ApertureMeasurement, MeasurementService, ROIStatistics
+from .moving_targets import (
+    MovingTargetCancelled,
+    MovingTargetError,
+    MovingTargetLimitError,
+    MovingTargetParameters,
+    MovingTargetResult,
+    MovingTargetService,
+    MovingTargetTrack,
+    detect_moving_targets,
+    export_moving_targets_csv,
+    resolve_frame_times,
+)
 from .sep_service import SEPParameters, SEPService
 from .source_catalog import SourceCatalog, SourceRecord
 from .wcs_grid import WCSGrid, WCSGridLine, build_wcs_grid
@@ -50,6 +62,13 @@ __all__ = [
     "ImageComparisonResult",
     "ApertureMeasurement",
     "MeasurementService",
+    "MovingTargetCancelled",
+    "MovingTargetError",
+    "MovingTargetLimitError",
+    "MovingTargetParameters",
+    "MovingTargetResult",
+    "MovingTargetService",
+    "MovingTargetTrack",
     "OpenFileRequest",
     "PixelSample",
     "ROISelection",
@@ -79,5 +98,8 @@ __all__ = [
     "write_ds9_region_file",
     "compare_fits_images",
     "build_wcs_grid",
+    "detect_moving_targets",
+    "export_moving_targets_csv",
     "query_gaia",
+    "resolve_frame_times",
 ]

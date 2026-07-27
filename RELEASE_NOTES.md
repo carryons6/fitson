@@ -1,67 +1,77 @@
-# AstroView 1.8.0 — Measurement and Interoperability
+# AstroView 1.9.0 — Multi-Frame Moving Target Detection
 
-Release date: **2026-07-25**
+Release date: **2026-07-27**
 
-AstroView 1.8.0 extends the fast FITS-viewing workflow with lightweight scientific measurement, sky-catalog context, DS9 Region interchange, and bounded two-frame comparison.
+AstroView 1.9.0 adds a bounded, reviewable workflow for finding obvious linear moving targets in loaded FITS sequences.
 
 ## Highlights
 
-- Added a **Measurement Workbench** for NaN-safe ROI statistics and circular-aperture photometry with annulus background subtraction, robust RMS, net flux, uncertainty, SNR, centroid, FWHM, and peak measurements.
-- Added a projected **RA/Dec grid** and cancellable **Gaia DR3** cone search. Radius, result count, and faint G-magnitude limit are configurable; in-frame results appear in both an overlay and a selectable table. Gaia queries require an internet connection.
-- Added **DS9 Region** import/export and overlays for `image`, `physical`, `fk5`, and `icrs` coordinates with circle, box, ellipse, polygon, and point shapes. Physical-region pixel values are displayed as image coordinates, and current AstroView ROI and aperture selections can be captured as regions.
-- Added **Image Comparison** with frame A/B selection, side-by-side, blink, and A-minus-B difference modes. Direct comparison requires equal image shapes; an optional bounded nearest-neighbour path aligns images with validated 2D WCS onto frame A's grid.
+- Added a **Moving Targets** dock for sequences containing at least five equal-sized frames. Analyze the full frame or capture a one-shot cross-frame ROI with right-drag.
+- Added a validated pipeline combining per-frame SEP extraction, robust stellar translation, registered temporal-median subtraction, static-source masking, constant-velocity track association, and recovery against original SEP centroids.
+- Added per-frame red-circle overlays that follow playback and all eight image orientations. The results table shows hits, current position, velocity, speed, and fit RMS; long-form CSV export writes one row per target and frame.
+- Added FITS timestamp support with an explicit fixed-cadence fallback. Header times must be finite, unique, strictly increasing, and semantically consistent across the sequence.
 
 ## Safety and performance
 
-- Measurements, WCS grids, DS9 parsing/serialization, catalog responses, and comparison outputs all have explicit resource budgets and reject malformed, non-finite, oversized, or unsupported inputs with readable diagnostics.
-- Gaia queries use the fixed ESA HTTPS TAP endpoint, validated numeric-only ADQL, bounded radius and row counts, a 2 MiB response limit, strict CSV parsing, a total timeout, and responsive cancellation.
-- Gaia queries and comparison rendering run away from the GUI thread. Cancelled or stale results are ignored, A/B rendering shares one display interval, and WCS grids are bounded and cached.
-- Windows release verification now performs staged cold- and warm-start frozen-app smoke tests, cleans up the full smoke-test process tree on timeout, and keeps manual workflow runs as build-only preflights.
+- SEP-heavy analysis runs in a cancellable spawn subprocess using a file-backed float32 ROI stack. Stale results are rejected by request, context, and dataset identity.
+- Windows frozen-child DLL search handles remain alive for the process lifetime, and subprocesses are reaped before temporary memory-mapped data is removed.
+- Pure-translation registration rejects too few stellar matches, excessive residual RMS, and reflected border areas outside the common real-pixel footprint.
+- Frame, ROI, stack-memory, per-frame and total source, difference-candidate, seed, raw-track, unique-track, and output-track budgets bound worst-case work. Large-radius spatial searches scan actual candidates instead of empty grid cells.
+
+## Validation
+
+- The complete source test suite passes: **407 tests**.
+- The validated 15-frame 851363 sequence reproduces the handoff baseline on a 2000 x 2000 ROI: **5 tracks**, **2850 static sources**, difference hits of **13/13/14/15/15**, and SEP centroid recovery in **15/15 frames for every target**.
 
 ## Compatibility notes
 
-- WCS image alignment is intentionally limited to nearest-neighbour resampling on frame A's grid; it is not a general-purpose reprojection or calibration pipeline.
-- DS9 interchange supports the coordinate systems and shapes listed above. AstroView does not apply DS9 detector-section transforms to `physical` coordinates; their pixel values are displayed as image coordinates. Unsupported declarations are diagnosed or skipped rather than interpreted implicitly.
-- FITS tile compression (`CompImageHDU`) remains supported. Whole-file gzip/ZIP/bzip2/xz/LZW files must be safely decompressed before opening them in AstroView.
+- Detection is intentionally tuned for obvious, approximately constant-velocity targets after a pure stellar translation. Slow, curved, accelerating, crowded-field, rotated, or scale-changing sequences may be rejected or remain incomplete.
+- Velocities are reported in pixels per second. When reliable per-frame FITS times are unavailable, set the sequence cadence explicitly.
+- Pixel-space results do not establish astronomical identity; standard WCS is still required for sky-coordinate interpretation.
 
 ## Assets
 
-- `AstroView_Setup_1.8.0.exe` — Windows x64 installer
+- `AstroView_Setup_1.9.0.exe` — Windows x64 installer
 - `SHA256SUMS.txt` — SHA-256 verification manifest
 
 The Windows installer is **not Authenticode-signed**, so Windows SmartScreen may display a warning. Verify the installer against `SHA256SUMS.txt` downloaded from this release before running it.
 
 ---
 
-# AstroView 1.8.0 — 测量与互操作
+# AstroView 1.9.0 — 多帧动目标检测
 
-发布日期：**2026-07-25**
+发布日期：**2026-07-27**
 
-AstroView 1.8.0 在快速查看 FITS 的基础上，增加了轻量科学测量、星表环境信息、DS9 Region 交换以及受资源预算保护的双帧比较。
+AstroView 1.9.0 新增了一个受资源预算保护、结果可审查的多帧线性动目标检测流程。
 
 ## 重点更新
 
-- 新增**测量工作台**：提供 NaN 安全的 ROI 统计与圆形孔径测光，包括背景环扣除、稳健 RMS、净流量、不确定度、信噪比、质心、FWHM 和峰值测量。
-- 新增投影后的 **RA/Dec 网格**与可取消的 **Gaia DR3** 锥形检索。可设置查询半径、返回数量和 G 星等暗限；图像范围内的结果会同时显示在画布叠加层与可选择表格中。Gaia 查询需要联网。
-- 新增 **DS9 Region** 导入、导出与叠加，支持 `image`、`physical`、`fk5`、`icrs` 坐标系以及圆、矩形、椭圆、多边形和点；`physical` Region 的像素值显示时按图像坐标处理，还可将 AstroView 当前 ROI 与测光孔径捕获为 Region。
-- 新增**图像比较**：可选择帧 A/B，并使用并排、闪烁或 A−B 差分模式。直接比较要求图像尺寸相同；对于具有可靠二维 WCS 的图像，可选择受限的最近邻对齐，将帧 B 映射到帧 A 网格。
+- 新增**动目标检测**面板，用于至少 5 帧尺寸相同的已加载序列。可分析全幅，也可右键拖拽一次捕获跨帧 ROI。
+- 新增经过验证的处理链：逐帧 SEP、恒星场稳健平移配准、配准后时间中值差分、静态源掩膜、恒速轨迹关联，以及回到原始 SEP 星表恢复质心。
+- 新增随播放和八种图像方向同步更新的逐帧红圈。结果表显示命中帧、当前位置、速度分量、总速度和拟合 RMS；长表 CSV 按目标和帧各输出一行。
+- 新增 FITS 时间戳与显式固定帧间隔支持。Header 时间必须有限、唯一、按当前序列严格递增，并在所有帧中保持一致的时间语义。
 
 ## 安全与性能
 
-- 测量、WCS 网格、DS9 解析/序列化、星表响应和图像比较输出均具有明确资源预算；异常、非有限、超限或不支持的输入会返回可读诊断。
-- Gaia 查询仅使用固定的 ESA HTTPS TAP 端点，并采用纯数值校验后的 ADQL、受限半径与行数、2 MiB 响应上限、严格 CSV 解析、总超时和可响应取消机制。
-- Gaia 查询与比较渲染在 GUI 线程之外运行；已取消或过期的结果会被忽略，A/B 渲染复用同一显示区间，WCS 网格则受到数量限制并会缓存复用。
-- Windows 发布验证现在会分阶段执行冻结程序冷启动与热启动 smoke test，超时后清理完整 smoke-test 进程树，并确保手动工作流只进行预构建而不会发布。
+- SEP 密集分析在可取消的 spawn 子进程中运行，并使用文件映射的 float32 ROI 栈；过期结果会按请求、上下文和数据集身份被拒绝。
+- Windows 冻结子进程会在整个进程生命周期内保持 DLL 搜索句柄，并在删除临时内存映射数据前确认子进程已回收。
+- 纯平移配准会拒绝恒星匹配过少、残差 RMS 过高，以及所有帧共同真实像素范围之外的反射填充边界。
+- 对帧数、ROI、栈内存、逐帧/总源数、差分候选、seed、原始轨迹、唯一轨迹和输出轨迹实施预算；大半径空间搜索仅遍历真实候选，不扫描海量空网格。
+
+## 验证结果
+
+- 完整源码测试通过：**407 项测试**。
+- 已验证的 851363 序列在 15 帧、2000 x 2000 ROI 上复现交接基线：**5 条轨迹**、**2850 个静态源**、差分命中数 **13/13/14/15/15**，且每个目标均恢复 **15/15 帧 SEP 质心**。
 
 ## 兼容性说明
 
-- WCS 图像对齐有意限制为帧 A 网格上的最近邻采样，并非通用重投影或数据定标管线。
-- DS9 交换仅支持上面列出的坐标系与形状。AstroView 不会对 `physical` 坐标应用 DS9 探测器分区变换，而是将其像素值按图像坐标显示；不支持的声明会产生诊断或被跳过，不会被隐式解释。
-- FITS 内部分块压缩（`CompImageHDU`）仍受支持。整文件 gzip/ZIP/bzip2/xz/LZW 需要先安全解压，再使用 AstroView 打开。
+- 当前检测针对纯恒星平移配准后明显且近似恒速的目标。慢目标、曲线或加速目标、拥挤星场，以及存在旋转或尺度变化的序列可能被拒绝或检测不完整。
+- 速度单位为像素/秒。缺少可靠逐帧 FITS 时间时，请明确设置序列帧间隔。
+- 像素空间结果不能确认天体身份；转换为天球坐标仍需要标准 WCS。
 
 ## 附件
 
-- `AstroView_Setup_1.8.0.exe` — Windows x64 安装包
+- `AstroView_Setup_1.9.0.exe` — Windows x64 安装包
 - `SHA256SUMS.txt` — SHA-256 校验清单
 
 Windows 安装包**尚未进行 Authenticode 数字签名**，因此 Windows SmartScreen 可能显示警告。运行前请使用本 Release 下载的 `SHA256SUMS.txt` 核验安装包。

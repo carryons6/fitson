@@ -41,6 +41,12 @@ from ..core import FITSService, OpenFileRequest, PixelSample, ROISelection, SEPS
 from ..core.catalog_service import CatalogQuery, CatalogSource
 from ..core.fits_data import open_fits_container
 from ..core.measurement_service import MeasurementService
+from ..core.moving_targets import (
+    DEFAULT_MAX_MOVING_TARGET_ROI_PIXELS,
+    MovingTargetParameters,
+    MovingTargetResult,
+    export_moving_targets_csv,
+)
 from ..core.image_comparison import ComparisonMode
 from ..core.ds9_regions import DS9Attribute, DS9Region, DS9RegionDocument
 from ..core.sep_service import SEPParameters
@@ -74,9 +80,18 @@ from .frame_render_worker import FrameRenderWorker
 from .header_dialog import HeaderDialog
 from .header_parser import parse_header_text
 from .histogram_dock import HistogramDock
-from .i18n import available_locales, current_language, language_display_name, load_preferred_language, save_preferred_language
+from .i18n import (
+    available_locales,
+    current_language,
+    language_display_name,
+    load_preferred_language,
+    localize_moving_target_text,
+    save_preferred_language,
+)
 from .marker_dock import MarkerDock
 from .measurement_dock import MeasurementDock
+from .moving_target_dock import MovingTargetDock
+from .moving_target_worker import MovingTargetWorker
 from .sep_extract_worker import SEPExtractWorker
 from .sep_panel import SEPParamsPanel
 from .source_table import SourceTableDock
@@ -300,6 +315,67 @@ class _ComparisonSignalRelay(QObject):
         )
 
 
+class _MovingTargetSignalRelay(QObject):
+    """Deliver moving-target subprocess results on the owning GUI thread."""
+
+    def __init__(
+        self,
+        window: Any,
+        request_id: int,
+        context_generation: int,
+        dataset_signature: tuple[int, ...],
+        thread: QThread,
+        worker: MovingTargetWorker,
+    ) -> None:
+        super().__init__(window)
+        self._window = window
+        self._request_id = request_id
+        self._context_generation = context_generation
+        self._dataset_signature = dataset_signature
+        self._thread = thread
+        self._worker = worker
+
+    @Slot(int, object)
+    def handle_result(self, request_id: int, result: MovingTargetResult) -> None:
+        self._window._handle_moving_target_result_for_request(
+            request_id,
+            self._context_generation,
+            self._dataset_signature,
+            self._worker,
+            result,
+        )
+
+    @Slot(int, int, int, str)
+    def handle_progress(self, request_id: int, completed: int, total: int, detail: str) -> None:
+        self._window._handle_moving_target_progress_for_request(
+            request_id,
+            self._context_generation,
+            self._dataset_signature,
+            self._worker,
+            completed,
+            total,
+            detail,
+        )
+
+    @Slot(int, str)
+    def handle_error(self, request_id: int, detail: str) -> None:
+        self._window._handle_moving_target_error_for_request(
+            request_id,
+            self._context_generation,
+            self._dataset_signature,
+            self._worker,
+            detail,
+        )
+
+    @Slot()
+    def handle_thread_finished(self) -> None:
+        self._window._clear_moving_target_worker_refs(
+            self._request_id,
+            self._thread,
+            self._worker,
+        )
+
+
 class _SEPThreadFinishRelay(QObject):
     """Run SEP thread-finalization bookkeeping on the GUI thread."""
 
@@ -390,7 +466,7 @@ class MainWindow(QMainWindow):
     BKG_PREWARM_QUEUE_LIMIT = 8
     UPDATE_CHECK_THREAD_WAIT_MS = 6_000
     THREAD_JOIN_WAIT_MS = 6_000
-    WORKSPACE_LAYOUT_VERSION = 5
+    WORKSPACE_LAYOUT_VERSION = 6
     SEP_ESTIMATE_THRESHOLD_SIGMA = 15.0
     SEP_LARGE_COUNT_WARNING = 5000
     SEP_DENSE_FIELD_PER_MPX = 150
@@ -416,6 +492,7 @@ class MainWindow(QMainWindow):
         self.measurement_dock: MeasurementDock | None = None
         self.catalog_overlay_dock: CatalogOverlayDock | None = None
         self.comparison_dock: ComparisonDock | None = None
+        self.moving_target_dock: MovingTargetDock | None = None
         self.ds9_region_dock: DS9RegionDock | None = None
         self.frame_player_dock: FramePlayerDock | None = None
         self.histogram_dock: HistogramDock | None = None
@@ -454,6 +531,7 @@ class MainWindow(QMainWindow):
         self.action_show_markers: QAction | None = None
         self.action_append_frames: QAction | None = None
         self.action_target_info_fields: QAction | None = None
+        self.action_show_moving_targets: QAction | None = None
         self.action_check_updates: QAction | None = None
         self.action_cycle_view_mode: QAction | None = None
         self.action_toggle_magnifier: QAction | None = None
@@ -570,6 +648,16 @@ class MainWindow(QMainWindow):
         self._comparison_request_id: int = 0
         self._active_comparison_request_id: int | None = None
         self._comparison_results_enabled: bool = False
+        self._moving_target_roi: ROISelection | None = None
+        self._moving_roi_capture_pending: bool = False
+        self._moving_target_result: MovingTargetResult | None = None
+        self._moving_target_thread: QThread | None = None
+        self._moving_target_worker: MovingTargetWorker | None = None
+        self._moving_target_request_id: int = 0
+        self._active_moving_target_request_id: int | None = None
+        self._moving_target_context_generation: int = 0
+        self._moving_target_results_enabled: bool = False
+        self._moving_target_cancel_feedback_pending: bool = False
         self._gaia_query_thread: QThread | None = None
         self._gaia_query_worker: GaiaQueryWorker | None = None
         self._gaia_query_request_id: int = 0
@@ -651,6 +739,7 @@ class MainWindow(QMainWindow):
         self.bind_canvas_signals()
         self.bind_source_table_signals()
         self.bind_sep_panel_signals()
+        self.bind_moving_target_signals()
         self.bind_toolbar_signals()
         self.bind_action_triggers()
         self.bind_status_bar_signals()
@@ -770,6 +859,14 @@ class MainWindow(QMainWindow):
             | Qt.DockWidgetArea.RightDockWidgetArea
         )
 
+        self.moving_target_dock = MovingTargetDock(self)
+        self.moving_target_dock.setMinimumWidth(360)
+        self.moving_target_dock.setAllowedAreas(
+            Qt.DockWidgetArea.LeftDockWidgetArea
+            | Qt.DockWidgetArea.RightDockWidgetArea
+            | Qt.DockWidgetArea.BottomDockWidgetArea
+        )
+
         self.ds9_region_dock = DS9RegionDock(self)
         self.ds9_region_dock.setMinimumWidth(340)
         self.ds9_region_dock.setAllowedAreas(
@@ -804,6 +901,7 @@ class MainWindow(QMainWindow):
             self.marker_dock,
             self.measurement_dock,
             self.comparison_dock,
+            self.moving_target_dock,
             self.ds9_region_dock,
             self.catalog_overlay_dock,
             self.histogram_dock,
@@ -819,6 +917,7 @@ class MainWindow(QMainWindow):
         self.marker_dock.hide()
         self.measurement_dock.hide()
         self.comparison_dock.hide()
+        self.moving_target_dock.hide()
         self.ds9_region_dock.hide()
         self.catalog_overlay_dock.hide()
         self.histogram_dock.hide()
@@ -835,6 +934,7 @@ class MainWindow(QMainWindow):
                 self.marker_dock,
                 self.measurement_dock,
                 self.comparison_dock,
+                self.moving_target_dock,
                 self.ds9_region_dock,
                 self.catalog_overlay_dock,
                 self.histogram_dock,
@@ -873,6 +973,10 @@ class MainWindow(QMainWindow):
             self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.comparison_dock)
             if self.source_table_dock is not None:
                 self.tabifyDockWidget(self.source_table_dock, self.comparison_dock)
+        if self.moving_target_dock is not None:
+            self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.moving_target_dock)
+            if self.source_table_dock is not None:
+                self.tabifyDockWidget(self.source_table_dock, self.moving_target_dock)
         if self.ds9_region_dock is not None:
             self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.ds9_region_dock)
             if self.source_table_dock is not None:
@@ -1038,6 +1142,8 @@ class MainWindow(QMainWindow):
             self.menu_tools.addAction(self.action_show_markers)
         if self.action_target_info_fields is not None:
             self.menu_tools.addAction(self.action_target_info_fields)
+        if self.action_show_moving_targets is not None:
+            self.menu_tools.addAction(self.action_show_moving_targets)
         if self.action_check_updates is not None:
             self.menu_help.addAction(self.action_check_updates)
 
@@ -1058,6 +1164,8 @@ class MainWindow(QMainWindow):
             self.menu_view.addAction(self.measurement_dock.toggleViewAction())
         if self.comparison_dock is not None:
             self.menu_view.addAction(self.comparison_dock.toggleViewAction())
+        if self.moving_target_dock is not None:
+            self.menu_view.addAction(self.moving_target_dock.toggleViewAction())
         if self.ds9_region_dock is not None:
             self.menu_view.addAction(self.ds9_region_dock.toggleViewAction())
         if self.catalog_overlay_dock is not None:
@@ -1273,6 +1381,7 @@ class MainWindow(QMainWindow):
         self.action_show_markers = QAction(self.tr("Markers"), self)
         self.action_show_markers.setShortcut("Ctrl+M")
         self.action_target_info_fields = QAction(self.tr("Target Info Fields..."), self)
+        self.action_show_moving_targets = QAction(self.tr("Moving Targets..."), self)
 
         self.stretch_selector = QComboBox(self)
         self.stretch_selector.setObjectName("stretch_selector")
@@ -1331,6 +1440,20 @@ class MainWindow(QMainWindow):
         self.app_status_bar.cancel_requested.connect(self._handle_status_bar_cancel_requested)
         self.app_status_bar.continue_requested.connect(self._handle_status_bar_continue_requested)
         self.app_status_bar.error_details_requested.connect(self._show_latest_error_details)
+
+    def bind_moving_target_signals(self) -> None:
+        if self.moving_target_dock is None:
+            return
+        self.moving_target_dock.roi_capture_requested.connect(self._begin_moving_target_roi_capture)
+        self.moving_target_dock.use_full_frame_requested.connect(self._use_full_frame_for_moving_targets)
+        self.moving_target_dock.detection_requested.connect(self._start_moving_target_detection)
+        self.moving_target_dock.cancel_requested.connect(self._cancel_moving_target_detection)
+        self.moving_target_dock.clear_requested.connect(self._clear_moving_target_results)
+        self.moving_target_dock.export_requested.connect(self._export_moving_target_results)
+        self.moving_target_dock.target_selected.connect(self._focus_moving_target)
+        self.moving_target_dock.visibilityChanged.connect(
+            self._handle_moving_target_dock_visibility_changed
+        )
 
     def bind_toolbar_signals(self) -> None:
         """Bind toolbar selectors and buttons to render-refresh methods."""
@@ -1411,6 +1534,8 @@ class MainWindow(QMainWindow):
             self.action_show_markers.triggered.connect(self._show_marker_dock)
         if self.action_target_info_fields is not None:
             self.action_target_info_fields.triggered.connect(self._show_target_info_fields_dialog)
+        if self.action_show_moving_targets is not None:
+            self.action_show_moving_targets.triggered.connect(self._show_moving_target_dock)
         if self.action_append_frames is not None:
             self.action_append_frames.triggered.connect(self._append_frames)
         if self.action_check_updates is not None:
@@ -2124,7 +2249,7 @@ class MainWindow(QMainWindow):
                     return
             except RuntimeError:
                 pass
-        if self._status_activity_kind in ("load", "sep", "compare"):
+        if self._status_activity_kind in ("load", "sep", "compare", "moving"):
             if self.catalog_overlay_dock is not None:
                 self.catalog_overlay_dock.set_error(self.tr("Wait for the current task to finish before querying Gaia."))
             return
@@ -2538,7 +2663,7 @@ class MainWindow(QMainWindow):
                     return
             except RuntimeError:
                 pass
-        if self._status_activity_kind in ("load", "sep", "catalog"):
+        if self._status_activity_kind in ("load", "sep", "catalog", "moving"):
             if self.comparison_dock is not None:
                 self.comparison_dock.set_status(self.tr("Wait for the current task to finish before comparing."))
             return
@@ -2635,6 +2760,8 @@ class MainWindow(QMainWindow):
             self.canvas.clear_measurement_roi()
             self.canvas.clear_aperture_overlay()
             self.canvas.clear_region_overlays()
+            self.canvas.clear_moving_target_overlays()
+            self.canvas.clear_moving_target_roi()
 
         mode = display.result.mode
         if mode is ComparisonMode.DIFFERENCE and difference_image is not None:
@@ -2756,6 +2883,443 @@ class MainWindow(QMainWindow):
         self._comparison_right_index = None
         if self.comparison_dock is not None:
             self.comparison_dock.set_inputs(None, None)
+        self._sync_moving_target_context()
+
+    def _moving_target_dataset_signature(self) -> tuple[int, ...]:
+        return tuple(id(frame) for frame in self._frames)
+
+    def _common_moving_target_frame_shape(self) -> tuple[int, int] | None:
+        shape: tuple[int, int] | None = None
+        for frame in self._frames:
+            data = getattr(frame, "data", None)
+            if data is None:
+                return None
+            array = np.asarray(data)
+            if array.ndim != 2:
+                return None
+            current = (int(array.shape[1]), int(array.shape[0]))
+            if shape is None:
+                shape = current
+            elif current != shape:
+                return None
+        return shape
+
+    def _sync_moving_target_context(self) -> None:
+        self._redraw_moving_target_roi()
+        if self.moving_target_dock is None:
+            return
+        self.moving_target_dock.set_input_context(
+            len(self._frames),
+            self._common_moving_target_frame_shape(),
+            self._moving_target_roi,
+        )
+        if self._moving_target_result is not None:
+            self.moving_target_dock.update_current_frame(self._current_frame_index)
+
+    def _show_moving_target_dock(self) -> None:
+        if self.moving_target_dock is None:
+            return
+        self._sync_moving_target_context()
+        self.moving_target_dock.show()
+        self.moving_target_dock.raise_()
+
+    def _handle_moving_target_dock_visibility_changed(self, visible: bool) -> None:
+        if not visible:
+            self._moving_roi_capture_pending = False
+
+    def _begin_moving_target_roi_capture(self) -> None:
+        if not self._frames or self.fits_service.current_data is None:
+            if self.moving_target_dock is not None:
+                self.moving_target_dock.set_status(self.tr("Load a FITS sequence before selecting an analysis ROI."))
+            return
+        if self._comparison_active or self._is_composite_frame_layout_active():
+            if self.moving_target_dock is not None:
+                self.moving_target_dock.set_status(
+                    self.tr("Switch to Single Frame View before selecting a moving-target ROI.")
+                )
+            return
+        self._pause_playback_for_manual_frame_navigation()
+        self._moving_roi_capture_pending = True
+        if self.moving_target_dock is not None:
+            self.moving_target_dock.set_status(
+                self.tr("Right-drag once on the image to select the cross-frame analysis ROI.")
+            )
+        if self.app_status_bar is not None:
+            self.app_status_bar.showMessage(self.tr("Right-drag the moving-target analysis ROI."), 5000)
+
+    def _use_full_frame_for_moving_targets(self) -> None:
+        self._moving_roi_capture_pending = False
+        self._moving_target_context_generation += 1
+        self._moving_target_roi = None
+        self._clear_moving_target_results()
+        self._sync_moving_target_context()
+        if self.moving_target_dock is not None:
+            self.moving_target_dock.set_status(
+                self.tr("Full-frame analysis selected; large sequences may require a smaller ROI.")
+            )
+
+    def _start_moving_target_detection(
+        self,
+        parameters: MovingTargetParameters,
+        fallback_cadence_seconds: float,
+        prefer_header_times: bool,
+    ) -> None:
+        if self._moving_target_thread is not None:
+            try:
+                if self._moving_target_thread.isRunning():
+                    return
+            except RuntimeError:
+                pass
+        if self._status_activity_kind in ("load", "sep", "catalog", "compare", "moving"):
+            if self.moving_target_dock is not None:
+                self.moving_target_dock.set_status(
+                    self.tr("Wait for the current task to finish before detecting moving targets.")
+                )
+            return
+        if len(self._frames) < 5:
+            if self.moving_target_dock is not None:
+                self.moving_target_dock.set_status(self.tr("Moving-target detection requires at least 5 frames."))
+            return
+        shape = self._common_moving_target_frame_shape()
+        if shape is None:
+            if self.moving_target_dock is not None:
+                self.moving_target_dock.set_status(
+                    self.tr("All moving-target input frames must be equal-sized 2D images.")
+                )
+            return
+        width, height = shape
+        roi = self._moving_target_roi or ROISelection(0, 0, width, height)
+        pixels = roi.width * roi.height
+        if pixels > DEFAULT_MAX_MOVING_TARGET_ROI_PIXELS:
+            detail = self.tr(
+                "Analysis ROI contains {pixels} pixels; the limit is {limit}. Select a smaller ROI."
+            ).format(pixels=f"{pixels:,}", limit=f"{DEFAULT_MAX_MOVING_TARGET_ROI_PIXELS:,}")
+            if self.moving_target_dock is not None:
+                self.moving_target_dock.set_status(detail)
+            if self.app_status_bar is not None:
+                self.app_status_bar.showMessage(detail, 6000)
+            return
+        try:
+            parameters = parameters.validated(len(self._frames), (roi.height, roi.width))
+        except Exception as exc:
+            detail = localize_moving_target_text(str(exc), self.tr)
+            if self.moving_target_dock is not None:
+                self.moving_target_dock.set_status(detail)
+            return
+
+        self._moving_roi_capture_pending = False
+        self._pause_playback_for_manual_frame_navigation()
+        self._clear_moving_target_results()
+        self._moving_target_request_id += 1
+        request_id = self._moving_target_request_id
+        context_generation = self._moving_target_context_generation
+        dataset_signature = self._moving_target_dataset_signature()
+        thread = QThread(self)
+        worker = MovingTargetWorker(
+            request_id=request_id,
+            frames=list(self._frames),
+            roi=roi,
+            parameters=parameters,
+            fallback_cadence_seconds=fallback_cadence_seconds,
+            prefer_header_times=prefer_header_times,
+        )
+        relay = _MovingTargetSignalRelay(
+            self,
+            request_id,
+            context_generation,
+            dataset_signature,
+            thread,
+            worker,
+        )
+        self._active_moving_target_request_id = request_id
+        self._moving_target_results_enabled = True
+        self._moving_target_cancel_feedback_pending = False
+        self._moving_target_thread = thread
+        self._moving_target_worker = worker
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.result_ready.connect(relay.handle_result)
+        worker.progress.connect(relay.handle_progress)
+        worker.detection_error.connect(relay.handle_error)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(relay.handle_thread_finished)
+        thread.finished.connect(relay.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        if self.moving_target_dock is not None:
+            self.moving_target_dock.set_busy(True)
+            self.moving_target_dock.set_status(self.tr("Preparing moving-target analysis..."))
+        self._set_status_activity(
+            kind="moving",
+            text=self.tr("Detecting moving targets..."),
+            progress_value=0,
+            progress_max=0,
+            cancellable=True,
+        )
+        thread.start()
+
+    def _moving_target_request_is_current(
+        self,
+        request_id: int,
+        context_generation: int,
+        dataset_signature: tuple[int, ...],
+        worker: MovingTargetWorker,
+    ) -> bool:
+        return bool(
+            not self._is_closing
+            and self._moving_target_results_enabled
+            and request_id == self._active_moving_target_request_id
+            and context_generation == self._moving_target_context_generation
+            and dataset_signature == self._moving_target_dataset_signature()
+            and worker is self._moving_target_worker
+        )
+
+    def _handle_moving_target_result_for_request(
+        self,
+        request_id: int,
+        context_generation: int,
+        dataset_signature: tuple[int, ...],
+        worker: MovingTargetWorker,
+        result: MovingTargetResult,
+    ) -> None:
+        if not self._moving_target_request_is_current(
+            request_id, context_generation, dataset_signature, worker
+        ):
+            return
+        self._moving_target_result = result
+        if self.moving_target_dock is not None:
+            self.moving_target_dock.set_result(result, self._current_frame_index)
+            self.moving_target_dock.show()
+            self.moving_target_dock.raise_()
+        self._redraw_moving_target_roi()
+        self._redraw_moving_target_overlays()
+        if self.app_status_bar is not None:
+            self.app_status_bar.showMessage(
+                self.tr("Found {count} moving target(s).").format(count=len(result.tracks)),
+                5000,
+            )
+
+    def _handle_moving_target_progress_for_request(
+        self,
+        request_id: int,
+        context_generation: int,
+        dataset_signature: tuple[int, ...],
+        worker: MovingTargetWorker,
+        completed: int,
+        total: int,
+        detail: str,
+    ) -> None:
+        if not self._moving_target_request_is_current(
+            request_id, context_generation, dataset_signature, worker
+        ):
+            return
+        localized_detail = localize_moving_target_text(detail, self.tr)
+        if self.moving_target_dock is not None:
+            self.moving_target_dock.set_status(localized_detail)
+        self._set_status_activity(
+            kind="moving",
+            text=self.tr("Detecting moving targets: {detail}").format(detail=localized_detail),
+            progress_value=completed,
+            progress_max=total,
+            cancellable=True,
+        )
+
+    def _handle_moving_target_error_for_request(
+        self,
+        request_id: int,
+        context_generation: int,
+        dataset_signature: tuple[int, ...],
+        worker: MovingTargetWorker,
+        detail: str,
+    ) -> None:
+        if not self._moving_target_request_is_current(
+            request_id, context_generation, dataset_signature, worker
+        ):
+            return
+        localized_detail = localize_moving_target_text(detail, self.tr)
+        if self.moving_target_dock is not None:
+            self.moving_target_dock.set_status(localized_detail)
+        self.show_error(self.tr("Moving-target detection failed"), localized_detail)
+
+    def _clear_moving_target_worker_refs(
+        self,
+        request_id: int,
+        thread: QThread,
+        worker: MovingTargetWorker,
+    ) -> None:
+        if request_id != self._active_moving_target_request_id:
+            return
+        if thread is not self._moving_target_thread or worker is not self._moving_target_worker:
+            return
+        cancelled = self._moving_target_cancel_feedback_pending
+        self._active_moving_target_request_id = None
+        self._moving_target_results_enabled = False
+        self._moving_target_thread = None
+        self._moving_target_worker = None
+        self._moving_target_cancel_feedback_pending = False
+        if self.moving_target_dock is not None:
+            self.moving_target_dock.set_busy(False)
+            if cancelled:
+                self.moving_target_dock.set_status(self.tr("Moving-target detection cancelled."))
+        self._clear_status_activity(kind="moving")
+        if cancelled and self.app_status_bar is not None:
+            self.app_status_bar.showMessage(self.tr("Moving-target detection cancelled."), 3000)
+
+    def _stop_moving_target_worker(self, *, wait: bool = False) -> bool:
+        thread = self._moving_target_thread
+        worker = self._moving_target_worker
+        request_id = self._active_moving_target_request_id
+        self._moving_target_results_enabled = False
+        if thread is None or worker is None or request_id is None:
+            return True
+        worker.cancel()
+        try:
+            running = thread.isRunning()
+        except RuntimeError:
+            running = False
+        if running:
+            thread.requestInterruption()
+            thread.quit()
+        if wait and running:
+            thread.wait(self.THREAD_JOIN_WAIT_MS)
+        try:
+            running = thread.isRunning()
+        except RuntimeError:
+            running = False
+        if not running:
+            self._clear_moving_target_worker_refs(request_id, thread, worker)
+            return True
+        return False
+
+    def _cancel_moving_target_detection(self) -> None:
+        self._moving_target_cancel_feedback_pending = True
+        stopped = self._stop_moving_target_worker(wait=False)
+        if stopped:
+            self._clear_status_activity(kind="moving")
+            if self.moving_target_dock is not None:
+                self.moving_target_dock.set_busy(False)
+                self.moving_target_dock.set_status(self.tr("Moving-target detection cancelled."))
+            return
+        self._set_status_activity(
+            kind="moving",
+            text=self.tr("Cancelling moving-target detection..."),
+            progress_value=0,
+            progress_max=0,
+            cancellable=False,
+        )
+
+    def _invalidate_moving_target_sequence(self, *, clear_roi: bool) -> None:
+        self._moving_target_context_generation += 1
+        self._moving_roi_capture_pending = False
+        self._moving_target_cancel_feedback_pending = False
+        self._stop_moving_target_worker(wait=False)
+        if clear_roi:
+            self._moving_target_roi = None
+        self._clear_moving_target_results()
+        self._sync_moving_target_context()
+
+    def _clear_moving_target_results(self) -> None:
+        self._moving_target_result = None
+        if self.canvas is not None:
+            self.canvas.clear_moving_target_overlays()
+        if self.moving_target_dock is not None:
+            self.moving_target_dock.clear_results()
+
+    def _redraw_moving_target_roi(self) -> None:
+        if self.canvas is None:
+            return
+        roi = self._moving_target_roi
+        if (
+            roi is None
+            or self._comparison_active
+            or self._is_composite_frame_layout_active()
+            or self.fits_service.current_data is None
+        ):
+            self.canvas.clear_moving_target_roi()
+            return
+        self.canvas.set_moving_target_roi(
+            roi,
+            transform=self._measurement_edge_transform(),
+        )
+
+    def _redraw_moving_target_overlays(self) -> None:
+        if self.canvas is None:
+            return
+        result = self._moving_target_result
+        frame_index = self._current_frame_index
+        if (
+            result is None
+            or self._comparison_active
+            or self._is_composite_frame_layout_active()
+            or not 0 <= frame_index < result.frame_count
+        ):
+            self.canvas.clear_moving_target_overlays()
+            return
+        entries: list[dict[str, Any]] = []
+        for track in result.tracks:
+            position = track.positions[frame_index]
+            measured = bool(track.measured_mask[frame_index])
+            tooltip = "\n".join(
+                (
+                    f"T{track.target_id}",
+                    self.tr("Frame {current}/{total}").format(
+                        current=frame_index + 1,
+                        total=result.frame_count,
+                    ),
+                    f"x={float(position[0]):.3f}, y={float(position[1]):.3f}",
+                    f"v=({track.vx:+.4f}, {track.vy:+.4f}) px/s",
+                    self.tr("hits={hits}, rms={rms} px").format(
+                        hits=track.hits,
+                        rms=f"{track.rms:.3f}",
+                    ),
+                    self.tr("position={kind}").format(
+                        kind=self.tr("SEP centroid" if measured else "track prediction")
+                    ),
+                )
+            )
+            entries.append(
+                {
+                    "label": f"T{track.target_id}",
+                    "x": float(position[0]),
+                    "y": float(position[1]),
+                    "radius": 24.0,
+                    "tooltip": tooltip,
+                }
+            )
+        self.canvas.set_moving_target_overlays(entries, transform=self._measurement_transform())
+        if self.moving_target_dock is not None:
+            self.moving_target_dock.update_current_frame(frame_index)
+
+    def _focus_moving_target(self, index: int) -> None:
+        result = self._moving_target_result
+        if result is None or not 0 <= int(index) < len(result.tracks) or self.canvas is None:
+            return
+        self._redraw_moving_target_overlays()
+        self.canvas.center_on_moving_target(int(index))
+
+    def _export_moving_target_results(self) -> None:
+        result = self._moving_target_result
+        if result is None or not result.tracks:
+            return
+        initial = str(Path(self._default_export_stem() + "_moving_targets.csv"))
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            self.tr("Export Moving Targets"),
+            initial,
+            self.tr("CSV Files (*.csv);;All Files (*)"),
+        )
+        if not path:
+            return
+        try:
+            export_moving_targets_csv(result, path)
+        except Exception as exc:
+            self.show_error(self.tr("Moving-target export failed"), str(exc))
+            return
+        if self.app_status_bar is not None:
+            self.app_status_bar.showMessage(
+                self.tr("Moving-target CSV exported: {path}").format(path=path),
+                5000,
+            )
 
     def _handle_ds9_document_changed(self, _document: DS9RegionDocument) -> None:
         self._redraw_ds9_regions()
@@ -2948,6 +3512,8 @@ class MainWindow(QMainWindow):
         paths = list(request.paths)
         hdu_index = request.hdu_index
         append = request.append
+        if append:
+            self._invalidate_moving_target_sequence(clear_roi=False)
         self._load_append_mode = append
         self._load_total_count = len(paths)
         self._load_completed_count = 0
@@ -3939,6 +4505,8 @@ class MainWindow(QMainWindow):
             self.canvas.clear_measurement_roi()
             self.canvas.clear_aperture_overlay()
             self.canvas.clear_region_overlays()
+            self.canvas.clear_moving_target_overlays()
+            self.canvas.clear_moving_target_roi()
             return
 
         self.canvas.compass.setVisible(not self._is_composite_frame_layout_active())
@@ -3952,6 +4520,8 @@ class MainWindow(QMainWindow):
             self.canvas.clear_measurement_roi()
             self.canvas.clear_aperture_overlay()
             self.canvas.clear_region_overlays()
+            self.canvas.clear_moving_target_overlays()
+            self.canvas.clear_moving_target_roi()
             return
 
         shape = self._current_original_shape()
@@ -3965,6 +4535,8 @@ class MainWindow(QMainWindow):
         self._redraw_wcs_catalog_overlays()
         self._redraw_measurement_overlays()
         self._redraw_ds9_regions()
+        self._redraw_moving_target_roi()
+        self._redraw_moving_target_overlays()
 
     def _build_composite_frame_image(self) -> QImage | None:
         """Build the currently requested composite frame image from cached frame renders."""
@@ -4503,6 +5075,8 @@ class MainWindow(QMainWindow):
                     progress_max=0,
                     cancellable=False,
                 )
+        elif self._status_activity_kind == "moving":
+            self._cancel_moving_target_detection()
 
     def _handle_status_bar_continue_requested(self) -> None:
         """Accept a non-modal confirmation prompt surfaced in the status bar."""
@@ -4555,6 +5129,7 @@ class MainWindow(QMainWindow):
 
         self._sync_frame_player()
         self._sync_comparison_inputs()
+        self._sync_moving_target_context()
         self._schedule_next_composite_dirty_frame()
         if self.app_status_bar is not None and self._frames:
             self.app_status_bar.set_frame_info(self._current_frame_index, len(self._frames))
@@ -4709,6 +5284,7 @@ class MainWindow(QMainWindow):
         self._cancel_active_sep_extract(wait=False)
         self._stop_gaia_query(wait=False)
         self._stop_comparison_worker(wait=False)
+        self._invalidate_moving_target_sequence(clear_roi=True)
         self._end_comparison_display(restore=False)
         self._render_generation += 1
         self._render_request_index_by_id.clear()
@@ -4753,6 +5329,8 @@ class MainWindow(QMainWindow):
             self.canvas.clear_measurement_roi()
             self.canvas.clear_aperture_overlay()
             self.canvas.clear_region_overlays()
+            self.canvas.clear_moving_target_overlays()
+            self.canvas.clear_moving_target_roi()
             self.canvas.set_image_state(self.build_canvas_image_state())
             self.canvas.set_overlay_state(self.build_canvas_overlay_state())
         if self.source_table_dock is not None:
@@ -4775,6 +5353,8 @@ class MainWindow(QMainWindow):
             self.measurement_dock.set_image_shape(None, None)
         if self.comparison_dock is not None:
             self.comparison_dock.set_inputs(None, None)
+        if self.moving_target_dock is not None:
+            self.moving_target_dock.set_input_context(0, None, None)
         if self.ds9_region_dock is not None:
             self.ds9_region_dock.clear_regions()
             self.ds9_region_dock.set_capture_enabled(roi=False, aperture=False)
@@ -5704,6 +6284,8 @@ class MainWindow(QMainWindow):
             self.canvas.clear_measurement_roi()
             self.canvas.clear_aperture_overlay()
             self.canvas.clear_region_overlays()
+            self.canvas.clear_moving_target_overlays()
+            self.canvas.clear_moving_target_roi()
             self.canvas.set_image_state(self.build_canvas_image_state())
             self.canvas.set_overlay_state(self.build_canvas_overlay_state())
         if self.source_table_dock is not None:
@@ -5723,6 +6305,7 @@ class MainWindow(QMainWindow):
             self.measurement_dock.set_image_shape(None, None)
         if self.comparison_dock is not None:
             self.comparison_dock.set_inputs(None, None)
+        self._sync_moving_target_context()
         if self.ds9_region_dock is not None:
             self.ds9_region_dock.clear_regions()
             self.ds9_region_dock.set_capture_enabled(roi=False, aperture=False)
@@ -6083,18 +6666,87 @@ class MainWindow(QMainWindow):
                 )
             return
 
-        shape = self._current_original_shape()
-        if shape is not None and self._orientation != (False, False, False):
-            w, h = shape
-            x1d, y1d = x0 + width, y0 + height
-            ox0, oy0 = self._unorient_edge_point(x0, y0, w, h)
-            ox1, oy1 = self._unorient_edge_point(x1d, y1d, w, h)
-            ox0, ox1 = sorted((int(round(ox0)), int(round(ox1))))
-            oy0, oy1 = sorted((int(round(oy0)), int(round(oy1))))
-            x0, y0, width, height = ox0, oy0, ox1 - ox0, oy1 - oy0
-        selection = ROISelection(x0=x0, y0=y0, width=width, height=height)
+        if self._moving_target_thread is not None:
+            try:
+                moving_running = self._moving_target_thread.isRunning()
+            except RuntimeError:
+                moving_running = False
+            if moving_running:
+                if self.app_status_bar is not None:
+                    self.app_status_bar.showMessage(
+                        self.tr("Wait for moving-target detection to finish before running SEP."),
+                        3000,
+                    )
+                return
+
+        selection = self._display_roi_to_original(x0, y0, width, height)
+        if selection is None:
+            if self.app_status_bar is not None:
+                self.app_status_bar.showMessage(self.tr("Selected ROI is empty."), 3000)
+            self._moving_roi_capture_pending = False
+            return
+        if self._moving_roi_capture_pending:
+            self._moving_roi_capture_pending = False
+            self._moving_target_context_generation += 1
+            self._moving_target_roi = selection
+            self._clear_moving_target_results()
+            if self.canvas is not None:
+                self.canvas.set_moving_target_roi(
+                    selection,
+                    transform=self._measurement_edge_transform(),
+                )
+            self._sync_moving_target_context()
+            if self.moving_target_dock is not None:
+                self.moving_target_dock.set_status(
+                    self.tr("Moving-target ROI selected. Press Detect to analyze the loaded sequence.")
+                )
+                self.moving_target_dock.show()
+                self.moving_target_dock.raise_()
+            return
         self._measure_roi(selection)
         self._start_sep_extract(selection)
+
+    def _display_roi_to_original(
+        self,
+        x0: int,
+        y0: int,
+        width: int,
+        height: int,
+    ) -> ROISelection | None:
+        """Convert one displayed half-open rectangle to clipped original-image pixels."""
+
+        shape = self._current_original_shape()
+        if shape is None:
+            return None
+        if self._moving_target_thread is not None:
+            try:
+                moving_running = self._moving_target_thread.isRunning()
+            except RuntimeError:
+                moving_running = False
+            if moving_running:
+                if self.app_status_bar is not None:
+                    self.app_status_bar.showMessage(
+                        self.tr("Wait for moving-target detection to finish before running SEP."),
+                        3000,
+                    )
+                return None
+        image_width, image_height = shape
+        x1, y1 = int(x0) + int(width), int(y0) + int(height)
+        if self._orientation != (False, False, False):
+            ox0, oy0 = self._unorient_edge_point(x0, y0, image_width, image_height)
+            ox1, oy1 = self._unorient_edge_point(x1, y1, image_width, image_height)
+            x0, x1 = sorted((int(round(ox0)), int(round(ox1))))
+            y0, y1 = sorted((int(round(oy0)), int(round(oy1))))
+        else:
+            x0, x1 = sorted((int(x0), int(x1)))
+            y0, y1 = sorted((int(y0), int(y1)))
+        x0 = max(0, min(image_width, x0))
+        x1 = max(0, min(image_width, x1))
+        y0 = max(0, min(image_height, y0))
+        y1 = max(0, min(image_height, y1))
+        if x1 <= x0 or y1 <= y0:
+            return None
+        return ROISelection(x0=x0, y0=y0, width=x1 - x0, height=y1 - y0)
 
     def handle_roi_selection(self, selection: ROISelection) -> None:
         """Structured wrapper around the primitive ROI signal contract."""
@@ -6775,6 +7427,7 @@ class MainWindow(QMainWindow):
             self._update_check_thread,
             self._gaia_query_thread,
             self._comparison_thread,
+            self._moving_target_thread,
         ]
         running: list[QThread] = []
         seen: set[int] = set()
@@ -6814,6 +7467,7 @@ class MainWindow(QMainWindow):
         self._stop_update_check(wait=False)
         self._stop_gaia_query(wait=False)
         self._stop_comparison_worker(wait=False)
+        self._stop_moving_target_worker(wait=False)
 
         running_threads = self._running_background_threads()
         if running_threads:

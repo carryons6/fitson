@@ -59,6 +59,17 @@
 - 帧播放器面板：播放/暂停、FPS 调节、循环/往返模式
 - 快捷键：`[` 上一帧，`]` 下一帧
 
+### 动目标检测
+- 通过 `工具 -> 动目标检测...` 分析至少 5 帧尺寸相同的已加载图像
+- 可右键拖拽一次捕获跨帧 ROI；资源预算允许时也可使用全幅
+- 依次执行逐帧 SEP、恒星场稳健平移配准、时间中值差分、静态源掩膜与恒速轨迹拟合
+- 优先使用语义一致的 `DATE-AVG`、`MJD-AVG` 等 FITS 时间戳；有效时间必须按当前加载顺序唯一且严格递增
+- 时间戳不可用时使用界面中明确设置的固定帧间隔；已确认帧序正确时也可主动关闭 Header 时间
+- 匹配成功时以红圈显示恢复后的 SEP 质心，否则显示轨迹预测位置；红圈随多帧播放和图像方向同步更新
+- 可查看命中帧、当前位置、速度分量、总速度和拟合 RMS，并导出逐目标逐帧 CSV
+- 纯平移配准会拒绝恒星匹配不足或残差 RMS 过高的序列（例如视场不兼容，或存在明显旋转、尺度变化）
+- 默认限制 ROI 不超过 400 万像素、序列栈不超过 384 MiB、跨帧 SEP 源不超过 25 万，并限制中间轨迹数量
+
 ### 状态栏
 - 实时显示光标下的像素坐标和像素值
 - WCS RA/Dec 坐标显示（需图像包含 WCS 信息）
@@ -72,8 +83,8 @@
 ### 性能与安全
 - 在解码像素前根据 Header 执行内存与帧数预算
 - 必要时将数组与文件映射脱离，确保 Windows 下可安全关闭或覆盖源文件
-- 测量、图像比较、WCS 网格、Gaia 响应和 DS9 Region 交换分别执行专项资源预算
-- Gaia 查询与比较渲染在 GUI 线程之外运行，并忽略已取消或过期的结果
+- 测量、动目标检测、图像比较、WCS 网格、Gaia 响应和 DS9 Region 交换分别执行专项资源预算
+- Gaia 查询、动目标分析与比较渲染在 GUI 线程之外运行，并忽略已取消或过期的结果
 - WCS 网格按需生成、限制复杂度并缓存复用
 - 大图区间计算采用子采样（步幅缩减至约 1000x1000）
 - 帧懒渲染机制，仅渲染当前可见帧
@@ -126,7 +137,7 @@ gzip/ZIP/bzip2/xz/LZW 压缩会在解压前被拒绝；请先在确认展开大�
 ### Windows 发布安装包
 
 请从 [GitHub Releases 页面](https://github.com/carryons6/fitson/releases) 下载
-`AstroView_Setup_1.8.0.exe` 与 `SHA256SUMS.txt`。Windows 安装包**尚未进行
+`AstroView_Setup_1.9.0.exe` 与 `SHA256SUMS.txt`。Windows 安装包**尚未进行
 Authenticode 数字签名**，因此 Windows SmartScreen 可能显示警告。运行前请使用
 Release 中的校验清单核验安装包。
 
@@ -140,6 +151,7 @@ Release 中的校验清单核验安装包。
   - `catalog_service.py` — 经校验的 Gaia DR3 TAP 查询与响应解析
   - `ds9_regions.py` — 安全 DS9 Region 解析与序列化
   - `image_comparison.py` — 受限像素/WCS 比较与差分输出
+  - `moving_targets.py` — 受限星场配准、时间差分与线性轨迹恢复
   - `sep_service.py` — SEP 源提取封装
   - `source_catalog.py` — 源表数据模型
   - `contracts.py` — 跨层共享的类型化数据类
@@ -155,6 +167,8 @@ Release 中的校验清单核验安装包。
   - `catalog_overlay_dock.py` — WCS 网格与 Gaia 查询面板
   - `ds9_region_dock.py` — DS9 Region 导入、导出与文档面板
   - `comparison_dock.py` — 帧 A/B 比较与闪烁控制面板
+  - `moving_target_dock.py` — 跨帧 ROI、检测参数与轨迹结果面板
+  - `moving_target_worker.py` — 可取消的 SEP 序列分析子进程适配器
   - `header_dialog.py` — FITS Header 查看对话框
   - `status_bar.py` — 光标/缩放/帧状态显示
 

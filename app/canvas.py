@@ -73,6 +73,9 @@ class ImageCanvas(QGraphicsView):
         self._marker_items: list[QGraphicsEllipseItem] = []
         self._source_items: list[QGraphicsEllipseItem] = []
         self._catalog_items: list[QGraphicsPathItem] = []
+        self._moving_target_items: list[QGraphicsItem] = []
+        self._moving_target_centers: list[tuple[float, float] | None] = []
+        self._moving_target_roi_item: QGraphicsRectItem | None = None
         self._wcs_grid_items: list[QGraphicsItem] = []
         self._measurement_roi_item: QGraphicsRectItem | None = None
         self._aperture_items: list[QGraphicsEllipseItem] = []
@@ -553,6 +556,105 @@ class ImageCanvas(QGraphicsView):
         for item in self._catalog_items:
             self._scene.removeItem(item)
         self._catalog_items.clear()
+
+    def set_moving_target_overlays(
+        self,
+        targets: list[dict[str, Any]],
+        *,
+        transform=None,
+    ) -> None:
+        """Draw an independent red-circle layer for the active frame's movers."""
+
+        self.clear_moving_target_overlays()
+        point_transform = transform or (lambda x, y: (x, y))
+        for index, target in enumerate(targets):
+            try:
+                raw_x = float(target["x"])
+                raw_y = float(target["y"])
+                x, y = point_transform(raw_x, raw_y)
+                x, y = float(x), float(y)
+            except (KeyError, TypeError, ValueError, OverflowError):
+                self._moving_target_centers.append(None)
+                continue
+            if not (math.isfinite(x) and math.isfinite(y)):
+                self._moving_target_centers.append(None)
+                continue
+            radius = float(target.get("radius", 24.0))
+            if not math.isfinite(radius) or radius <= 0.0:
+                radius = 24.0
+            path = QPainterPath()
+            path.addEllipse(QRectF(-radius, -radius, radius * 2.0, radius * 2.0))
+            path.moveTo(-radius - 5.0, 0.0)
+            path.lineTo(-radius + 5.0, 0.0)
+            path.moveTo(radius - 5.0, 0.0)
+            path.lineTo(radius + 5.0, 0.0)
+            path.moveTo(0.0, -radius - 5.0)
+            path.lineTo(0.0, -radius + 5.0)
+            path.moveTo(0.0, radius - 5.0)
+            path.lineTo(0.0, radius + 5.0)
+            item = QGraphicsPathItem(path)
+            pen = QPen(QColor(255, 42, 42))
+            pen.setWidth(3)
+            pen.setCosmetic(True)
+            item.setPen(pen)
+            item.setPos(x, y)
+            item.setZValue(4.0)
+            item.setToolTip(str(target.get("tooltip", target.get("label", f"T{index + 1}"))))
+            self._scene.addItem(item)
+            self._moving_target_items.append(item)
+
+            label = QGraphicsTextItem(str(target.get("label", f"T{index + 1}")))
+            label.setDefaultTextColor(QColor(255, 92, 92))
+            label.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
+            label.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations, True)
+            label.setPos(x + radius + 4.0, y - radius - 4.0)
+            label.setZValue(4.1)
+            self._scene.addItem(label)
+            self._moving_target_items.append(label)
+            self._moving_target_centers.append((x, y))
+
+    def clear_moving_target_overlays(self) -> None:
+        """Remove only moving-target graphics, preserving every other overlay layer."""
+
+        for item in self._moving_target_items:
+            self._scene.removeItem(item)
+        self._moving_target_items.clear()
+        self._moving_target_centers.clear()
+
+    def center_on_moving_target(self, index: int) -> None:
+        if 0 <= int(index) < len(self._moving_target_centers):
+            center = self._moving_target_centers[int(index)]
+            if center is not None:
+                self.centerOn(*center)
+
+    def set_moving_target_roi(self, selection: ROISelection, *, transform=None) -> None:
+        """Draw the cross-frame analysis ROI independently of measurement overlays."""
+
+        self.clear_moving_target_roi()
+        point_transform = transform or (lambda x, y: (x, y))
+        corners = (
+            point_transform(selection.x0, selection.y0),
+            point_transform(selection.x0 + selection.width, selection.y0 + selection.height),
+        )
+        x0, x1 = sorted((float(corners[0][0]), float(corners[1][0])))
+        y0, y1 = sorted((float(corners[0][1]), float(corners[1][1])))
+        if not all(math.isfinite(value) for value in (x0, x1, y0, y1)):
+            return
+        item = QGraphicsRectItem(QRectF(x0, y0, x1 - x0, y1 - y0))
+        pen = QPen(QColor(255, 72, 72))
+        pen.setWidth(2)
+        pen.setCosmetic(True)
+        pen.setStyle(Qt.PenStyle.DashDotLine)
+        item.setPen(pen)
+        item.setZValue(2.1)
+        item.setToolTip(self.tr("Moving-target analysis ROI"))
+        self._scene.addItem(item)
+        self._moving_target_roi_item = item
+
+    def clear_moving_target_roi(self) -> None:
+        if self._moving_target_roi_item is not None:
+            self._scene.removeItem(self._moving_target_roi_item)
+            self._moving_target_roi_item = None
 
     def set_measurement_roi(self, selection: ROISelection, *, transform=None) -> None:
         """Persist the most recently measured rectangular ROI on the canvas."""
