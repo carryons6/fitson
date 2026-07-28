@@ -108,7 +108,13 @@ class AppStatusBar(QStatusBar):
         """Apply a structured zoom state payload to the status bar."""
 
         self.last_zoom_state = zoom_state
-        self.set_zoom_info(zoom_state.scale_factor)
+        percent = f"{zoom_state.scale_factor * 100.0:.0f}"
+        if zoom_state.mode == "fit":
+            self.zoom_label.setText(self.tr("Fit: {percent}%").format(percent=percent))
+        elif zoom_state.mode == "actual":
+            self.zoom_label.setText(self.tr("Zoom: {percent}% (1:1)").format(percent=percent))
+        else:
+            self.set_zoom_info(zoom_state.scale_factor)
 
     def set_activity(
         self,

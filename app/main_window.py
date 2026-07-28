@@ -505,12 +505,15 @@ class MainWindow(QMainWindow):
         self.menu_help: Any = None
         self.menu_recent_files: Any = None
         self.menu_language: Any = None
+        self.menu_panels: Any = None
+        self.menu_roi_action: Any = None
 
         self.main_toolbar: Any = None
         self.stretch_selector: Any = None
         self.interval_selector: Any = None
         self.preview_profile_selector: Any = None
         self.magnifier_spinbox: Any = None
+        self.roi_action_button: QToolButton | None = None
         self.language_action_group: QActionGroup | None = None
         self.language_actions: dict[str, QAction] = {}
 
@@ -528,6 +531,13 @@ class MainWindow(QMainWindow):
         self.action_zoom_out: QAction | None = None
         self.action_smooth_rendering: QAction | None = None
         self.action_run_sep: QAction | None = None
+        self.action_roi_measure: QAction | None = None
+        self.action_roi_extract: QAction | None = None
+        self.roi_action_group: QActionGroup | None = None
+        self.action_show_measurement: QAction | None = None
+        self.action_show_catalog_tools: QAction | None = None
+        self.action_show_comparison: QAction | None = None
+        self.action_show_regions: QAction | None = None
         self.action_show_markers: QAction | None = None
         self.action_append_frames: QAction | None = None
         self.action_target_info_fields: QAction | None = None
@@ -546,6 +556,8 @@ class MainWindow(QMainWindow):
         self.measurement_service = MeasurementService()
         self.current_catalog: SourceCatalog | None = None
         self._settings = QSettings("AstroView", "AstroView")
+        saved_roi_action = self._settings.value("interaction/roi_action", "measure", type=str)
+        self._roi_action = saved_roi_action if saved_roi_action in {"measure", "extract"} else "measure"
         self._preview_profile_name = self.DEFAULT_PREVIEW_PROFILE
         self._last_auto_interval_name = self.fits_service.current_interval
         self._histogram_axis_limits: tuple[float, float] | None = None
@@ -946,7 +958,11 @@ class MainWindow(QMainWindow):
     def _apply_default_workspace_layout(self, *, persist: bool = False) -> None:
         """Apply the default dock arrangement used for a clean workspace."""
 
-        dock_visibility = {dock: dock.isVisible() for dock in self._dock_widgets()}
+        # `isVisible()` is false for every dock before the parent window is
+        # shown, even when a dock is not explicitly hidden. Preserve the
+        # explicit show/hide intent so a clean startup does not reopen the
+        # default tab stack merely because its layout was rebuilt offscreen.
+        dock_visibility = {dock: not dock.isHidden() for dock in self._dock_widgets()}
         for dock in self._dock_widgets():
             dock.setFloating(False)
             self.removeDockWidget(dock)
@@ -999,7 +1015,10 @@ class MainWindow(QMainWindow):
             self.source_table_dock.raise_()
 
         for dock, visible in dock_visibility.items():
-            dock.setVisible(visible)
+            if visible:
+                dock.show()
+            else:
+                dock.hide()
 
         if persist:
             self._persist_window_state()
@@ -1083,22 +1102,24 @@ class MainWindow(QMainWindow):
 
         if self.action_open_file is not None:
             self.menu_file.addAction(self.action_open_file)
+        if self.action_append_frames is not None:
+            self.menu_file.addAction(self.action_append_frames)
         self.menu_recent_files = self.menu_file.addMenu(self.tr("Recent Files"))
         if self.action_reopen_last_session is not None:
             self.menu_file.addAction(self.action_reopen_last_session)
+        self.menu_file.addSeparator()
+        if self.action_show_header is not None:
+            self.menu_file.addAction(self.action_show_header)
+        self.menu_file.addSeparator()
         if self.action_export_catalog is not None:
             self.menu_file.addAction(self.action_export_catalog)
         if self.action_export_image is not None:
             self.menu_file.addAction(self.action_export_image)
         if self.action_export_raw_image is not None:
             self.menu_file.addAction(self.action_export_raw_image)
-        if self.action_show_header is not None:
-            self.menu_file.addAction(self.action_show_header)
+        self.menu_file.addSeparator()
         if self.action_close_file is not None:
             self.menu_file.addAction(self.action_close_file)
-        if self.action_append_frames is not None:
-            self.menu_file.addAction(self.action_append_frames)
-        self.menu_file.addSeparator()
         if self.action_quit is not None:
             self.menu_file.addAction(self.action_quit)
         self._refresh_recent_files_menu()
@@ -1136,14 +1157,29 @@ class MainWindow(QMainWindow):
             for act in self.orientation_actions:
                 orient_menu.addAction(act)
 
+        self.menu_roi_action = self.menu_tools.addMenu(self.tr("Right-drag ROI Task"))
+        for action in (self.action_roi_measure, self.action_roi_extract):
+            if action is not None:
+                self.menu_roi_action.addAction(action)
+        self.menu_tools.addSeparator()
+        if self.action_show_measurement is not None:
+            self.menu_tools.addAction(self.action_show_measurement)
         if self.action_run_sep is not None:
             self.menu_tools.addAction(self.action_run_sep)
-        if self.action_show_markers is not None:
-            self.menu_tools.addAction(self.action_show_markers)
         if self.action_target_info_fields is not None:
             self.menu_tools.addAction(self.action_target_info_fields)
+        if self.action_show_catalog_tools is not None:
+            self.menu_tools.addAction(self.action_show_catalog_tools)
+        self.menu_tools.addSeparator()
+        if self.action_show_comparison is not None:
+            self.menu_tools.addAction(self.action_show_comparison)
         if self.action_show_moving_targets is not None:
             self.menu_tools.addAction(self.action_show_moving_targets)
+        self.menu_tools.addSeparator()
+        if self.action_show_markers is not None:
+            self.menu_tools.addAction(self.action_show_markers)
+        if self.action_show_regions is not None:
+            self.menu_tools.addAction(self.action_show_regions)
         if self.action_check_updates is not None:
             self.menu_help.addAction(self.action_check_updates)
 
@@ -1154,26 +1190,9 @@ class MainWindow(QMainWindow):
         if self.action_reset_workspace_layout is not None:
             self.menu_view.addAction(self.action_reset_workspace_layout)
             self.menu_view.addSeparator()
-        if self.source_table_dock is not None:
-            self.menu_view.addAction(self.source_table_dock.toggleViewAction())
-        if self.sep_panel_dock is not None:
-            self.menu_view.addAction(self.sep_panel_dock.toggleViewAction())
-        if self.marker_dock is not None:
-            self.menu_view.addAction(self.marker_dock.toggleViewAction())
-        if self.measurement_dock is not None:
-            self.menu_view.addAction(self.measurement_dock.toggleViewAction())
-        if self.comparison_dock is not None:
-            self.menu_view.addAction(self.comparison_dock.toggleViewAction())
-        if self.moving_target_dock is not None:
-            self.menu_view.addAction(self.moving_target_dock.toggleViewAction())
-        if self.ds9_region_dock is not None:
-            self.menu_view.addAction(self.ds9_region_dock.toggleViewAction())
-        if self.catalog_overlay_dock is not None:
-            self.menu_view.addAction(self.catalog_overlay_dock.toggleViewAction())
-        if self.frame_player_dock is not None:
-            self.menu_view.addAction(self.frame_player_dock.toggleViewAction())
-        if self.histogram_dock is not None:
-            self.menu_view.addAction(self.histogram_dock.toggleViewAction())
+        self.menu_panels = self.menu_view.addMenu(self.tr("Panels"))
+        for dock in self._dock_widgets():
+            self.menu_panels.addAction(dock.toggleViewAction())
 
     def _build_theme_menu(self, parent_menu: Any) -> None:
         """Add a theme submenu with Dark/Light options."""
@@ -1243,15 +1262,20 @@ class MainWindow(QMainWindow):
 
         for action in (
             self.action_open_file,
-            self.action_show_header,
+            self.action_append_frames,
             self.action_fit_to_window,
             self.action_actual_pixels,
-            self.action_zoom_in,
-            self.action_zoom_out,
         ):
             if action is not None:
                 self.main_toolbar.addAction(action)
 
+        if self.menu_roi_action is not None:
+            self.roi_action_button = QToolButton(self.main_toolbar)
+            self.roi_action_button.setObjectName("roi_action_button")
+            self.roi_action_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+            self.roi_action_button.setMenu(self.menu_roi_action)
+            self.main_toolbar.addWidget(self.roi_action_button)
+            self._sync_roi_action_presentation()
         self.main_toolbar.addSeparator()
         self.main_toolbar.addWidget(QLabel(self.tr("Stretch:"), self))
         if self.stretch_selector is not None:
@@ -1378,6 +1402,27 @@ class MainWindow(QMainWindow):
 
         self.action_run_sep = QAction(self.tr("SEP Extract"), self)
         self.action_run_sep.setShortcut("Ctrl+R")
+        self.roi_action_group = QActionGroup(self)
+        self.roi_action_group.setExclusive(True)
+        self.action_roi_measure = QAction(self.tr("Measure ROI"), self)
+        self.action_roi_measure.setCheckable(True)
+        self.action_roi_measure.setChecked(self._roi_action == "measure")
+        self.action_roi_measure.setToolTip(
+            self.tr("Right-drag measures pixel statistics for one ROI.")
+        )
+        self.action_roi_extract = QAction(self.tr("Extract Sources in ROI"), self)
+        self.action_roi_extract.setCheckable(True)
+        self.action_roi_extract.setChecked(self._roi_action == "extract")
+        self.action_roi_extract.setToolTip(
+            self.tr("Right-drag runs SEP source extraction for one ROI.")
+        )
+        self.roi_action_group.addAction(self.action_roi_measure)
+        self.roi_action_group.addAction(self.action_roi_extract)
+
+        self.action_show_measurement = QAction(self.tr("Measurement & Photometry"), self)
+        self.action_show_catalog_tools = QAction(self.tr("WCS & Gaia"), self)
+        self.action_show_comparison = QAction(self.tr("Compare Frames"), self)
+        self.action_show_regions = QAction(self.tr("DS9 Regions"), self)
         self.action_show_markers = QAction(self.tr("Markers"), self)
         self.action_show_markers.setShortcut("Ctrl+M")
         self.action_target_info_fields = QAction(self.tr("Target Info Fields..."), self)
@@ -1408,6 +1453,7 @@ class MainWindow(QMainWindow):
             return
         self.canvas.mouse_moved.connect(self.update_status_from_cursor)
         self.canvas.pixel_clicked.connect(self._handle_canvas_pixel_clicked)
+        self.canvas.open_requested.connect(self.open_file)
         self.canvas.roi_selected.connect(self.handle_roi_selected)
         self.canvas.source_double_clicked.connect(self.handle_source_clicked)
         self.canvas.catalog_source_double_clicked.connect(self._focus_gaia_source)
@@ -1530,6 +1576,28 @@ class MainWindow(QMainWindow):
             self.action_next_frame.triggered.connect(self._go_next_frame)
         if self.action_run_sep is not None:
             self.action_run_sep.triggered.connect(self.run_sep_extract)
+        if self.action_roi_measure is not None:
+            self.action_roi_measure.triggered.connect(
+                lambda checked=False: checked and self._set_roi_action("measure", announce=True)
+            )
+        if self.action_roi_extract is not None:
+            self.action_roi_extract.triggered.connect(
+                lambda checked=False: checked and self._set_roi_action("extract", announce=True)
+            )
+        if self.action_show_measurement is not None:
+            self.action_show_measurement.triggered.connect(self._activate_measurement_tool)
+        if self.action_show_catalog_tools is not None:
+            self.action_show_catalog_tools.triggered.connect(
+                lambda: self._focus_dock(self.catalog_overlay_dock)
+            )
+        if self.action_show_comparison is not None:
+            self.action_show_comparison.triggered.connect(
+                lambda: self._focus_dock(self.comparison_dock)
+            )
+        if self.action_show_regions is not None:
+            self.action_show_regions.triggered.connect(
+                lambda: self._focus_dock(self.ds9_region_dock)
+            )
         if self.action_show_markers is not None:
             self.action_show_markers.triggered.connect(self._show_marker_dock)
         if self.action_target_info_fields is not None:
@@ -2483,7 +2551,8 @@ class MainWindow(QMainWindow):
         """Use a left-click as the next aperture center in original pixels."""
 
         if (
-            self.measurement_dock is None
+            self._roi_action != "measure"
+            or self.measurement_dock is None
             or self._comparison_active
             or self._is_composite_frame_layout_active()
         ):
@@ -5646,8 +5715,7 @@ class MainWindow(QMainWindow):
             status="empty",
             title=self.tr("No Image Loaded"),
             detail=self.tr(
-                "Drop FITS files here or press Ctrl+O.\n"
-                "Wheel to zoom, drag to pan, and right-drag a ROI to run SEP."
+                "Double-click, drop FITS files here, or press Ctrl+O to open."
             ),
             visible=True,
         )
@@ -5730,6 +5798,60 @@ class MainWindow(QMainWindow):
 
         h, w = data.data.shape[:2]
         self._start_sep_extract(ROISelection(x0=0, y0=0, width=w, height=h))
+
+    def _set_roi_action(self, mode: str, *, announce: bool = False) -> None:
+        """Choose the one task performed by the next ordinary right-drag ROI."""
+
+        if mode not in {"measure", "extract"}:
+            raise ValueError(f"Unsupported ROI action: {mode}")
+
+        self._roi_action = mode
+        self._settings.setValue("interaction/roi_action", mode)
+        if self.action_roi_measure is not None:
+            self.action_roi_measure.setChecked(mode == "measure")
+        if self.action_roi_extract is not None:
+            self.action_roi_extract.setChecked(mode == "extract")
+        self._sync_roi_action_presentation()
+
+        if not announce:
+            return
+        if mode == "measure":
+            self._focus_dock(self.measurement_dock)
+            message = self.tr("ROI task: Measure. Right-drag an area on the image.")
+        else:
+            self._focus_dock(self.sep_panel_dock)
+            message = self.tr("ROI task: Extract Sources. Right-drag an area on the image.")
+        if self.app_status_bar is not None:
+            self.app_status_bar.showMessage(message, 4000)
+
+    def _sync_roi_action_presentation(self) -> None:
+        """Keep the toolbar task selector aligned with the selected ROI action."""
+
+        if self.roi_action_button is None:
+            return
+        if self._roi_action == "extract":
+            label = self.tr("ROI: Extract Sources")
+            tooltip = self.tr("Right-drag runs SEP source extraction for one ROI.")
+        else:
+            label = self.tr("ROI: Measure")
+            tooltip = self.tr("Right-drag measures pixel statistics for one ROI.")
+        self.roi_action_button.setText(label)
+        self.roi_action_button.setToolTip(tooltip)
+
+    @staticmethod
+    def _focus_dock(dock: QDockWidget | None) -> None:
+        """Open one task panel without toggling it closed when already visible."""
+
+        if dock is None:
+            return
+        dock.show()
+        dock.raise_()
+
+    def _activate_measurement_tool(self) -> None:
+        """Open the measurement workbench and make ROI drags measure only."""
+
+        self._set_roi_action("measure")
+        self._focus_dock(self.measurement_dock)
 
     def _show_marker_dock(self) -> None:
         """Show the marker dock panel."""
@@ -6642,10 +6764,10 @@ class MainWindow(QMainWindow):
         self.header_dialog.raise_()
 
     def handle_roi_selected(self, x0: int, y0: int, width: int, height: int) -> None:
-        """Handle ROI selection from the canvas and trigger SEP extraction.
+        """Route one canvas ROI to the explicitly selected analysis task.
 
-        ROI arrives in displayed-image coords; remap to original frame so SEP
-        always operates on the unrotated data.
+        ROI arrives in displayed-image coordinates and is remapped to the
+        original frame before measurement, SEP, or one-shot moving-target use.
         """
 
         if self._comparison_active:
@@ -6660,7 +6782,7 @@ class MainWindow(QMainWindow):
             if self.app_status_bar is not None:
                 self.app_status_bar.showMessage(
                     self.tr(
-                        "Composite layout does not support direct ROI selection. Switch back to Single Frame View before running SEP."
+                        "Composite layout does not support direct ROI selection. Switch back to Single Frame View first."
                     ),
                     3000,
                 )
@@ -6674,7 +6796,7 @@ class MainWindow(QMainWindow):
             if moving_running:
                 if self.app_status_bar is not None:
                     self.app_status_bar.showMessage(
-                        self.tr("Wait for moving-target detection to finish before running SEP."),
+                        self.tr("Wait for moving-target detection to finish before selecting a ROI."),
                         3000,
                     )
                 return
@@ -6703,8 +6825,10 @@ class MainWindow(QMainWindow):
                 self.moving_target_dock.show()
                 self.moving_target_dock.raise_()
             return
-        self._measure_roi(selection)
-        self._start_sep_extract(selection)
+        if self._roi_action == "extract":
+            self._start_sep_extract(selection)
+        else:
+            self._measure_roi(selection)
 
     def _display_roi_to_original(
         self,
@@ -6726,7 +6850,7 @@ class MainWindow(QMainWindow):
             if moving_running:
                 if self.app_status_bar is not None:
                     self.app_status_bar.showMessage(
-                        self.tr("Wait for moving-target detection to finish before running SEP."),
+                        self.tr("Wait for moving-target detection to finish before selecting a ROI."),
                         3000,
                     )
                 return None
@@ -6835,7 +6959,10 @@ class MainWindow(QMainWindow):
         """Receive zoom updates from the canvas and refresh the status bar."""
 
         if self.app_status_bar is not None:
-            self.app_status_bar.set_zoom_info(zoom_factor)
+            if self.canvas is not None:
+                self.app_status_bar.set_zoom_state(self.canvas.zoom_state)
+            else:
+                self.app_status_bar.set_zoom_info(zoom_factor)
 
     def collect_ui_state(self) -> dict[str, Any]:
         """Return a snapshot of coarse window state for debugging and tests.

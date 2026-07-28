@@ -2391,6 +2391,69 @@ class TestMainWindowLoading(unittest.TestCase):
         finally:
             window.deleteLater()
 
+    def test_create_tool_actions_makes_roi_tasks_explicit_and_exclusive(self) -> None:
+        window = MainWindow()
+        window._roi_action = "measure"
+        try:
+            window.create_tool_actions()
+
+            self.assertTrue(window.roi_action_group.isExclusive())
+            self.assertTrue(window.action_roi_measure.isChecked())
+            self.assertFalse(window.action_roi_extract.isChecked())
+            self.assertEqual(window.action_roi_measure.text(), "Measure ROI")
+            self.assertEqual(window.action_roi_extract.text(), "Extract Sources in ROI")
+        finally:
+            window.deleteLater()
+
+    def test_set_roi_action_updates_only_one_mode_and_toolbar_label(self) -> None:
+        window = MainWindow()
+        window._settings = Mock()
+        window.roi_action_button = Mock()
+        try:
+            window.create_tool_actions()
+
+            window._set_roi_action("extract")
+
+            self.assertEqual(window._roi_action, "extract")
+            self.assertFalse(window.action_roi_measure.isChecked())
+            self.assertTrue(window.action_roi_extract.isChecked())
+            window._settings.setValue.assert_called_once_with("interaction/roi_action", "extract")
+            window.roi_action_button.setText.assert_called_with("ROI: Extract Sources")
+        finally:
+            window.deleteLater()
+
+    def test_tools_menu_uses_task_entries_and_view_groups_panel_toggles(self) -> None:
+        window = MainWindow()
+        try:
+            window.initialize(apply_startup_request=False)
+
+            tool_texts = [action.text() for action in window.menu_tools.actions()]
+            self.assertIn("Measurement & Photometry", tool_texts)
+            self.assertIn("SEP Extract", tool_texts)
+            self.assertIn("WCS & Gaia", tool_texts)
+            self.assertIn("Compare Frames", tool_texts)
+            self.assertEqual(window.menu_panels.title(), "Panels")
+            self.assertEqual(len(window.menu_panels.actions()), len(window._dock_widgets()))
+        finally:
+            window.close()
+            window.deleteLater()
+
+    def test_reapplying_default_layout_keeps_explicitly_hidden_docks_hidden(self) -> None:
+        window = MainWindow()
+        try:
+            window.create_actions()
+            window.build_ui()
+            self.assertTrue(all(dock.isHidden() for dock in window._dock_widgets()))
+
+            window._apply_default_workspace_layout()
+            window.show()
+            self._app.processEvents()
+
+            self.assertTrue(all(not dock.isVisible() for dock in window._dock_widgets()))
+        finally:
+            window.close()
+            window.deleteLater()
+
     def test_create_view_actions_registers_wrapped_frame_navigation_shortcuts(self) -> None:
         window = MainWindow()
         try:
@@ -2749,14 +2812,15 @@ class TestMainWindowLoading(unittest.TestCase):
         finally:
             window.deleteLater()
 
-    def test_build_empty_image_feedback_includes_drop_and_roi_hints(self) -> None:
+    def test_build_empty_image_feedback_has_one_clear_open_instruction(self) -> None:
         window = MainWindow()
         try:
             feedback = window.build_empty_image_feedback()
 
-            self.assertIn("Drop FITS files here", feedback.detail)
+            self.assertIn("Double-click", feedback.detail)
+            self.assertIn("drop FITS files here", feedback.detail)
             self.assertIn("Ctrl+O", feedback.detail)
-            self.assertIn("right-drag a ROI", feedback.detail)
+            self.assertNotIn("right-drag", feedback.detail)
         finally:
             window.deleteLater()
 

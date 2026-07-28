@@ -6,6 +6,7 @@ A desktop FITS astronomical image viewer built with PySide6.
 
 ### Image Display
 - Open single or multiple FITS files with multi-HDU support
+- Double-click the empty canvas, drag files onto it, or press `Ctrl+O` to open data
 - Stretch modes: Linear, Log, Asinh, Sqrt
 - Interval modes: ZScale, MinMax, 99.5%, 99%, 98%, 95%
 - Mouse wheel zoom and left-click drag for panning
@@ -15,7 +16,7 @@ A desktop FITS astronomical image viewer built with PySide6.
 
 ### Source Extraction (SEP)
 - Built-in SEP (Source Extractor Python) integration
-- Full-image or ROI (right-click drag) source extraction
+- Full-image source extraction, or choose `ROI: Extract Sources` before right-dragging a region
 - Configurable extraction parameters (threshold, min area, deblend, etc.)
 - Source overlay ellipses on the canvas with click-to-highlight and hover-to-preview
 - Source catalog table with sortable columns; single-source extractions auto-select the result
@@ -24,10 +25,10 @@ A desktop FITS astronomical image viewer built with PySide6.
 - Export catalog to CSV
 
 ### Measurement Workbench
-- Every right-drag ROI selection reports finite/invalid pixel counts, minimum, maximum, mean, median, standard deviation, and sum
+- `ROI: Measure` is the default right-drag task and reports finite/invalid pixel counts, minimum, maximum, mean, median, standard deviation, and sum
 - Circular-aperture photometry with a configurable background annulus
 - Background-subtracted net flux, robust background RMS, uncertainty, SNR, centroid, FWHM, and peak measurements
-- Click the image to set the aperture center; ROI and aperture footprints remain visible as overlays
+- In Measure mode, click the image to set the aperture center; panning no longer changes it, and ROI/aperture footprints remain visible as overlays
 - NaN/Inf values are excluded and sampled areas are constrained by a configurable pixel budget
 
 ### WCS and Gaia DR3
