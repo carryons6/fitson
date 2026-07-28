@@ -120,7 +120,10 @@ class TestMovingTargetMainWindow(unittest.TestCase):
         window = self._window()
         try:
             window._moving_roi_capture_pending = True
-            with patch("astroview.app.main_window.QThread.start", autospec=True) as start:
+            with patch(
+                "astroview.app.moving_target_controller.QThread.start",
+                autospec=True,
+            ) as start:
                 window._start_moving_target_detection(
                     MovingTargetParameters(),
                     1.0,

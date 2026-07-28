@@ -170,15 +170,20 @@ python -m unittest discover -s tests -v
 
 Windows bundle and installer from the exact release environment:
 ```powershell
-conda create -n astroview-release --file environment-win-64.conda.lock
+.\scripts\prepare_release_env.ps1
 conda activate astroview-release
 .\scripts\build_windows.ps1 -CondaLockPath environment-win-64.conda.lock
 ```
 
-The lock keeps NumPy on OpenBLAS and the build script rejects an activated
-environment whose explicit URL+SHA package set differs from it. GitHub Actions
-also downloads fixed Miniforge and Inno Setup installers and verifies their
-SHA-256 hashes before using them.
+The preparation script leaves an already matching environment unchanged. If an
+environment named `astroview-release` exists but differs from the lock, it fails
+without modifying it; rerun with `-Recreate` only when you deliberately want to
+remove and rebuild that release-only environment. The lock keeps NumPy on
+OpenBLAS, and both preparation and build reject an explicit URL+SHA package set
+that differs from it. They also reject unlocked pip packages, verify Conda-owned
+files are neither altered nor missing, and run `pip check`. GitHub Actions also
+downloads fixed Miniforge and Inno Setup installers and verifies their SHA-256
+hashes before using them.
 
 ## Architecture
 
@@ -196,7 +201,7 @@ SHA-256 hashes before using them.
   - `contracts.py`: typed dataclasses shared across layers
 
 - **`app/`**: PySide6 UI layer
-  - `main_window.py`: central coordinator between UI and services
+  - `main_window.py`: composition root for UI, controllers, workers, and services
   - `canvas.py`: QGraphicsView-based image display with overlays
   - `file_load_worker.py`: background FITS file loading worker
   - `frame_render_worker.py`: background frame rendering worker
@@ -209,11 +214,15 @@ SHA-256 hashes before using them.
   - `ds9_region_dock.py`: DS9 Region import/export and document controls
   - `comparison_dock.py`: frame A/B comparison and blink controls
   - `moving_target_dock.py`: cross-frame ROI, detection controls, and trajectory table
+  - `moving_target_controller.py`: moving-target state, request identity, and worker lifecycle
   - `moving_target_worker.py`: cancellable subprocess adapter for SEP-heavy sequence analysis
   - `header_dialog.py`: FITS header viewer dialog
   - `status_bar.py`: cursor/zoom/frame status display
 
-`MainWindow` is the sole coordinator: view modules emit signals and expose setters but never call services directly. Service modules return domain objects but never touch widgets.
+`MainWindow` remains the cross-feature composition root, while focused controllers
+own feature-local state and worker lifecycles. View modules emit signals and expose
+setters but never call services directly; service modules return domain objects and
+never touch widgets.
 
 ## Recent Contributions
 

@@ -90,6 +90,7 @@ from .i18n import (
 )
 from .marker_dock import MarkerDock
 from .measurement_dock import MeasurementDock
+from .moving_target_controller import MovingTargetController
 from .moving_target_dock import MovingTargetDock
 from .moving_target_worker import MovingTargetWorker
 from .sep_extract_worker import SEPExtractWorker
@@ -315,67 +316,6 @@ class _ComparisonSignalRelay(QObject):
         )
 
 
-class _MovingTargetSignalRelay(QObject):
-    """Deliver moving-target subprocess results on the owning GUI thread."""
-
-    def __init__(
-        self,
-        window: Any,
-        request_id: int,
-        context_generation: int,
-        dataset_signature: tuple[int, ...],
-        thread: QThread,
-        worker: MovingTargetWorker,
-    ) -> None:
-        super().__init__(window)
-        self._window = window
-        self._request_id = request_id
-        self._context_generation = context_generation
-        self._dataset_signature = dataset_signature
-        self._thread = thread
-        self._worker = worker
-
-    @Slot(int, object)
-    def handle_result(self, request_id: int, result: MovingTargetResult) -> None:
-        self._window._handle_moving_target_result_for_request(
-            request_id,
-            self._context_generation,
-            self._dataset_signature,
-            self._worker,
-            result,
-        )
-
-    @Slot(int, int, int, str)
-    def handle_progress(self, request_id: int, completed: int, total: int, detail: str) -> None:
-        self._window._handle_moving_target_progress_for_request(
-            request_id,
-            self._context_generation,
-            self._dataset_signature,
-            self._worker,
-            completed,
-            total,
-            detail,
-        )
-
-    @Slot(int, str)
-    def handle_error(self, request_id: int, detail: str) -> None:
-        self._window._handle_moving_target_error_for_request(
-            request_id,
-            self._context_generation,
-            self._dataset_signature,
-            self._worker,
-            detail,
-        )
-
-    @Slot()
-    def handle_thread_finished(self) -> None:
-        self._window._clear_moving_target_worker_refs(
-            self._request_id,
-            self._thread,
-            self._worker,
-        )
-
-
 class _SEPThreadFinishRelay(QObject):
     """Run SEP thread-finalization bookkeeping on the GUI thread."""
 
@@ -447,12 +387,13 @@ class _FrameBkgThreadFinishRelay(QObject):
 
 
 class MainWindow(QMainWindow):
-    """Top-level application window skeleton.
+    """Top-level application window and composition root.
 
     Orchestration contract:
-    - Sole coordinator between UI widgets and core services.
+    - Composes UI widgets, feature controllers, workers, and core services.
+    - Delegates feature-local state and worker lifecycles to focused controllers.
     - Pulls domain state from services, then pushes presentation state into views.
-    - Keeps all module-to-module calls centralized here.
+    - Keeps cross-feature policy and presentation wiring centralized here.
     """
 
     PREVIEW_PROFILE_CONFIGS: dict[str, dict[str, int | tuple[int, ...]]] = {
@@ -471,6 +412,88 @@ class MainWindow(QMainWindow):
     SEP_LARGE_COUNT_WARNING = 5000
     SEP_DENSE_FIELD_PER_MPX = 150
     SEP_ESTIMATE_MIN_PIXELS = 1_000_000
+
+    # Transitional aliases keep existing integrations and private test seams
+    # stable while feature state moves behind MovingTargetController.
+    @property
+    def _moving_target_roi(self) -> ROISelection | None:
+        return self._moving_target_controller.roi
+
+    @_moving_target_roi.setter
+    def _moving_target_roi(self, value: ROISelection | None) -> None:
+        self._moving_target_controller.roi = value
+
+    @property
+    def _moving_roi_capture_pending(self) -> bool:
+        return self._moving_target_controller.capture_pending
+
+    @_moving_roi_capture_pending.setter
+    def _moving_roi_capture_pending(self, value: bool) -> None:
+        self._moving_target_controller.capture_pending = value
+
+    @property
+    def _moving_target_result(self) -> MovingTargetResult | None:
+        return self._moving_target_controller.result
+
+    @_moving_target_result.setter
+    def _moving_target_result(self, value: MovingTargetResult | None) -> None:
+        self._moving_target_controller.result = value
+
+    @property
+    def _moving_target_thread(self) -> QThread | None:
+        return self._moving_target_controller.thread
+
+    @_moving_target_thread.setter
+    def _moving_target_thread(self, value: QThread | None) -> None:
+        self._moving_target_controller.thread = value
+
+    @property
+    def _moving_target_worker(self) -> MovingTargetWorker | None:
+        return self._moving_target_controller.worker
+
+    @_moving_target_worker.setter
+    def _moving_target_worker(self, value: MovingTargetWorker | None) -> None:
+        self._moving_target_controller.worker = value
+
+    @property
+    def _moving_target_request_id(self) -> int:
+        return self._moving_target_controller.request_id
+
+    @_moving_target_request_id.setter
+    def _moving_target_request_id(self, value: int) -> None:
+        self._moving_target_controller.request_id = value
+
+    @property
+    def _active_moving_target_request_id(self) -> int | None:
+        return self._moving_target_controller.active_request_id
+
+    @_active_moving_target_request_id.setter
+    def _active_moving_target_request_id(self, value: int | None) -> None:
+        self._moving_target_controller.active_request_id = value
+
+    @property
+    def _moving_target_context_generation(self) -> int:
+        return self._moving_target_controller.context_generation
+
+    @_moving_target_context_generation.setter
+    def _moving_target_context_generation(self, value: int) -> None:
+        self._moving_target_controller.context_generation = value
+
+    @property
+    def _moving_target_results_enabled(self) -> bool:
+        return self._moving_target_controller.results_enabled
+
+    @_moving_target_results_enabled.setter
+    def _moving_target_results_enabled(self, value: bool) -> None:
+        self._moving_target_controller.results_enabled = value
+
+    @property
+    def _moving_target_cancel_feedback_pending(self) -> bool:
+        return self._moving_target_controller.cancel_feedback_pending
+
+    @_moving_target_cancel_feedback_pending.setter
+    def _moving_target_cancel_feedback_pending(self, value: bool) -> None:
+        self._moving_target_controller.cancel_feedback_pending = value
 
     def __init__(
         self,
@@ -648,16 +671,28 @@ class MainWindow(QMainWindow):
         self._comparison_request_id: int = 0
         self._active_comparison_request_id: int | None = None
         self._comparison_results_enabled: bool = False
-        self._moving_target_roi: ROISelection | None = None
-        self._moving_roi_capture_pending: bool = False
-        self._moving_target_result: MovingTargetResult | None = None
-        self._moving_target_thread: QThread | None = None
-        self._moving_target_worker: MovingTargetWorker | None = None
-        self._moving_target_request_id: int = 0
-        self._active_moving_target_request_id: int | None = None
-        self._moving_target_context_generation: int = 0
-        self._moving_target_results_enabled: bool = False
-        self._moving_target_cancel_feedback_pending: bool = False
+        self._moving_target_controller = MovingTargetController(
+            self,
+            join_wait_ms=self.THREAD_JOIN_WAIT_MS,
+        )
+        self._moving_target_controller.detection_started.connect(
+            self._handle_moving_target_started
+        )
+        self._moving_target_controller.result_cleared.connect(
+            self._handle_moving_target_result_cleared
+        )
+        self._moving_target_controller.result_accepted.connect(
+            self._handle_moving_target_result_accepted
+        )
+        self._moving_target_controller.progress_accepted.connect(
+            self._handle_moving_target_progress_accepted
+        )
+        self._moving_target_controller.error_accepted.connect(
+            self._handle_moving_target_error_accepted
+        )
+        self._moving_target_controller.detection_finished.connect(
+            self._handle_moving_target_finished
+        )
         self._gaia_query_thread: QThread | None = None
         self._gaia_query_worker: GaiaQueryWorker | None = None
         self._gaia_query_request_id: int = 0
@@ -2925,7 +2960,7 @@ class MainWindow(QMainWindow):
 
     def _handle_moving_target_dock_visibility_changed(self, visible: bool) -> None:
         if not visible:
-            self._moving_roi_capture_pending = False
+            self._moving_target_controller.cancel_roi_capture()
 
     def _begin_moving_target_roi_capture(self) -> None:
         if not self._frames or self.fits_service.current_data is None:
@@ -2939,7 +2974,7 @@ class MainWindow(QMainWindow):
                 )
             return
         self._pause_playback_for_manual_frame_navigation()
-        self._moving_roi_capture_pending = True
+        self._moving_target_controller.begin_roi_capture()
         if self.moving_target_dock is not None:
             self.moving_target_dock.set_status(
                 self.tr("Right-drag once on the image to select the cross-frame analysis ROI.")
@@ -2948,10 +2983,7 @@ class MainWindow(QMainWindow):
             self.app_status_bar.showMessage(self.tr("Right-drag the moving-target analysis ROI."), 5000)
 
     def _use_full_frame_for_moving_targets(self) -> None:
-        self._moving_roi_capture_pending = False
-        self._moving_target_context_generation += 1
-        self._moving_target_roi = None
-        self._clear_moving_target_results()
+        self._moving_target_controller.use_full_frame()
         self._sync_moving_target_context()
         if self.moving_target_dock is not None:
             self.moving_target_dock.set_status(
@@ -3007,45 +3039,16 @@ class MainWindow(QMainWindow):
                 self.moving_target_dock.set_status(detail)
             return
 
-        self._moving_roi_capture_pending = False
         self._pause_playback_for_manual_frame_navigation()
-        self._clear_moving_target_results()
-        self._moving_target_request_id += 1
-        request_id = self._moving_target_request_id
-        context_generation = self._moving_target_context_generation
-        dataset_signature = self._moving_target_dataset_signature()
-        thread = QThread(self)
-        worker = MovingTargetWorker(
-            request_id=request_id,
-            frames=list(self._frames),
+        self._moving_target_controller.start(
+            frames=self._frames,
             roi=roi,
             parameters=parameters,
             fallback_cadence_seconds=fallback_cadence_seconds,
             prefer_header_times=prefer_header_times,
         )
-        relay = _MovingTargetSignalRelay(
-            self,
-            request_id,
-            context_generation,
-            dataset_signature,
-            thread,
-            worker,
-        )
-        self._active_moving_target_request_id = request_id
-        self._moving_target_results_enabled = True
-        self._moving_target_cancel_feedback_pending = False
-        self._moving_target_thread = thread
-        self._moving_target_worker = worker
-        worker.moveToThread(thread)
-        thread.started.connect(worker.run)
-        worker.result_ready.connect(relay.handle_result)
-        worker.progress.connect(relay.handle_progress)
-        worker.detection_error.connect(relay.handle_error)
-        worker.finished.connect(thread.quit)
-        worker.finished.connect(worker.deleteLater)
-        thread.finished.connect(relay.handle_thread_finished)
-        thread.finished.connect(relay.deleteLater)
-        thread.finished.connect(thread.deleteLater)
+
+    def _handle_moving_target_started(self) -> None:
         if self.moving_target_dock is not None:
             self.moving_target_dock.set_busy(True)
             self.moving_target_dock.set_status(self.tr("Preparing moving-target analysis..."))
@@ -3056,7 +3059,6 @@ class MainWindow(QMainWindow):
             progress_max=0,
             cancellable=True,
         )
-        thread.start()
 
     def _moving_target_request_is_current(
         self,
@@ -3065,13 +3067,14 @@ class MainWindow(QMainWindow):
         dataset_signature: tuple[int, ...],
         worker: MovingTargetWorker,
     ) -> bool:
-        return bool(
-            not self._is_closing
-            and self._moving_target_results_enabled
-            and request_id == self._active_moving_target_request_id
-            and context_generation == self._moving_target_context_generation
-            and dataset_signature == self._moving_target_dataset_signature()
-            and worker is self._moving_target_worker
+        if self._is_closing:
+            return False
+        self._moving_target_controller.sync_sequence(self._frames)
+        return self._moving_target_controller.request_is_current(
+            request_id,
+            context_generation,
+            dataset_signature,
+            worker,
         )
 
     def _handle_moving_target_result_for_request(
@@ -3082,11 +3085,18 @@ class MainWindow(QMainWindow):
         worker: MovingTargetWorker,
         result: MovingTargetResult,
     ) -> None:
-        if not self._moving_target_request_is_current(
-            request_id, context_generation, dataset_signature, worker
-        ):
+        if self._is_closing:
             return
-        self._moving_target_result = result
+        self._moving_target_controller.sync_sequence(self._frames)
+        self._moving_target_controller.handle_result_for_request(
+            request_id,
+            context_generation,
+            dataset_signature,
+            worker,
+            result,
+        )
+
+    def _handle_moving_target_result_accepted(self, result: MovingTargetResult) -> None:
         if self.moving_target_dock is not None:
             self.moving_target_dock.set_result(result, self._current_frame_index)
             self.moving_target_dock.show()
@@ -3109,10 +3119,25 @@ class MainWindow(QMainWindow):
         total: int,
         detail: str,
     ) -> None:
-        if not self._moving_target_request_is_current(
-            request_id, context_generation, dataset_signature, worker
-        ):
+        if self._is_closing:
             return
+        self._moving_target_controller.sync_sequence(self._frames)
+        self._moving_target_controller.handle_progress_for_request(
+            request_id,
+            context_generation,
+            dataset_signature,
+            worker,
+            completed,
+            total,
+            detail,
+        )
+
+    def _handle_moving_target_progress_accepted(
+        self,
+        completed: int,
+        total: int,
+        detail: str,
+    ) -> None:
         localized_detail = localize_moving_target_text(detail, self.tr)
         if self.moving_target_dock is not None:
             self.moving_target_dock.set_status(localized_detail)
@@ -3132,10 +3157,18 @@ class MainWindow(QMainWindow):
         worker: MovingTargetWorker,
         detail: str,
     ) -> None:
-        if not self._moving_target_request_is_current(
-            request_id, context_generation, dataset_signature, worker
-        ):
+        if self._is_closing:
             return
+        self._moving_target_controller.sync_sequence(self._frames)
+        self._moving_target_controller.handle_error_for_request(
+            request_id,
+            context_generation,
+            dataset_signature,
+            worker,
+            detail,
+        )
+
+    def _handle_moving_target_error_accepted(self, detail: str) -> None:
         localized_detail = localize_moving_target_text(detail, self.tr)
         if self.moving_target_dock is not None:
             self.moving_target_dock.set_status(localized_detail)
@@ -3147,16 +3180,9 @@ class MainWindow(QMainWindow):
         thread: QThread,
         worker: MovingTargetWorker,
     ) -> None:
-        if request_id != self._active_moving_target_request_id:
-            return
-        if thread is not self._moving_target_thread or worker is not self._moving_target_worker:
-            return
-        cancelled = self._moving_target_cancel_feedback_pending
-        self._active_moving_target_request_id = None
-        self._moving_target_results_enabled = False
-        self._moving_target_thread = None
-        self._moving_target_worker = None
-        self._moving_target_cancel_feedback_pending = False
+        self._moving_target_controller.clear_worker_refs(request_id, thread, worker)
+
+    def _handle_moving_target_finished(self, cancelled: bool) -> None:
         if self.moving_target_dock is not None:
             self.moving_target_dock.set_busy(False)
             if cancelled:
@@ -3166,34 +3192,10 @@ class MainWindow(QMainWindow):
             self.app_status_bar.showMessage(self.tr("Moving-target detection cancelled."), 3000)
 
     def _stop_moving_target_worker(self, *, wait: bool = False) -> bool:
-        thread = self._moving_target_thread
-        worker = self._moving_target_worker
-        request_id = self._active_moving_target_request_id
-        self._moving_target_results_enabled = False
-        if thread is None or worker is None or request_id is None:
-            return True
-        worker.cancel()
-        try:
-            running = thread.isRunning()
-        except RuntimeError:
-            running = False
-        if running:
-            thread.requestInterruption()
-            thread.quit()
-        if wait and running:
-            thread.wait(self.THREAD_JOIN_WAIT_MS)
-        try:
-            running = thread.isRunning()
-        except RuntimeError:
-            running = False
-        if not running:
-            self._clear_moving_target_worker_refs(request_id, thread, worker)
-            return True
-        return False
+        return self._moving_target_controller.stop(wait=wait)
 
     def _cancel_moving_target_detection(self) -> None:
-        self._moving_target_cancel_feedback_pending = True
-        stopped = self._stop_moving_target_worker(wait=False)
+        stopped = self._moving_target_controller.cancel(wait=False)
         if stopped:
             self._clear_status_activity(kind="moving")
             if self.moving_target_dock is not None:
@@ -3209,17 +3211,13 @@ class MainWindow(QMainWindow):
         )
 
     def _invalidate_moving_target_sequence(self, *, clear_roi: bool) -> None:
-        self._moving_target_context_generation += 1
-        self._moving_roi_capture_pending = False
-        self._moving_target_cancel_feedback_pending = False
-        self._stop_moving_target_worker(wait=False)
-        if clear_roi:
-            self._moving_target_roi = None
-        self._clear_moving_target_results()
+        self._moving_target_controller.invalidate_sequence(clear_roi=clear_roi)
         self._sync_moving_target_context()
 
     def _clear_moving_target_results(self) -> None:
-        self._moving_target_result = None
+        self._moving_target_controller.clear_result()
+
+    def _handle_moving_target_result_cleared(self) -> None:
         if self.canvas is not None:
             self.canvas.clear_moving_target_overlays()
         if self.moving_target_dock is not None:
@@ -6683,13 +6681,9 @@ class MainWindow(QMainWindow):
         if selection is None:
             if self.app_status_bar is not None:
                 self.app_status_bar.showMessage(self.tr("Selected ROI is empty."), 3000)
-            self._moving_roi_capture_pending = False
+            self._moving_target_controller.cancel_roi_capture()
             return
-        if self._moving_roi_capture_pending:
-            self._moving_roi_capture_pending = False
-            self._moving_target_context_generation += 1
-            self._moving_target_roi = selection
-            self._clear_moving_target_results()
+        if self._moving_target_controller.consume_captured_roi(selection):
             if self.canvas is not None:
                 self.canvas.set_moving_target_roi(
                     selection,
