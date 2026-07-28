@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+### English
+
+#### Changed
+- Extracted moving-target request state, stale-result protection, and QThread/worker lifecycle management from `MainWindow` into a focused `MovingTargetController`, while retaining compatibility wrappers at the composition root.
+- Added fail-closed scripts to prepare and independently verify an exact release-only Conda environment; Windows packaging now reuses the shared verifier.
+- Removed obsolete implementation handoff TODOs and made `TODO_NEXT.md` the single active backlog.
+
+### 简体中文
+
+#### 变更
+- 将动目标请求状态、过期结果防护及 QThread/worker 生命周期从 `MainWindow` 抽取到专用 `MovingTargetController`，同时在应用装配根保留兼容转发。
+- 新增默认拒绝不一致环境的发布专用 Conda 准备与独立精确校验脚本；Windows 打包流程复用同一校验器。
+- 移除已过时的实现交接待办，并将 `TODO_NEXT.md` 作为唯一活动任务列表。
+
 ## 1.9.0 - 2026-07-27
 
 ### English
