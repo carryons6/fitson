@@ -63,6 +63,7 @@ class TestMovingTargetMainWindow(unittest.TestCase):
     def _window(self) -> MainWindow:
         window = MainWindow()
         window.initialize(apply_startup_request=False)
+        window._roi_action = "measure"
         frames = [FITSData(path=f"f-{i}.fits", data=np.zeros((60, 80))) for i in range(5)]
         window._frames = frames
         window._frame_images = [QImage(80, 60, QImage.Format.Format_Grayscale8) for _ in frames]
@@ -91,7 +92,7 @@ class TestMovingTargetMainWindow(unittest.TestCase):
             with patch.object(window, "_measure_roi") as measure, patch.object(window, "_start_sep_extract") as sep:
                 window.handle_roi_selected(2, 3, 10, 11)
             measure.assert_called_once()
-            sep.assert_called_once()
+            sep.assert_not_called()
         finally:
             window.close()
             window.deleteLater()
@@ -120,7 +121,10 @@ class TestMovingTargetMainWindow(unittest.TestCase):
         window = self._window()
         try:
             window._moving_roi_capture_pending = True
-            with patch("astroview.app.main_window.QThread.start", autospec=True) as start:
+            with patch(
+                "astroview.app.moving_target_controller.QThread.start",
+                autospec=True,
+            ) as start:
                 window._start_moving_target_detection(
                     MovingTargetParameters(),
                     1.0,
@@ -141,7 +145,7 @@ class TestMovingTargetMainWindow(unittest.TestCase):
             window.app_status_bar.showMessage = Mock()
             window.handle_roi_selected(10, 12, 20, 18)
             window.app_status_bar.showMessage.assert_called_once_with(
-                window.tr("Wait for moving-target detection to finish before running SEP."),
+                window.tr("Wait for moving-target detection to finish before selecting a ROI."),
                 3000,
             )
         finally:

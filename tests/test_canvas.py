@@ -24,6 +24,18 @@ from astroview.core.contracts import ZoomState
 from astroview.core.source_catalog import SourceCatalog, SourceRecord
 
 
+class _WheelEvent:
+    def __init__(self, delta: int) -> None:
+        self._delta = delta
+        self.ignored = False
+
+    def angleDelta(self) -> QPoint:
+        return QPoint(0, self._delta)
+
+    def ignore(self) -> None:
+        self.ignored = True
+
+
 class TestImageCanvas(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -96,9 +108,175 @@ class TestImageCanvas(unittest.TestCase):
             canvas.close()
             canvas.deleteLater()
 
+    def test_fit_and_manual_zoom_report_actual_transform_scale(self) -> None:
+        canvas = ImageCanvas()
+        emitted_scales: list[float] = []
+        try:
+            canvas.resize(400, 300)
+            canvas.show()
+            canvas.set_image(self._image(1000, 800))
+            canvas.zoom_changed.connect(emitted_scales.append)
+            self._app.processEvents()
+
+            canvas.fit_to_window()
+            fitted_scale = canvas.transform().m11()
+            self.assertNotAlmostEqual(fitted_scale, 1.0, places=2)
+            self.assertAlmostEqual(canvas.zoom_state.scale_factor, fitted_scale)
+            self.assertEqual(canvas.zoom_state.mode, "fit")
+            self.assertAlmostEqual(emitted_scales[-1], fitted_scale)
+
+            canvas.zoom_in()
+            zoomed_scale = canvas.transform().m11()
+            self.assertAlmostEqual(
+                zoomed_scale,
+                min(fitted_scale * 1.15, canvas._MAX_ZOOM),
+            )
+            self.assertAlmostEqual(canvas.zoom_state.scale_factor, zoomed_scale)
+            self.assertEqual(canvas.zoom_state.mode, "custom")
+            self.assertAlmostEqual(emitted_scales[-1], zoomed_scale)
+        finally:
+            canvas.close()
+            canvas.deleteLater()
+
+    def test_manual_zoom_is_bounded_between_minimum_and_maximum(self) -> None:
+        canvas = ImageCanvas()
+        try:
+            canvas.set_image(self._image(100, 100))
+            canvas.show_actual_pixels()
+
+            for _ in range(100):
+                canvas.zoom_in()
+            self.assertAlmostEqual(canvas.transform().m11(), canvas._MAX_ZOOM)
+            self.assertAlmostEqual(canvas.zoom_state.scale_factor, canvas._MAX_ZOOM)
+
+            for _ in range(200):
+                canvas.zoom_out()
+            self.assertAlmostEqual(canvas.transform().m11(), canvas._MIN_ZOOM)
+            self.assertAlmostEqual(canvas.zoom_state.scale_factor, canvas._MIN_ZOOM)
+
+            canvas.wheelEvent(_WheelEvent(-120))
+            self.assertAlmostEqual(canvas.transform().m11(), canvas._MIN_ZOOM)
+            self.assertAlmostEqual(canvas.zoom_state.scale_factor, canvas._MIN_ZOOM)
+        finally:
+            canvas.close()
+            canvas.deleteLater()
+
+    def test_zoom_commands_do_nothing_without_an_image(self) -> None:
+        canvas = ImageCanvas()
+        try:
+            canvas.scale(2.0, 2.0)
+            canvas.set_zoom_state(ZoomState(scale_factor=2.0, mode="custom"))
+            initial_scale = canvas.transform().m11()
+            wheel_event = _WheelEvent(120)
+
+            canvas.fit_to_window()
+            canvas.show_actual_pixels()
+            canvas.zoom_in()
+            canvas.zoom_out()
+            canvas.wheelEvent(wheel_event)
+
+            self.assertTrue(wheel_event.ignored)
+            self.assertAlmostEqual(canvas.transform().m11(), initial_scale)
+            self.assertAlmostEqual(canvas.zoom_state.scale_factor, initial_scale)
+            self.assertEqual(canvas.zoom_state.mode, "custom")
+        finally:
+            canvas.close()
+            canvas.deleteLater()
+
+    def test_left_click_emits_pixel_only_after_release(self) -> None:
+        canvas = ImageCanvas()
+        captured_positions: list[tuple[float, float]] = []
+        try:
+            canvas.resize(300, 300)
+            canvas.show()
+            canvas.set_image(self._image(100, 100))
+            canvas.pixel_clicked.connect(
+                lambda x, y: captured_positions.append((x, y))
+            )
+            self._app.processEvents()
+
+            view_pos = canvas.mapFromScene(40.0, 55.0)
+            QTest.mousePress(
+                canvas.viewport(),
+                Qt.MouseButton.LeftButton,
+                Qt.KeyboardModifier.NoModifier,
+                view_pos,
+            )
+            self._app.processEvents()
+            self.assertEqual(captured_positions, [])
+
+            QTest.mouseRelease(
+                canvas.viewport(),
+                Qt.MouseButton.LeftButton,
+                Qt.KeyboardModifier.NoModifier,
+                view_pos,
+            )
+            self._app.processEvents()
+            self.assertEqual(len(captured_positions), 1)
+        finally:
+            canvas.close()
+            canvas.deleteLater()
+
+    def test_left_drag_does_not_emit_pixel_click(self) -> None:
+        canvas = ImageCanvas()
+        captured_positions: list[tuple[float, float]] = []
+        try:
+            canvas.resize(300, 300)
+            canvas.show()
+            canvas.set_image(self._image(1000, 1000))
+            canvas.pixel_clicked.connect(
+                lambda x, y: captured_positions.append((x, y))
+            )
+            self._app.processEvents()
+
+            start = canvas.viewport().rect().center()
+            end = start + QPoint(QApplication.startDragDistance() + 20, 0)
+            QTest.mousePress(
+                canvas.viewport(),
+                Qt.MouseButton.LeftButton,
+                Qt.KeyboardModifier.NoModifier,
+                start,
+            )
+            QTest.mouseMove(canvas.viewport(), end)
+            QTest.mouseRelease(
+                canvas.viewport(),
+                Qt.MouseButton.LeftButton,
+                Qt.KeyboardModifier.NoModifier,
+                end,
+            )
+            self._app.processEvents()
+
+            self.assertEqual(captured_positions, [])
+        finally:
+            canvas.close()
+            canvas.deleteLater()
+
+    def test_double_clicking_empty_canvas_requests_open(self) -> None:
+        canvas = ImageCanvas()
+        requests: list[bool] = []
+        try:
+            canvas.resize(300, 300)
+            canvas.show()
+            canvas.open_requested.connect(lambda: requests.append(True))
+            self._app.processEvents()
+
+            QTest.mouseDClick(
+                canvas.viewport(),
+                Qt.MouseButton.LeftButton,
+                Qt.KeyboardModifier.NoModifier,
+                canvas.viewport().rect().center(),
+            )
+            self._app.processEvents()
+
+            self.assertEqual(requests, [True])
+        finally:
+            canvas.close()
+            canvas.deleteLater()
+
     def test_double_clicking_source_overlay_emits_source_index(self) -> None:
         canvas = ImageCanvas()
         captured_indices: list[int] = []
+        open_requests: list[bool] = []
         try:
             canvas.resize(300, 300)
             canvas.show()
@@ -107,6 +285,7 @@ class TestImageCanvas(unittest.TestCase):
                 SourceRecord(source_id=1, x=40.0, y=55.0, a=4.0, b=3.0),
             ]))
             canvas.source_double_clicked.connect(captured_indices.append)
+            canvas.open_requested.connect(lambda: open_requests.append(True))
             self._app.processEvents()
 
             view_pos = canvas.mapFromScene(40.0, 55.0)
@@ -119,6 +298,7 @@ class TestImageCanvas(unittest.TestCase):
             self._app.processEvents()
 
             self.assertEqual(captured_indices, [0])
+            self.assertEqual(open_requests, [])
         finally:
             canvas.close()
             canvas.deleteLater()

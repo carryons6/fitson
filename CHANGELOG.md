@@ -2,6 +2,40 @@
 
 ## Unreleased
 
+## 1.10.0 - 2026-07-28
+
+### English
+
+#### Added
+- Added a persistent toolbar selector that gives an ordinary right-drag exactly one explicit task: bounded ROI measurement or SEP source extraction.
+- Added empty-canvas double-click opening alongside the existing file dialog and drag-and-drop paths.
+
+#### Changed
+- Reorganized the Tools menu around analysis tasks, grouped layout-only switches under View > Panels, moved append-frame loading beside Open, and kept a clean startup focused on the canvas instead of reopening hidden docks.
+- Extracted moving-target request state, stale-result protection, and QThread/worker lifecycle management from `MainWindow` into a focused `MovingTargetController`, while retaining compatibility wrappers at the composition root.
+- Added fail-closed scripts to prepare and independently verify an exact release-only Conda environment; Windows packaging now reuses the shared verifier, avoids sibling-worktree import paths, and disables unpinned UPX processing.
+- Removed obsolete implementation handoff TODOs and made `TODO_NEXT.md` the single active backlog.
+
+#### Fixed
+- Separated a click used to place an aperture from a left-drag used to pan, so navigation no longer silently changes the photometry center.
+- Made Fit, wheel, button, and restored zoom states report the real bounded canvas transform, including explicit Fit and 1:1 status labels.
+
+### 简体中文
+
+#### 新增
+- 新增持久化工具栏选择器，使普通右键拖拽只执行一个明确任务：受限 ROI 测量或 SEP 源提取。
+- 在现有文件对话框和拖放之外，新增双击空画布打开文件。
+
+#### 变更
+- 将“工具”菜单按分析任务重组，把仅涉及布局的开关收拢到“视图 > 面板”，把追加帧放到“打开”旁，并让全新启动聚焦画布而非重新展开隐藏面板。
+- 将动目标请求状态、过期结果防护及 QThread/worker 生命周期从 `MainWindow` 抽取到专用 `MovingTargetController`，同时在应用装配根保留兼容转发。
+- 新增默认拒绝不一致环境的发布专用 Conda 准备与独立精确校验脚本；Windows 打包流程复用同一校验器、移除兄弟 worktree 导入路径并关闭未固定版本的 UPX 处理。
+- 移除已过时的实现交接待办，并将 `TODO_NEXT.md` 作为唯一活动任务列表。
+
+#### 修复
+- 区分用于放置孔径的单击与用于平移的左键拖动，避免导航时静默改变测光中心。
+- 让适应窗口、滚轮、按钮和恢复视图统一报告真实且有界的画布变换，并明确显示 Fit 与 1:1 状态。
+
 ## 1.9.0 - 2026-07-27
 
 ### English

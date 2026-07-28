@@ -69,6 +69,10 @@ class TestI18n(unittest.TestCase):
             self.assertEqual(window.menu_file.title(), "文件")
             self.assertEqual(window.menu_view.title(), "视图")
             self.assertEqual(window.menu_language.title(), "语言")
+            self.assertEqual(window.menu_panels.title(), "面板")
+            self.assertEqual(window.menu_roi_action.title(), "右键拖拽 ROI 任务")
+            self.assertEqual(window.action_roi_measure.text(), "测量 ROI")
+            self.assertEqual(window.action_show_measurement.text(), "测量与测光")
             self.assertEqual(window.action_frame_layout_single.text(), "单帧显示")
             self.assertEqual(window.action_check_updates.text(), "检查更新...")
         finally:

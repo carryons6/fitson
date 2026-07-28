@@ -1,25 +1,9 @@
 ﻿# Next-Step Todo
 
-This file tracks the next performance and product-quality tasks worth doing after AstroView 1.9.0.
-
-## Completed in 1.9.0
-- ~~Add bounded multi-frame moving-target detection with stellar registration, temporal differencing, constant-velocity track association, per-frame overlays, and CSV export.~~ Done.
-- ~~Run SEP-heavy moving-target analysis in a cancellable spawn subprocess with stale-result rejection and Windows-safe temporary-data cleanup.~~ Done.
-- ~~Add strict timestamp, registration-quality, common-valid-area, source-count, candidate, seed, and intermediate-track limits.~~ Done.
-
-## Completed in 1.8.0
-- ~~Add bounded ROI statistics and circular-aperture photometry with background subtraction, SNR, centroid, and FWHM.~~ Done.
-- ~~Add a bounded RA/Dec grid and cancellable Gaia DR3 cone-search overlay.~~ Done.
-- ~~Add safe DS9 Region import/export, diagnostics, overlays, and ROI/aperture capture.~~ Done.
-- ~~Add cancellable side-by-side, blink, and difference comparison with direct-pixel and restricted WCS alignment paths.~~ Done.
-- ~~Apply feature-specific resource budgets and stale-result protection to the new measurement, catalog, Region, and comparison workflows.~~ Done.
+This file contains only active performance and product-quality work that remains after AstroView 1.10.0. Completed work belongs in `CHANGELOG.md` and release notes.
 
 ## Rendering and Playback
-- ~~Prewarm the next frame preview during playback so frame stepping and autoplay feel more continuous.~~ Done.
-- ~~Add a small render queue/prioritization policy so the current frame always wins over stale background render requests.~~ Done.
-- ~~Consider a multi-stage preview pipeline for very large images, such as 1024 px preview, then 2048 px preview, then full render.~~ Done.
 - Revisit whether full-resolution background render results should preserve zoom/viewport position more explicitly during fast frame switches.
-- ~~Preserve zoom level and viewport position more explicitly when switching frames or when a higher-quality render replaces a preview.~~ Done.
 
 ## Data Loading
 - Profile FITS files with real WCS payloads and compressed HDUs to see whether WCS construction or HDU scanning needs its own optimization path.
@@ -28,10 +12,6 @@ This file tracks the next performance and product-quality tasks worth doing afte
 - Consider a separately budgeted table-HDU viewer with pagination instead of treating table HDUs as image data.
 
 ## UI and UX
-- ~~Add an explicit busy/loading indicator in the canvas for frames that are still rendering in the background.~~ Done.
-- ~~Expose a user-facing preference for preview aggressiveness or maximum preview dimension.~~ Done.
-- ~~Review whether frame-player controls should be temporarily throttled or visually annotated while a requested frame is still rendering.~~ Done.
-- ~~Persist user preferences and workspace state such as stretch, interval, marker parameters, and window/dock layout.~~ Done.
 - Consider a project/session format that persists measurements, Region documents, comparison selections, and analysis parameters.
 
 ## Scientific Workflows and Interoperability
@@ -41,10 +21,7 @@ This file tracks the next performance and product-quality tasks worth doing afte
 - Evaluate additional DS9 shapes and true `physical` detector-coordinate transforms only when their metadata semantics can be validated reliably.
 
 ## Robustness and Testing
-- ~~Add integration-style Qt tests that exercise real `QThread` worker scheduling and signal delivery without relying only on mocked call paths.~~ Done.
-- ~~Add regression tests around repeated stretch/interval changes while background renders are in flight.~~ Done.
-- ~~Add tests for cancellation behavior when closing the window or opening a new file set during active background loading/rendering.~~ Done.
-- Validate the packaged Windows moving-target spawn path after the 1.9.0 worker and DLL-search changes.
-- Harden PyInstaller packaging so PySide6/numpy/conda runtime dependencies are collected reliably across environment variants, then review bundle size for safe trimming.
+- Validate the packaged Windows moving-target spawn path in the 1.10.0 release artifact.
+- Review frozen bundle size and safe trimming only inside a freshly prepared, exactly locked release environment.
 - Add Authenticode signing for the Windows installer and executable; until then, continue publishing SHA-256 manifests and the explicit SmartScreen warning.
 - Consider signed update metadata, an SBOM, and reproducible macOS/Linux packages after the Windows release path is stable.
