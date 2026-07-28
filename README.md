@@ -146,7 +146,7 @@ rejected before decompression; safely decompress those files first.
 
 ### Windows release installer
 
-Download `AstroView_Setup_1.9.0.exe` and `SHA256SUMS.txt` from the
+Download `AstroView_Setup_1.10.0.exe` and `SHA256SUMS.txt` from the
 [GitHub Releases page](https://github.com/carryons6/fitson/releases). The
 Windows installer is **not Authenticode-signed**, so Windows SmartScreen may
 display a warning. Verify the installer against the release checksum before

@@ -144,7 +144,7 @@ gzip/ZIP/bzip2/xz/LZW 压缩会在解压前被拒绝；请先在确认展开大�
 ### Windows 发布安装包
 
 请从 [GitHub Releases 页面](https://github.com/carryons6/fitson/releases) 下载
-`AstroView_Setup_1.9.0.exe` 与 `SHA256SUMS.txt`。Windows 安装包**尚未进行
+`AstroView_Setup_1.10.0.exe` 与 `SHA256SUMS.txt`。Windows 安装包**尚未进行
 Authenticode 数字签名**，因此 Windows SmartScreen 可能显示警告。运行前请使用
 Release 中的校验清单核验安装包。
 
