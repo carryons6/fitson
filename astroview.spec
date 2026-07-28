@@ -12,7 +12,6 @@ from PyInstaller.utils.win32 import versioninfo
 
 spec_dir = Path(SPECPATH).resolve()
 package_dir = spec_dir
-workspace_dir = package_dir.parent
 env_dir = Path(sys.executable).resolve().parent
 site_packages = Path(sysconfig.get_paths()["purelib"]).resolve()
 python3_dll = env_dir / "python3.dll"
@@ -350,7 +349,7 @@ hiddenimports = [
 
 a = Analysis(
     [str(package_dir / "astroview_bootstrap.py")],
-    pathex=[str(package_alias_parent), str(package_dir), str(workspace_dir)],
+    pathex=[str(package_alias_parent), str(package_dir)],
     binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,
@@ -523,7 +522,7 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    upx=False,
     console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
@@ -536,7 +535,7 @@ coll = COLLECT(
     a.binaries,
     a.datas,
     strip=False,
-    upx=True,
+    upx=False,
     upx_exclude=[],
     name="AstroView",
 )

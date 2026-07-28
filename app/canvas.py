@@ -17,6 +17,7 @@ from PySide6.QtGui import (
     QTransform,
 )
 from PySide6.QtWidgets import (
+    QApplication,
     QFrame,
     QGraphicsEllipseItem,
     QGraphicsItem,
@@ -52,9 +53,12 @@ class ImageCanvas(QGraphicsView):
     region_double_clicked = Signal(int)
     zoom_changed = Signal(float)
     files_dropped = Signal(list)
+    open_requested = Signal()
     _SOURCE_INDEX_DATA_KEY = 1
     _CATALOG_INDEX_DATA_KEY = 2
     _REGION_INDEX_DATA_KEY = 3
+    _MIN_ZOOM = 0.02
+    _MAX_ZOOM = 64.0
 
     def __init__(self, parent: Any | None = None) -> None:
         super().__init__(parent)
@@ -70,6 +74,7 @@ class ImageCanvas(QGraphicsView):
 
         self._rubber_band = QRubberBand(QRubberBand.Shape.Rectangle, self)
         self._drag_origin: QPoint | None = None
+        self._left_press_pos: QPoint | None = None
         self._marker_items: list[QGraphicsEllipseItem] = []
         self._source_items: list[QGraphicsEllipseItem] = []
         self._catalog_items: list[QGraphicsPathItem] = []
@@ -232,14 +237,14 @@ class ImageCanvas(QGraphicsView):
         try:
             if mode == "fit":
                 self.fitInView(self._pixmap_item, Qt.AspectRatioMode.KeepAspectRatio)
-                target_scale = self.transform().m11()
+                target_scale = self._set_view_scale(self.transform().m11())
             elif mode == "custom":
-                target_scale = max(0.01, target_scale * image_scale_ratio)
+                target_scale = target_scale * image_scale_ratio
                 self.resetTransform()
-                self.scale(target_scale, target_scale)
+                target_scale = self._set_view_scale(target_scale)
             else:
-                target_scale = 1.0
                 self.resetTransform()
+                target_scale = self.transform().m11()
 
             center_x = min(max(float(state.get("center_x", 0.5)), 0.0), 1.0)
             center_y = min(max(float(state.get("center_y", 0.5)), 0.0), 1.0)
@@ -327,29 +332,29 @@ class ImageCanvas(QGraphicsView):
         if self._pixmap_item.pixmap().isNull():
             return
         self.fitInView(self._pixmap_item, Qt.AspectRatioMode.KeepAspectRatio)
-        self.set_zoom_state(ZoomState(scale_factor=1.0, mode="fit"))
-        self.zoom_changed.emit(self.zoom_state.scale_factor)
+        actual_scale = self._set_view_scale(self.transform().m11())
+        self.set_zoom_state(ZoomState(scale_factor=actual_scale, mode="fit"))
+        self.zoom_changed.emit(actual_scale)
 
     def show_actual_pixels(self) -> None:
         """Reset the view to 1:1 pixel scale."""
 
+        if self._pixmap_item.pixmap().isNull():
+            return
         self.resetTransform()
-        self.set_zoom_state(ZoomState(scale_factor=1.0, mode="actual"))
-        self.zoom_changed.emit(self.zoom_state.scale_factor)
+        actual_scale = self.transform().m11()
+        self.set_zoom_state(ZoomState(scale_factor=actual_scale, mode="actual"))
+        self.zoom_changed.emit(actual_scale)
 
     def zoom_in(self) -> None:
         """Zoom in from the current scale."""
 
-        self.scale(1.15, 1.15)
-        self.set_zoom_state(ZoomState(scale_factor=self.zoom_state.scale_factor * 1.15, mode="custom"))
-        self.zoom_changed.emit(self.zoom_state.scale_factor)
+        self._zoom_by_factor(1.15)
 
     def zoom_out(self) -> None:
         """Zoom out from the current scale."""
 
-        self.scale(1 / 1.15, 1 / 1.15)
-        self.set_zoom_state(ZoomState(scale_factor=self.zoom_state.scale_factor / 1.15, mode="custom"))
-        self.zoom_changed.emit(self.zoom_state.scale_factor)
+        self._zoom_by_factor(1 / 1.15)
 
     def draw_sources(self, catalog: Any) -> None:
         """Draw source ellipses for detected sources.
@@ -850,8 +855,32 @@ class ImageCanvas(QGraphicsView):
     def set_zoom_state(self, zoom_state: ZoomState) -> None:
         """Replace the current structured zoom state."""
 
-        self.zoom_state = zoom_state
+        self.zoom_state = ZoomState(
+            scale_factor=self.transform().m11(),
+            mode=zoom_state.mode,
+        )
         self._update_scene_rect()
+
+    def _set_view_scale(self, target_scale: float) -> float:
+        """Apply a bounded absolute view scale and return the actual transform scale."""
+
+        bounded_scale = min(max(float(target_scale), self._MIN_ZOOM), self._MAX_ZOOM)
+        current_scale = float(self.transform().m11())
+        if not math.isfinite(current_scale) or current_scale <= 0.0:
+            self.resetTransform()
+            current_scale = float(self.transform().m11())
+        self.scale(bounded_scale / current_scale, bounded_scale / current_scale)
+        return float(self.transform().m11())
+
+    def _zoom_by_factor(self, factor: float) -> None:
+        """Apply one bounded manual zoom step using the view transform as truth."""
+
+        if self._pixmap_item.pixmap().isNull():
+            return
+        actual_scale = self._set_view_scale(self.transform().m11() * factor)
+        self.set_zoom_state(ZoomState(scale_factor=actual_scale, mode="custom"))
+        self._layout_feedback_item()
+        self.zoom_changed.emit(actual_scale)
 
     def _update_scene_rect(self) -> None:
         """Expand scene rect with large margins so edges can be dragged to center."""
@@ -958,15 +987,22 @@ class ImageCanvas(QGraphicsView):
             self._rubber_band.setGeometry(QRect(self._drag_origin, self._drag_origin))
             self._rubber_band.show()
         else:
-            if event.button() == Qt.MouseButton.LeftButton and self.current_image is not None:
-                scene_pos = self._scene_pos_from_view_pos(event.position())
-                self.pixel_clicked.emit(scene_pos.x(), scene_pos.y())
+            if event.button() == Qt.MouseButton.LeftButton:
+                self._left_press_pos = (
+                    event.position().toPoint()
+                    if self.current_image is not None
+                    else None
+                )
             super().mousePressEvent(event)
 
     def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:
         """Emit the clicked source index when a source overlay is double-clicked."""
 
         if event.button() == Qt.MouseButton.LeftButton:
+            if self.current_image is None:
+                self.open_requested.emit()
+                event.accept()
+                return
             source_index = self._source_index_at_view_pos(event.position().toPoint())
             if source_index is not None:
                 self.source_double_clicked.emit(source_index)
@@ -1036,11 +1072,27 @@ class ImageCanvas(QGraphicsView):
             if w > 2 and h > 2:
                 self.roi_selected.emit(x0, y0, w, h)
         else:
+            click_scene_pos: QPointF | None = None
+            if event.button() == Qt.MouseButton.LeftButton:
+                press_pos = self._left_press_pos
+                self._left_press_pos = None
+                if (
+                    self.current_image is not None
+                    and press_pos is not None
+                    and (event.position().toPoint() - press_pos).manhattanLength()
+                    <= QApplication.startDragDistance()
+                ):
+                    click_scene_pos = self._scene_pos_from_view_pos(event.position())
             super().mouseReleaseEvent(event)
+            if click_scene_pos is not None:
+                self.pixel_clicked.emit(click_scene_pos.x(), click_scene_pos.y())
 
     def wheelEvent(self, event: Any) -> None:
         """Zoom in/out with mouse wheel, anchored under cursor."""
 
+        if self._pixmap_item.pixmap().isNull():
+            event.ignore()
+            return
         delta = event.angleDelta().y()
         if delta > 0:
             factor = 1.25
@@ -1048,11 +1100,7 @@ class ImageCanvas(QGraphicsView):
             factor = 1 / 1.25
         else:
             return
-        self.scale(factor, factor)
-        new_scale = self.zoom_state.scale_factor * factor
-        self.set_zoom_state(ZoomState(scale_factor=new_scale, mode="custom"))
-        self._layout_feedback_item()
-        self.zoom_changed.emit(new_scale)
+        self._zoom_by_factor(factor)
 
     def dragEnterEvent(self, event: Any) -> None:
         """Accept local file drags so the main window can open dropped FITS files."""

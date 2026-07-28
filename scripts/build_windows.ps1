@@ -140,88 +140,6 @@ function Assert-InnoSetupMajorVersion {
     }
 }
 
-function Assert-CondaEnvironmentMatchesLock {
-    param(
-        [string]$RepoRoot,
-        [string]$BuildPython,
-        [string]$LockPath
-    )
-
-    if (-not $env:CONDA_PREFIX) {
-        throw "-CondaLockPath requires an activated Conda environment."
-    }
-
-    $resolvedLockPath = if ([System.IO.Path]::IsPathRooted($LockPath)) {
-        $LockPath
-    } else {
-        Join-Path $RepoRoot $LockPath
-    }
-    if (-not (Test-Path -LiteralPath $resolvedLockPath)) {
-        throw "Conda lock file was not found at '$resolvedLockPath'."
-    }
-
-    $activePython = Join-Path $env:CONDA_PREFIX "python.exe"
-    if (-not (Test-Path -LiteralPath $activePython)) {
-        throw "The active Conda environment has no python.exe at '$activePython'."
-    }
-    $resolvedBuildPython = (Resolve-Path -LiteralPath $BuildPython).Path
-    $resolvedActivePython = (Resolve-Path -LiteralPath $activePython).Path
-    if ($resolvedBuildPython -ne $resolvedActivePython) {
-        throw "Build Python '$resolvedBuildPython' is not the locked active-environment Python '$resolvedActivePython'."
-    }
-
-    $lockContent = @(
-        Get-Content -LiteralPath $resolvedLockPath |
-            ForEach-Object { $_.Trim() } |
-            Where-Object { $_ -and -not $_.StartsWith("#") }
-    )
-    if (-not $lockContent -or $lockContent[0] -ne "@EXPLICIT") {
-        throw "Conda lock '$resolvedLockPath' must begin with @EXPLICIT."
-    }
-    $invalidLockLines = @(
-        $lockContent |
-            Select-Object -Skip 1 |
-            Where-Object { $_ -notmatch '^https://conda\.anaconda\.org/conda-forge/(win-64|noarch)/[^/]+#[0-9a-fA-F]{64}$' }
-    )
-    if ($invalidLockLines) {
-        throw "Conda lock '$resolvedLockPath' contains malformed or non-conda-forge package URLs."
-    }
-    $expected = @(
-        $lockContent |
-            Select-Object -Skip 1 |
-            ForEach-Object { $_.ToLowerInvariant() } |
-            Sort-Object
-    )
-    if (-not $expected) {
-        throw "Conda lock '$resolvedLockPath' contains no hash-locked package URLs."
-    }
-
-    $conda = Get-Command conda -ErrorAction SilentlyContinue
-    if (-not $conda) {
-        throw "Could not locate conda to verify the active release environment."
-    }
-    # Invoke by command name so both setup-miniconda's PowerShell function and
-    # a regular conda executable are supported.
-    $actualOutput = & conda list --prefix $env:CONDA_PREFIX --explicit --sha256
-    $condaExitCode = $LASTEXITCODE
-    if ($condaExitCode -ne 0) {
-        throw "conda list failed while verifying the release environment (exit $condaExitCode)."
-    }
-    $actual = @(
-        $actualOutput |
-            ForEach-Object { $_.Trim() } |
-            Where-Object { $_ -match '^https://.+#[0-9a-fA-F]{64}$' } |
-            ForEach-Object { $_.ToLowerInvariant() } |
-            Sort-Object
-    )
-
-    $difference = @(Compare-Object -ReferenceObject $expected -DifferenceObject $actual)
-    if ($difference.Count -ne 0) {
-        $preview = ($difference | Select-Object -First 10 | Out-String).Trim()
-        throw "The active Conda environment does not exactly match '$resolvedLockPath'.`n$preview"
-    }
-}
-
 function Assert-BundledVersion {
     param([string]$RepoRoot)
 
@@ -379,10 +297,19 @@ if (-not $buildPython) {
     throw "Could not locate a usable python.exe for the build."
 }
 if ($CondaLockPath) {
-    Assert-CondaEnvironmentMatchesLock `
-        -RepoRoot $repoRoot `
-        -BuildPython $buildPython `
-        -LockPath $CondaLockPath
+    if (-not $env:CONDA_PREFIX) {
+        throw "-CondaLockPath requires an activated Conda environment."
+    }
+    $resolvedLockPath = if ([System.IO.Path]::IsPathRooted($CondaLockPath)) {
+        $CondaLockPath
+    } else {
+        Join-Path $repoRoot $CondaLockPath
+    }
+    $verifyEnvironmentScript = Join-Path $PSScriptRoot "verify_conda_environment.ps1"
+    & $verifyEnvironmentScript `
+        -LockPath $resolvedLockPath `
+        -Prefix $env:CONDA_PREFIX `
+        -PythonPath $buildPython
 }
 
 Push-Location $repoRoot

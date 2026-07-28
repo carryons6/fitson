@@ -15,6 +15,7 @@ if str(REPO_PARENT) not in sys.path:
     sys.path.insert(0, str(REPO_PARENT))
 
 from astroview.app.status_bar import AppStatusBar
+from astroview.core.contracts import ZoomState
 
 
 class TestAppStatusBar(unittest.TestCase):
@@ -57,6 +58,18 @@ class TestAppStatusBar(unittest.TestCase):
             self.assertEqual(bar.latest_error(), ("", ""))
             self.assertFalse(bar.error_label.isVisible())
             self.assertFalse(bar.error_button.isVisible())
+        finally:
+            bar.close()
+            bar.deleteLater()
+
+    def test_zoom_state_shows_fit_and_actual_pixel_modes(self) -> None:
+        bar = AppStatusBar()
+        try:
+            bar.set_zoom_state(ZoomState(scale_factor=0.35, mode="fit"))
+            self.assertEqual(bar.zoom_label.text(), "Fit: 35%")
+
+            bar.set_zoom_state(ZoomState(scale_factor=1.0, mode="actual"))
+            self.assertEqual(bar.zoom_label.text(), "Zoom: 100% (1:1)")
         finally:
             bar.close()
             bar.deleteLater()

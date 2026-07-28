@@ -6,6 +6,7 @@
 
 ### 图像显示
 - 打开单个或多个 FITS 文件，支持多 HDU 选择
+- 可双击空画布、拖入文件或按 `Ctrl+O` 打开数据
 - 拉伸模式：Linear、Log、Asinh、Sqrt
 - 区间模式：ZScale、MinMax、99.5%、99%、98%、95%
 - 鼠标滚轮缩放，左键拖拽平移
@@ -13,17 +14,17 @@
 
 ### 源提取 (SEP)
 - 内置 SEP (Source Extractor Python)
-- 支持全图或 ROI（右键拖选区域）源提取
+- 支持全图源提取；选择 `ROI：提取源` 后可右键拖选区域提取
 - 可配置提取参数（阈值、最小面积、反混叠等）
 - 源椭圆叠加显示，点击高亮
 - 源列表表格，支持排序
 - 导出源表为 CSV
 
 ### 测量工作台
-- 每次右键拖选 ROI 后显示有限值/无效值像素数、最小值、最大值、均值、中位数、标准差和总和
+- `ROI：测量` 是默认右拖任务，显示有限值/无效值像素数、最小值、最大值、均值、中位数、标准差和总和
 - 带可配置背景环的圆形孔径测光
 - 显示扣除背景后的净流量、稳健背景 RMS、不确定度、信噪比、质心、FWHM 和峰值
-- 单击图像可设置孔径中心，ROI 与孔径范围会保留为画布叠加层
+- 在测量模式下单击图像可设置孔径中心；平移不再改动中心，ROI 与孔径范围会保留为画布叠加层
 - 自动排除 NaN/Inf，并使用可配置像素预算限制采样区域
 
 ### WCS 与 Gaia DR3
@@ -107,10 +108,16 @@ conda install pyside6 astropy numpy sep
 URL、build 和 SHA-256。构建脚本会拒绝与锁文件不完全一致的活动环境：
 
 ```powershell
-conda create -n astroview-release --file environment-win-64.conda.lock
+.\scripts\prepare_release_env.ps1
 conda activate astroview-release
 .\scripts\build_windows.ps1 -CondaLockPath environment-win-64.conda.lock
 ```
+
+准备脚本默认使用独立的 `astroview-release` 环境；环境已经与锁一致时不会修改它。
+如果同名环境存在但不一致，脚本会保持原状并报错。只有确定要删除并重建这个发布专用
+环境时，才显式运行 `.\scripts\prepare_release_env.ps1 -Recreate`。准备与构建阶段都会
+校验完整 URL、build、SHA-256 包集合，拒绝未锁定的 pip 包，检查 Conda 文件没有被
+修改或删除，并运行 `pip check`。
 
 ## 使用方式
 
@@ -137,7 +144,7 @@ gzip/ZIP/bzip2/xz/LZW 压缩会在解压前被拒绝；请先在确认展开大�
 ### Windows 发布安装包
 
 请从 [GitHub Releases 页面](https://github.com/carryons6/fitson/releases) 下载
-`AstroView_Setup_1.9.0.exe` 与 `SHA256SUMS.txt`。Windows 安装包**尚未进行
+`AstroView_Setup_1.10.0.exe` 与 `SHA256SUMS.txt`。Windows 安装包**尚未进行
 Authenticode 数字签名**，因此 Windows SmartScreen 可能显示警告。运行前请使用
 Release 中的校验清单核验安装包。
 
@@ -157,7 +164,7 @@ Release 中的校验清单核验安装包。
   - `contracts.py` — 跨层共享的类型化数据类
 
 - **`app/`** — PySide6 UI 层
-  - `main_window.py` — 中心协调器，连接 UI 与服务
+  - `main_window.py` — 组合 UI、控制器、worker 与服务的应用装配根
   - `canvas.py` — 基于 QGraphicsView 的图像显示与叠加层
   - `sep_panel.py` — SEP 参数表单
   - `source_table.py` — 源表 Dock 面板
@@ -168,11 +175,14 @@ Release 中的校验清单核验安装包。
   - `ds9_region_dock.py` — DS9 Region 导入、导出与文档面板
   - `comparison_dock.py` — 帧 A/B 比较与闪烁控制面板
   - `moving_target_dock.py` — 跨帧 ROI、检测参数与轨迹结果面板
+  - `moving_target_controller.py` — 动目标状态、请求身份与 worker 生命周期
   - `moving_target_worker.py` — 可取消的 SEP 序列分析子进程适配器
   - `header_dialog.py` — FITS Header 查看对话框
   - `status_bar.py` — 光标/缩放/帧状态显示
 
-`MainWindow` 是唯一的协调器 — 视图模块通过信号和 setter 通信，不直接调用服务；服务模块返回领域对象，不操作界面组件。
+`MainWindow` 保留跨功能装配与策略协调职责，功能内部状态和 worker 生命周期则交给
+专用控制器。视图模块通过信号和 setter 通信，不直接调用服务；服务模块返回领域对象，
+不操作界面组件。
 
 
 ## 开发说明

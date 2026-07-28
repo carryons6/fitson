@@ -90,6 +90,7 @@ from .i18n import (
 )
 from .marker_dock import MarkerDock
 from .measurement_dock import MeasurementDock
+from .moving_target_controller import MovingTargetController
 from .moving_target_dock import MovingTargetDock
 from .moving_target_worker import MovingTargetWorker
 from .sep_extract_worker import SEPExtractWorker
@@ -315,67 +316,6 @@ class _ComparisonSignalRelay(QObject):
         )
 
 
-class _MovingTargetSignalRelay(QObject):
-    """Deliver moving-target subprocess results on the owning GUI thread."""
-
-    def __init__(
-        self,
-        window: Any,
-        request_id: int,
-        context_generation: int,
-        dataset_signature: tuple[int, ...],
-        thread: QThread,
-        worker: MovingTargetWorker,
-    ) -> None:
-        super().__init__(window)
-        self._window = window
-        self._request_id = request_id
-        self._context_generation = context_generation
-        self._dataset_signature = dataset_signature
-        self._thread = thread
-        self._worker = worker
-
-    @Slot(int, object)
-    def handle_result(self, request_id: int, result: MovingTargetResult) -> None:
-        self._window._handle_moving_target_result_for_request(
-            request_id,
-            self._context_generation,
-            self._dataset_signature,
-            self._worker,
-            result,
-        )
-
-    @Slot(int, int, int, str)
-    def handle_progress(self, request_id: int, completed: int, total: int, detail: str) -> None:
-        self._window._handle_moving_target_progress_for_request(
-            request_id,
-            self._context_generation,
-            self._dataset_signature,
-            self._worker,
-            completed,
-            total,
-            detail,
-        )
-
-    @Slot(int, str)
-    def handle_error(self, request_id: int, detail: str) -> None:
-        self._window._handle_moving_target_error_for_request(
-            request_id,
-            self._context_generation,
-            self._dataset_signature,
-            self._worker,
-            detail,
-        )
-
-    @Slot()
-    def handle_thread_finished(self) -> None:
-        self._window._clear_moving_target_worker_refs(
-            self._request_id,
-            self._thread,
-            self._worker,
-        )
-
-
 class _SEPThreadFinishRelay(QObject):
     """Run SEP thread-finalization bookkeeping on the GUI thread."""
 
@@ -447,12 +387,13 @@ class _FrameBkgThreadFinishRelay(QObject):
 
 
 class MainWindow(QMainWindow):
-    """Top-level application window skeleton.
+    """Top-level application window and composition root.
 
     Orchestration contract:
-    - Sole coordinator between UI widgets and core services.
+    - Composes UI widgets, feature controllers, workers, and core services.
+    - Delegates feature-local state and worker lifecycles to focused controllers.
     - Pulls domain state from services, then pushes presentation state into views.
-    - Keeps all module-to-module calls centralized here.
+    - Keeps cross-feature policy and presentation wiring centralized here.
     """
 
     PREVIEW_PROFILE_CONFIGS: dict[str, dict[str, int | tuple[int, ...]]] = {
@@ -471,6 +412,88 @@ class MainWindow(QMainWindow):
     SEP_LARGE_COUNT_WARNING = 5000
     SEP_DENSE_FIELD_PER_MPX = 150
     SEP_ESTIMATE_MIN_PIXELS = 1_000_000
+
+    # Transitional aliases keep existing integrations and private test seams
+    # stable while feature state moves behind MovingTargetController.
+    @property
+    def _moving_target_roi(self) -> ROISelection | None:
+        return self._moving_target_controller.roi
+
+    @_moving_target_roi.setter
+    def _moving_target_roi(self, value: ROISelection | None) -> None:
+        self._moving_target_controller.roi = value
+
+    @property
+    def _moving_roi_capture_pending(self) -> bool:
+        return self._moving_target_controller.capture_pending
+
+    @_moving_roi_capture_pending.setter
+    def _moving_roi_capture_pending(self, value: bool) -> None:
+        self._moving_target_controller.capture_pending = value
+
+    @property
+    def _moving_target_result(self) -> MovingTargetResult | None:
+        return self._moving_target_controller.result
+
+    @_moving_target_result.setter
+    def _moving_target_result(self, value: MovingTargetResult | None) -> None:
+        self._moving_target_controller.result = value
+
+    @property
+    def _moving_target_thread(self) -> QThread | None:
+        return self._moving_target_controller.thread
+
+    @_moving_target_thread.setter
+    def _moving_target_thread(self, value: QThread | None) -> None:
+        self._moving_target_controller.thread = value
+
+    @property
+    def _moving_target_worker(self) -> MovingTargetWorker | None:
+        return self._moving_target_controller.worker
+
+    @_moving_target_worker.setter
+    def _moving_target_worker(self, value: MovingTargetWorker | None) -> None:
+        self._moving_target_controller.worker = value
+
+    @property
+    def _moving_target_request_id(self) -> int:
+        return self._moving_target_controller.request_id
+
+    @_moving_target_request_id.setter
+    def _moving_target_request_id(self, value: int) -> None:
+        self._moving_target_controller.request_id = value
+
+    @property
+    def _active_moving_target_request_id(self) -> int | None:
+        return self._moving_target_controller.active_request_id
+
+    @_active_moving_target_request_id.setter
+    def _active_moving_target_request_id(self, value: int | None) -> None:
+        self._moving_target_controller.active_request_id = value
+
+    @property
+    def _moving_target_context_generation(self) -> int:
+        return self._moving_target_controller.context_generation
+
+    @_moving_target_context_generation.setter
+    def _moving_target_context_generation(self, value: int) -> None:
+        self._moving_target_controller.context_generation = value
+
+    @property
+    def _moving_target_results_enabled(self) -> bool:
+        return self._moving_target_controller.results_enabled
+
+    @_moving_target_results_enabled.setter
+    def _moving_target_results_enabled(self, value: bool) -> None:
+        self._moving_target_controller.results_enabled = value
+
+    @property
+    def _moving_target_cancel_feedback_pending(self) -> bool:
+        return self._moving_target_controller.cancel_feedback_pending
+
+    @_moving_target_cancel_feedback_pending.setter
+    def _moving_target_cancel_feedback_pending(self, value: bool) -> None:
+        self._moving_target_controller.cancel_feedback_pending = value
 
     def __init__(
         self,
@@ -505,12 +528,15 @@ class MainWindow(QMainWindow):
         self.menu_help: Any = None
         self.menu_recent_files: Any = None
         self.menu_language: Any = None
+        self.menu_panels: Any = None
+        self.menu_roi_action: Any = None
 
         self.main_toolbar: Any = None
         self.stretch_selector: Any = None
         self.interval_selector: Any = None
         self.preview_profile_selector: Any = None
         self.magnifier_spinbox: Any = None
+        self.roi_action_button: QToolButton | None = None
         self.language_action_group: QActionGroup | None = None
         self.language_actions: dict[str, QAction] = {}
 
@@ -528,6 +554,13 @@ class MainWindow(QMainWindow):
         self.action_zoom_out: QAction | None = None
         self.action_smooth_rendering: QAction | None = None
         self.action_run_sep: QAction | None = None
+        self.action_roi_measure: QAction | None = None
+        self.action_roi_extract: QAction | None = None
+        self.roi_action_group: QActionGroup | None = None
+        self.action_show_measurement: QAction | None = None
+        self.action_show_catalog_tools: QAction | None = None
+        self.action_show_comparison: QAction | None = None
+        self.action_show_regions: QAction | None = None
         self.action_show_markers: QAction | None = None
         self.action_append_frames: QAction | None = None
         self.action_target_info_fields: QAction | None = None
@@ -546,6 +579,8 @@ class MainWindow(QMainWindow):
         self.measurement_service = MeasurementService()
         self.current_catalog: SourceCatalog | None = None
         self._settings = QSettings("AstroView", "AstroView")
+        saved_roi_action = self._settings.value("interaction/roi_action", "measure", type=str)
+        self._roi_action = saved_roi_action if saved_roi_action in {"measure", "extract"} else "measure"
         self._preview_profile_name = self.DEFAULT_PREVIEW_PROFILE
         self._last_auto_interval_name = self.fits_service.current_interval
         self._histogram_axis_limits: tuple[float, float] | None = None
@@ -648,16 +683,28 @@ class MainWindow(QMainWindow):
         self._comparison_request_id: int = 0
         self._active_comparison_request_id: int | None = None
         self._comparison_results_enabled: bool = False
-        self._moving_target_roi: ROISelection | None = None
-        self._moving_roi_capture_pending: bool = False
-        self._moving_target_result: MovingTargetResult | None = None
-        self._moving_target_thread: QThread | None = None
-        self._moving_target_worker: MovingTargetWorker | None = None
-        self._moving_target_request_id: int = 0
-        self._active_moving_target_request_id: int | None = None
-        self._moving_target_context_generation: int = 0
-        self._moving_target_results_enabled: bool = False
-        self._moving_target_cancel_feedback_pending: bool = False
+        self._moving_target_controller = MovingTargetController(
+            self,
+            join_wait_ms=self.THREAD_JOIN_WAIT_MS,
+        )
+        self._moving_target_controller.detection_started.connect(
+            self._handle_moving_target_started
+        )
+        self._moving_target_controller.result_cleared.connect(
+            self._handle_moving_target_result_cleared
+        )
+        self._moving_target_controller.result_accepted.connect(
+            self._handle_moving_target_result_accepted
+        )
+        self._moving_target_controller.progress_accepted.connect(
+            self._handle_moving_target_progress_accepted
+        )
+        self._moving_target_controller.error_accepted.connect(
+            self._handle_moving_target_error_accepted
+        )
+        self._moving_target_controller.detection_finished.connect(
+            self._handle_moving_target_finished
+        )
         self._gaia_query_thread: QThread | None = None
         self._gaia_query_worker: GaiaQueryWorker | None = None
         self._gaia_query_request_id: int = 0
@@ -946,7 +993,11 @@ class MainWindow(QMainWindow):
     def _apply_default_workspace_layout(self, *, persist: bool = False) -> None:
         """Apply the default dock arrangement used for a clean workspace."""
 
-        dock_visibility = {dock: dock.isVisible() for dock in self._dock_widgets()}
+        # `isVisible()` is false for every dock before the parent window is
+        # shown, even when a dock is not explicitly hidden. Preserve the
+        # explicit show/hide intent so a clean startup does not reopen the
+        # default tab stack merely because its layout was rebuilt offscreen.
+        dock_visibility = {dock: not dock.isHidden() for dock in self._dock_widgets()}
         for dock in self._dock_widgets():
             dock.setFloating(False)
             self.removeDockWidget(dock)
@@ -999,7 +1050,10 @@ class MainWindow(QMainWindow):
             self.source_table_dock.raise_()
 
         for dock, visible in dock_visibility.items():
-            dock.setVisible(visible)
+            if visible:
+                dock.show()
+            else:
+                dock.hide()
 
         if persist:
             self._persist_window_state()
@@ -1083,22 +1137,24 @@ class MainWindow(QMainWindow):
 
         if self.action_open_file is not None:
             self.menu_file.addAction(self.action_open_file)
+        if self.action_append_frames is not None:
+            self.menu_file.addAction(self.action_append_frames)
         self.menu_recent_files = self.menu_file.addMenu(self.tr("Recent Files"))
         if self.action_reopen_last_session is not None:
             self.menu_file.addAction(self.action_reopen_last_session)
+        self.menu_file.addSeparator()
+        if self.action_show_header is not None:
+            self.menu_file.addAction(self.action_show_header)
+        self.menu_file.addSeparator()
         if self.action_export_catalog is not None:
             self.menu_file.addAction(self.action_export_catalog)
         if self.action_export_image is not None:
             self.menu_file.addAction(self.action_export_image)
         if self.action_export_raw_image is not None:
             self.menu_file.addAction(self.action_export_raw_image)
-        if self.action_show_header is not None:
-            self.menu_file.addAction(self.action_show_header)
+        self.menu_file.addSeparator()
         if self.action_close_file is not None:
             self.menu_file.addAction(self.action_close_file)
-        if self.action_append_frames is not None:
-            self.menu_file.addAction(self.action_append_frames)
-        self.menu_file.addSeparator()
         if self.action_quit is not None:
             self.menu_file.addAction(self.action_quit)
         self._refresh_recent_files_menu()
@@ -1136,14 +1192,29 @@ class MainWindow(QMainWindow):
             for act in self.orientation_actions:
                 orient_menu.addAction(act)
 
+        self.menu_roi_action = self.menu_tools.addMenu(self.tr("Right-drag ROI Task"))
+        for action in (self.action_roi_measure, self.action_roi_extract):
+            if action is not None:
+                self.menu_roi_action.addAction(action)
+        self.menu_tools.addSeparator()
+        if self.action_show_measurement is not None:
+            self.menu_tools.addAction(self.action_show_measurement)
         if self.action_run_sep is not None:
             self.menu_tools.addAction(self.action_run_sep)
-        if self.action_show_markers is not None:
-            self.menu_tools.addAction(self.action_show_markers)
         if self.action_target_info_fields is not None:
             self.menu_tools.addAction(self.action_target_info_fields)
+        if self.action_show_catalog_tools is not None:
+            self.menu_tools.addAction(self.action_show_catalog_tools)
+        self.menu_tools.addSeparator()
+        if self.action_show_comparison is not None:
+            self.menu_tools.addAction(self.action_show_comparison)
         if self.action_show_moving_targets is not None:
             self.menu_tools.addAction(self.action_show_moving_targets)
+        self.menu_tools.addSeparator()
+        if self.action_show_markers is not None:
+            self.menu_tools.addAction(self.action_show_markers)
+        if self.action_show_regions is not None:
+            self.menu_tools.addAction(self.action_show_regions)
         if self.action_check_updates is not None:
             self.menu_help.addAction(self.action_check_updates)
 
@@ -1154,26 +1225,9 @@ class MainWindow(QMainWindow):
         if self.action_reset_workspace_layout is not None:
             self.menu_view.addAction(self.action_reset_workspace_layout)
             self.menu_view.addSeparator()
-        if self.source_table_dock is not None:
-            self.menu_view.addAction(self.source_table_dock.toggleViewAction())
-        if self.sep_panel_dock is not None:
-            self.menu_view.addAction(self.sep_panel_dock.toggleViewAction())
-        if self.marker_dock is not None:
-            self.menu_view.addAction(self.marker_dock.toggleViewAction())
-        if self.measurement_dock is not None:
-            self.menu_view.addAction(self.measurement_dock.toggleViewAction())
-        if self.comparison_dock is not None:
-            self.menu_view.addAction(self.comparison_dock.toggleViewAction())
-        if self.moving_target_dock is not None:
-            self.menu_view.addAction(self.moving_target_dock.toggleViewAction())
-        if self.ds9_region_dock is not None:
-            self.menu_view.addAction(self.ds9_region_dock.toggleViewAction())
-        if self.catalog_overlay_dock is not None:
-            self.menu_view.addAction(self.catalog_overlay_dock.toggleViewAction())
-        if self.frame_player_dock is not None:
-            self.menu_view.addAction(self.frame_player_dock.toggleViewAction())
-        if self.histogram_dock is not None:
-            self.menu_view.addAction(self.histogram_dock.toggleViewAction())
+        self.menu_panels = self.menu_view.addMenu(self.tr("Panels"))
+        for dock in self._dock_widgets():
+            self.menu_panels.addAction(dock.toggleViewAction())
 
     def _build_theme_menu(self, parent_menu: Any) -> None:
         """Add a theme submenu with Dark/Light options."""
@@ -1243,15 +1297,20 @@ class MainWindow(QMainWindow):
 
         for action in (
             self.action_open_file,
-            self.action_show_header,
+            self.action_append_frames,
             self.action_fit_to_window,
             self.action_actual_pixels,
-            self.action_zoom_in,
-            self.action_zoom_out,
         ):
             if action is not None:
                 self.main_toolbar.addAction(action)
 
+        if self.menu_roi_action is not None:
+            self.roi_action_button = QToolButton(self.main_toolbar)
+            self.roi_action_button.setObjectName("roi_action_button")
+            self.roi_action_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+            self.roi_action_button.setMenu(self.menu_roi_action)
+            self.main_toolbar.addWidget(self.roi_action_button)
+            self._sync_roi_action_presentation()
         self.main_toolbar.addSeparator()
         self.main_toolbar.addWidget(QLabel(self.tr("Stretch:"), self))
         if self.stretch_selector is not None:
@@ -1378,6 +1437,27 @@ class MainWindow(QMainWindow):
 
         self.action_run_sep = QAction(self.tr("SEP Extract"), self)
         self.action_run_sep.setShortcut("Ctrl+R")
+        self.roi_action_group = QActionGroup(self)
+        self.roi_action_group.setExclusive(True)
+        self.action_roi_measure = QAction(self.tr("Measure ROI"), self)
+        self.action_roi_measure.setCheckable(True)
+        self.action_roi_measure.setChecked(self._roi_action == "measure")
+        self.action_roi_measure.setToolTip(
+            self.tr("Right-drag measures pixel statistics for one ROI.")
+        )
+        self.action_roi_extract = QAction(self.tr("Extract Sources in ROI"), self)
+        self.action_roi_extract.setCheckable(True)
+        self.action_roi_extract.setChecked(self._roi_action == "extract")
+        self.action_roi_extract.setToolTip(
+            self.tr("Right-drag runs SEP source extraction for one ROI.")
+        )
+        self.roi_action_group.addAction(self.action_roi_measure)
+        self.roi_action_group.addAction(self.action_roi_extract)
+
+        self.action_show_measurement = QAction(self.tr("Measurement & Photometry"), self)
+        self.action_show_catalog_tools = QAction(self.tr("WCS & Gaia"), self)
+        self.action_show_comparison = QAction(self.tr("Compare Frames"), self)
+        self.action_show_regions = QAction(self.tr("DS9 Regions"), self)
         self.action_show_markers = QAction(self.tr("Markers"), self)
         self.action_show_markers.setShortcut("Ctrl+M")
         self.action_target_info_fields = QAction(self.tr("Target Info Fields..."), self)
@@ -1408,6 +1488,7 @@ class MainWindow(QMainWindow):
             return
         self.canvas.mouse_moved.connect(self.update_status_from_cursor)
         self.canvas.pixel_clicked.connect(self._handle_canvas_pixel_clicked)
+        self.canvas.open_requested.connect(self.open_file)
         self.canvas.roi_selected.connect(self.handle_roi_selected)
         self.canvas.source_double_clicked.connect(self.handle_source_clicked)
         self.canvas.catalog_source_double_clicked.connect(self._focus_gaia_source)
@@ -1530,6 +1611,28 @@ class MainWindow(QMainWindow):
             self.action_next_frame.triggered.connect(self._go_next_frame)
         if self.action_run_sep is not None:
             self.action_run_sep.triggered.connect(self.run_sep_extract)
+        if self.action_roi_measure is not None:
+            self.action_roi_measure.triggered.connect(
+                lambda checked=False: checked and self._set_roi_action("measure", announce=True)
+            )
+        if self.action_roi_extract is not None:
+            self.action_roi_extract.triggered.connect(
+                lambda checked=False: checked and self._set_roi_action("extract", announce=True)
+            )
+        if self.action_show_measurement is not None:
+            self.action_show_measurement.triggered.connect(self._activate_measurement_tool)
+        if self.action_show_catalog_tools is not None:
+            self.action_show_catalog_tools.triggered.connect(
+                lambda: self._focus_dock(self.catalog_overlay_dock)
+            )
+        if self.action_show_comparison is not None:
+            self.action_show_comparison.triggered.connect(
+                lambda: self._focus_dock(self.comparison_dock)
+            )
+        if self.action_show_regions is not None:
+            self.action_show_regions.triggered.connect(
+                lambda: self._focus_dock(self.ds9_region_dock)
+            )
         if self.action_show_markers is not None:
             self.action_show_markers.triggered.connect(self._show_marker_dock)
         if self.action_target_info_fields is not None:
@@ -2483,7 +2586,8 @@ class MainWindow(QMainWindow):
         """Use a left-click as the next aperture center in original pixels."""
 
         if (
-            self.measurement_dock is None
+            self._roi_action != "measure"
+            or self.measurement_dock is None
             or self._comparison_active
             or self._is_composite_frame_layout_active()
         ):
@@ -2925,7 +3029,7 @@ class MainWindow(QMainWindow):
 
     def _handle_moving_target_dock_visibility_changed(self, visible: bool) -> None:
         if not visible:
-            self._moving_roi_capture_pending = False
+            self._moving_target_controller.cancel_roi_capture()
 
     def _begin_moving_target_roi_capture(self) -> None:
         if not self._frames or self.fits_service.current_data is None:
@@ -2939,7 +3043,7 @@ class MainWindow(QMainWindow):
                 )
             return
         self._pause_playback_for_manual_frame_navigation()
-        self._moving_roi_capture_pending = True
+        self._moving_target_controller.begin_roi_capture()
         if self.moving_target_dock is not None:
             self.moving_target_dock.set_status(
                 self.tr("Right-drag once on the image to select the cross-frame analysis ROI.")
@@ -2948,10 +3052,7 @@ class MainWindow(QMainWindow):
             self.app_status_bar.showMessage(self.tr("Right-drag the moving-target analysis ROI."), 5000)
 
     def _use_full_frame_for_moving_targets(self) -> None:
-        self._moving_roi_capture_pending = False
-        self._moving_target_context_generation += 1
-        self._moving_target_roi = None
-        self._clear_moving_target_results()
+        self._moving_target_controller.use_full_frame()
         self._sync_moving_target_context()
         if self.moving_target_dock is not None:
             self.moving_target_dock.set_status(
@@ -3007,45 +3108,16 @@ class MainWindow(QMainWindow):
                 self.moving_target_dock.set_status(detail)
             return
 
-        self._moving_roi_capture_pending = False
         self._pause_playback_for_manual_frame_navigation()
-        self._clear_moving_target_results()
-        self._moving_target_request_id += 1
-        request_id = self._moving_target_request_id
-        context_generation = self._moving_target_context_generation
-        dataset_signature = self._moving_target_dataset_signature()
-        thread = QThread(self)
-        worker = MovingTargetWorker(
-            request_id=request_id,
-            frames=list(self._frames),
+        self._moving_target_controller.start(
+            frames=self._frames,
             roi=roi,
             parameters=parameters,
             fallback_cadence_seconds=fallback_cadence_seconds,
             prefer_header_times=prefer_header_times,
         )
-        relay = _MovingTargetSignalRelay(
-            self,
-            request_id,
-            context_generation,
-            dataset_signature,
-            thread,
-            worker,
-        )
-        self._active_moving_target_request_id = request_id
-        self._moving_target_results_enabled = True
-        self._moving_target_cancel_feedback_pending = False
-        self._moving_target_thread = thread
-        self._moving_target_worker = worker
-        worker.moveToThread(thread)
-        thread.started.connect(worker.run)
-        worker.result_ready.connect(relay.handle_result)
-        worker.progress.connect(relay.handle_progress)
-        worker.detection_error.connect(relay.handle_error)
-        worker.finished.connect(thread.quit)
-        worker.finished.connect(worker.deleteLater)
-        thread.finished.connect(relay.handle_thread_finished)
-        thread.finished.connect(relay.deleteLater)
-        thread.finished.connect(thread.deleteLater)
+
+    def _handle_moving_target_started(self) -> None:
         if self.moving_target_dock is not None:
             self.moving_target_dock.set_busy(True)
             self.moving_target_dock.set_status(self.tr("Preparing moving-target analysis..."))
@@ -3056,7 +3128,6 @@ class MainWindow(QMainWindow):
             progress_max=0,
             cancellable=True,
         )
-        thread.start()
 
     def _moving_target_request_is_current(
         self,
@@ -3065,13 +3136,14 @@ class MainWindow(QMainWindow):
         dataset_signature: tuple[int, ...],
         worker: MovingTargetWorker,
     ) -> bool:
-        return bool(
-            not self._is_closing
-            and self._moving_target_results_enabled
-            and request_id == self._active_moving_target_request_id
-            and context_generation == self._moving_target_context_generation
-            and dataset_signature == self._moving_target_dataset_signature()
-            and worker is self._moving_target_worker
+        if self._is_closing:
+            return False
+        self._moving_target_controller.sync_sequence(self._frames)
+        return self._moving_target_controller.request_is_current(
+            request_id,
+            context_generation,
+            dataset_signature,
+            worker,
         )
 
     def _handle_moving_target_result_for_request(
@@ -3082,11 +3154,18 @@ class MainWindow(QMainWindow):
         worker: MovingTargetWorker,
         result: MovingTargetResult,
     ) -> None:
-        if not self._moving_target_request_is_current(
-            request_id, context_generation, dataset_signature, worker
-        ):
+        if self._is_closing:
             return
-        self._moving_target_result = result
+        self._moving_target_controller.sync_sequence(self._frames)
+        self._moving_target_controller.handle_result_for_request(
+            request_id,
+            context_generation,
+            dataset_signature,
+            worker,
+            result,
+        )
+
+    def _handle_moving_target_result_accepted(self, result: MovingTargetResult) -> None:
         if self.moving_target_dock is not None:
             self.moving_target_dock.set_result(result, self._current_frame_index)
             self.moving_target_dock.show()
@@ -3109,10 +3188,25 @@ class MainWindow(QMainWindow):
         total: int,
         detail: str,
     ) -> None:
-        if not self._moving_target_request_is_current(
-            request_id, context_generation, dataset_signature, worker
-        ):
+        if self._is_closing:
             return
+        self._moving_target_controller.sync_sequence(self._frames)
+        self._moving_target_controller.handle_progress_for_request(
+            request_id,
+            context_generation,
+            dataset_signature,
+            worker,
+            completed,
+            total,
+            detail,
+        )
+
+    def _handle_moving_target_progress_accepted(
+        self,
+        completed: int,
+        total: int,
+        detail: str,
+    ) -> None:
         localized_detail = localize_moving_target_text(detail, self.tr)
         if self.moving_target_dock is not None:
             self.moving_target_dock.set_status(localized_detail)
@@ -3132,10 +3226,18 @@ class MainWindow(QMainWindow):
         worker: MovingTargetWorker,
         detail: str,
     ) -> None:
-        if not self._moving_target_request_is_current(
-            request_id, context_generation, dataset_signature, worker
-        ):
+        if self._is_closing:
             return
+        self._moving_target_controller.sync_sequence(self._frames)
+        self._moving_target_controller.handle_error_for_request(
+            request_id,
+            context_generation,
+            dataset_signature,
+            worker,
+            detail,
+        )
+
+    def _handle_moving_target_error_accepted(self, detail: str) -> None:
         localized_detail = localize_moving_target_text(detail, self.tr)
         if self.moving_target_dock is not None:
             self.moving_target_dock.set_status(localized_detail)
@@ -3147,16 +3249,9 @@ class MainWindow(QMainWindow):
         thread: QThread,
         worker: MovingTargetWorker,
     ) -> None:
-        if request_id != self._active_moving_target_request_id:
-            return
-        if thread is not self._moving_target_thread or worker is not self._moving_target_worker:
-            return
-        cancelled = self._moving_target_cancel_feedback_pending
-        self._active_moving_target_request_id = None
-        self._moving_target_results_enabled = False
-        self._moving_target_thread = None
-        self._moving_target_worker = None
-        self._moving_target_cancel_feedback_pending = False
+        self._moving_target_controller.clear_worker_refs(request_id, thread, worker)
+
+    def _handle_moving_target_finished(self, cancelled: bool) -> None:
         if self.moving_target_dock is not None:
             self.moving_target_dock.set_busy(False)
             if cancelled:
@@ -3166,34 +3261,10 @@ class MainWindow(QMainWindow):
             self.app_status_bar.showMessage(self.tr("Moving-target detection cancelled."), 3000)
 
     def _stop_moving_target_worker(self, *, wait: bool = False) -> bool:
-        thread = self._moving_target_thread
-        worker = self._moving_target_worker
-        request_id = self._active_moving_target_request_id
-        self._moving_target_results_enabled = False
-        if thread is None or worker is None or request_id is None:
-            return True
-        worker.cancel()
-        try:
-            running = thread.isRunning()
-        except RuntimeError:
-            running = False
-        if running:
-            thread.requestInterruption()
-            thread.quit()
-        if wait and running:
-            thread.wait(self.THREAD_JOIN_WAIT_MS)
-        try:
-            running = thread.isRunning()
-        except RuntimeError:
-            running = False
-        if not running:
-            self._clear_moving_target_worker_refs(request_id, thread, worker)
-            return True
-        return False
+        return self._moving_target_controller.stop(wait=wait)
 
     def _cancel_moving_target_detection(self) -> None:
-        self._moving_target_cancel_feedback_pending = True
-        stopped = self._stop_moving_target_worker(wait=False)
+        stopped = self._moving_target_controller.cancel(wait=False)
         if stopped:
             self._clear_status_activity(kind="moving")
             if self.moving_target_dock is not None:
@@ -3209,17 +3280,13 @@ class MainWindow(QMainWindow):
         )
 
     def _invalidate_moving_target_sequence(self, *, clear_roi: bool) -> None:
-        self._moving_target_context_generation += 1
-        self._moving_roi_capture_pending = False
-        self._moving_target_cancel_feedback_pending = False
-        self._stop_moving_target_worker(wait=False)
-        if clear_roi:
-            self._moving_target_roi = None
-        self._clear_moving_target_results()
+        self._moving_target_controller.invalidate_sequence(clear_roi=clear_roi)
         self._sync_moving_target_context()
 
     def _clear_moving_target_results(self) -> None:
-        self._moving_target_result = None
+        self._moving_target_controller.clear_result()
+
+    def _handle_moving_target_result_cleared(self) -> None:
         if self.canvas is not None:
             self.canvas.clear_moving_target_overlays()
         if self.moving_target_dock is not None:
@@ -5646,8 +5713,7 @@ class MainWindow(QMainWindow):
             status="empty",
             title=self.tr("No Image Loaded"),
             detail=self.tr(
-                "Drop FITS files here or press Ctrl+O.\n"
-                "Wheel to zoom, drag to pan, and right-drag a ROI to run SEP."
+                "Double-click, drop FITS files here, or press Ctrl+O to open."
             ),
             visible=True,
         )
@@ -5730,6 +5796,60 @@ class MainWindow(QMainWindow):
 
         h, w = data.data.shape[:2]
         self._start_sep_extract(ROISelection(x0=0, y0=0, width=w, height=h))
+
+    def _set_roi_action(self, mode: str, *, announce: bool = False) -> None:
+        """Choose the one task performed by the next ordinary right-drag ROI."""
+
+        if mode not in {"measure", "extract"}:
+            raise ValueError(f"Unsupported ROI action: {mode}")
+
+        self._roi_action = mode
+        self._settings.setValue("interaction/roi_action", mode)
+        if self.action_roi_measure is not None:
+            self.action_roi_measure.setChecked(mode == "measure")
+        if self.action_roi_extract is not None:
+            self.action_roi_extract.setChecked(mode == "extract")
+        self._sync_roi_action_presentation()
+
+        if not announce:
+            return
+        if mode == "measure":
+            self._focus_dock(self.measurement_dock)
+            message = self.tr("ROI task: Measure. Right-drag an area on the image.")
+        else:
+            self._focus_dock(self.sep_panel_dock)
+            message = self.tr("ROI task: Extract Sources. Right-drag an area on the image.")
+        if self.app_status_bar is not None:
+            self.app_status_bar.showMessage(message, 4000)
+
+    def _sync_roi_action_presentation(self) -> None:
+        """Keep the toolbar task selector aligned with the selected ROI action."""
+
+        if self.roi_action_button is None:
+            return
+        if self._roi_action == "extract":
+            label = self.tr("ROI: Extract Sources")
+            tooltip = self.tr("Right-drag runs SEP source extraction for one ROI.")
+        else:
+            label = self.tr("ROI: Measure")
+            tooltip = self.tr("Right-drag measures pixel statistics for one ROI.")
+        self.roi_action_button.setText(label)
+        self.roi_action_button.setToolTip(tooltip)
+
+    @staticmethod
+    def _focus_dock(dock: QDockWidget | None) -> None:
+        """Open one task panel without toggling it closed when already visible."""
+
+        if dock is None:
+            return
+        dock.show()
+        dock.raise_()
+
+    def _activate_measurement_tool(self) -> None:
+        """Open the measurement workbench and make ROI drags measure only."""
+
+        self._set_roi_action("measure")
+        self._focus_dock(self.measurement_dock)
 
     def _show_marker_dock(self) -> None:
         """Show the marker dock panel."""
@@ -6642,10 +6762,10 @@ class MainWindow(QMainWindow):
         self.header_dialog.raise_()
 
     def handle_roi_selected(self, x0: int, y0: int, width: int, height: int) -> None:
-        """Handle ROI selection from the canvas and trigger SEP extraction.
+        """Route one canvas ROI to the explicitly selected analysis task.
 
-        ROI arrives in displayed-image coords; remap to original frame so SEP
-        always operates on the unrotated data.
+        ROI arrives in displayed-image coordinates and is remapped to the
+        original frame before measurement, SEP, or one-shot moving-target use.
         """
 
         if self._comparison_active:
@@ -6660,7 +6780,7 @@ class MainWindow(QMainWindow):
             if self.app_status_bar is not None:
                 self.app_status_bar.showMessage(
                     self.tr(
-                        "Composite layout does not support direct ROI selection. Switch back to Single Frame View before running SEP."
+                        "Composite layout does not support direct ROI selection. Switch back to Single Frame View first."
                     ),
                     3000,
                 )
@@ -6674,7 +6794,7 @@ class MainWindow(QMainWindow):
             if moving_running:
                 if self.app_status_bar is not None:
                     self.app_status_bar.showMessage(
-                        self.tr("Wait for moving-target detection to finish before running SEP."),
+                        self.tr("Wait for moving-target detection to finish before selecting a ROI."),
                         3000,
                     )
                 return
@@ -6683,13 +6803,9 @@ class MainWindow(QMainWindow):
         if selection is None:
             if self.app_status_bar is not None:
                 self.app_status_bar.showMessage(self.tr("Selected ROI is empty."), 3000)
-            self._moving_roi_capture_pending = False
+            self._moving_target_controller.cancel_roi_capture()
             return
-        if self._moving_roi_capture_pending:
-            self._moving_roi_capture_pending = False
-            self._moving_target_context_generation += 1
-            self._moving_target_roi = selection
-            self._clear_moving_target_results()
+        if self._moving_target_controller.consume_captured_roi(selection):
             if self.canvas is not None:
                 self.canvas.set_moving_target_roi(
                     selection,
@@ -6703,8 +6819,10 @@ class MainWindow(QMainWindow):
                 self.moving_target_dock.show()
                 self.moving_target_dock.raise_()
             return
-        self._measure_roi(selection)
-        self._start_sep_extract(selection)
+        if self._roi_action == "extract":
+            self._start_sep_extract(selection)
+        else:
+            self._measure_roi(selection)
 
     def _display_roi_to_original(
         self,
@@ -6726,7 +6844,7 @@ class MainWindow(QMainWindow):
             if moving_running:
                 if self.app_status_bar is not None:
                     self.app_status_bar.showMessage(
-                        self.tr("Wait for moving-target detection to finish before running SEP."),
+                        self.tr("Wait for moving-target detection to finish before selecting a ROI."),
                         3000,
                     )
                 return None
@@ -6835,7 +6953,10 @@ class MainWindow(QMainWindow):
         """Receive zoom updates from the canvas and refresh the status bar."""
 
         if self.app_status_bar is not None:
-            self.app_status_bar.set_zoom_info(zoom_factor)
+            if self.canvas is not None:
+                self.app_status_bar.set_zoom_state(self.canvas.zoom_state)
+            else:
+                self.app_status_bar.set_zoom_info(zoom_factor)
 
     def collect_ui_state(self) -> dict[str, Any]:
         """Return a snapshot of coarse window state for debugging and tests.

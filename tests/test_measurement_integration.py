@@ -23,6 +23,7 @@ class TestMeasurementIntegration(unittest.TestCase):
     def _window_with_image(self, data: np.ndarray) -> MainWindow:
         window = MainWindow()
         window.initialize(apply_startup_request=False)
+        window._roi_action = "measure"
         frame = FITSData(path="measurement.fits", data=data)
         window._frames = [frame]
         window._frame_images = [QImage(data.shape[1], data.shape[0], QImage.Format.Format_Grayscale8)]
@@ -68,6 +69,11 @@ class TestMeasurementIntegration(unittest.TestCase):
             window._handle_canvas_pixel_clicked(4.0, 3.0)
             self.assertEqual(window.measurement_dock.center_x_spin.value(), 15.0)
             self.assertEqual(window.measurement_dock.center_y_spin.value(), 3.0)
+
+            window._roi_action = "extract"
+            window._handle_canvas_pixel_clicked(8.0, 7.0)
+            self.assertEqual(window.measurement_dock.center_x_spin.value(), 15.0)
+            self.assertEqual(window.measurement_dock.center_y_spin.value(), 3.0)
         finally:
             window.close()
             window.deleteLater()
@@ -108,6 +114,7 @@ class TestMeasurementIntegration(unittest.TestCase):
                     display_y0, display_y1 = sorted((int(first[1]), int(second[1])))
                     with patch.object(window, "_measure_roi") as measure:
                         with patch.object(window, "_start_sep_extract") as extract:
+                            window._roi_action = "measure"
                             window.handle_roi_selected(
                                 display_x0,
                                 display_y0,
@@ -115,6 +122,18 @@ class TestMeasurementIntegration(unittest.TestCase):
                                 display_y1 - display_y0,
                             )
                     measure.assert_called_once_with(original)
+                    extract.assert_not_called()
+
+                    with patch.object(window, "_measure_roi") as measure:
+                        with patch.object(window, "_start_sep_extract") as extract:
+                            window._roi_action = "extract"
+                            window.handle_roi_selected(
+                                display_x0,
+                                display_y0,
+                                display_x1 - display_x0,
+                                display_y1 - display_y0,
+                            )
+                    measure.assert_not_called()
                     extract.assert_called_once_with(original)
 
                     window._last_measurement_roi = original

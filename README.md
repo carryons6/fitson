@@ -6,6 +6,7 @@ A desktop FITS astronomical image viewer built with PySide6.
 
 ### Image Display
 - Open single or multiple FITS files with multi-HDU support
+- Double-click the empty canvas, drag files onto it, or press `Ctrl+O` to open data
 - Stretch modes: Linear, Log, Asinh, Sqrt
 - Interval modes: ZScale, MinMax, 99.5%, 99%, 98%, 95%
 - Mouse wheel zoom and left-click drag for panning
@@ -15,7 +16,7 @@ A desktop FITS astronomical image viewer built with PySide6.
 
 ### Source Extraction (SEP)
 - Built-in SEP (Source Extractor Python) integration
-- Full-image or ROI (right-click drag) source extraction
+- Full-image source extraction, or choose `ROI: Extract Sources` before right-dragging a region
 - Configurable extraction parameters (threshold, min area, deblend, etc.)
 - Source overlay ellipses on the canvas with click-to-highlight and hover-to-preview
 - Source catalog table with sortable columns; single-source extractions auto-select the result
@@ -24,10 +25,10 @@ A desktop FITS astronomical image viewer built with PySide6.
 - Export catalog to CSV
 
 ### Measurement Workbench
-- Every right-drag ROI selection reports finite/invalid pixel counts, minimum, maximum, mean, median, standard deviation, and sum
+- `ROI: Measure` is the default right-drag task and reports finite/invalid pixel counts, minimum, maximum, mean, median, standard deviation, and sum
 - Circular-aperture photometry with a configurable background annulus
 - Background-subtracted net flux, robust background RMS, uncertainty, SNR, centroid, FWHM, and peak measurements
-- Click the image to set the aperture center; ROI and aperture footprints remain visible as overlays
+- In Measure mode, click the image to set the aperture center; panning no longer changes it, and ROI/aperture footprints remain visible as overlays
 - NaN/Inf values are excluded and sampled areas are constrained by a configurable pixel budget
 
 ### WCS and Gaia DR3
@@ -145,7 +146,7 @@ rejected before decompression; safely decompress those files first.
 
 ### Windows release installer
 
-Download `AstroView_Setup_1.9.0.exe` and `SHA256SUMS.txt` from the
+Download `AstroView_Setup_1.10.0.exe` and `SHA256SUMS.txt` from the
 [GitHub Releases page](https://github.com/carryons6/fitson/releases). The
 Windows installer is **not Authenticode-signed**, so Windows SmartScreen may
 display a warning. Verify the installer against the release checksum before
@@ -170,15 +171,20 @@ python -m unittest discover -s tests -v
 
 Windows bundle and installer from the exact release environment:
 ```powershell
-conda create -n astroview-release --file environment-win-64.conda.lock
+.\scripts\prepare_release_env.ps1
 conda activate astroview-release
 .\scripts\build_windows.ps1 -CondaLockPath environment-win-64.conda.lock
 ```
 
-The lock keeps NumPy on OpenBLAS and the build script rejects an activated
-environment whose explicit URL+SHA package set differs from it. GitHub Actions
-also downloads fixed Miniforge and Inno Setup installers and verifies their
-SHA-256 hashes before using them.
+The preparation script leaves an already matching environment unchanged. If an
+environment named `astroview-release` exists but differs from the lock, it fails
+without modifying it; rerun with `-Recreate` only when you deliberately want to
+remove and rebuild that release-only environment. The lock keeps NumPy on
+OpenBLAS, and both preparation and build reject an explicit URL+SHA package set
+that differs from it. They also reject unlocked pip packages, verify Conda-owned
+files are neither altered nor missing, and run `pip check`. GitHub Actions also
+downloads fixed Miniforge and Inno Setup installers and verifies their SHA-256
+hashes before using them.
 
 ## Architecture
 
@@ -196,7 +202,7 @@ SHA-256 hashes before using them.
   - `contracts.py`: typed dataclasses shared across layers
 
 - **`app/`**: PySide6 UI layer
-  - `main_window.py`: central coordinator between UI and services
+  - `main_window.py`: composition root for UI, controllers, workers, and services
   - `canvas.py`: QGraphicsView-based image display with overlays
   - `file_load_worker.py`: background FITS file loading worker
   - `frame_render_worker.py`: background frame rendering worker
@@ -209,11 +215,15 @@ SHA-256 hashes before using them.
   - `ds9_region_dock.py`: DS9 Region import/export and document controls
   - `comparison_dock.py`: frame A/B comparison and blink controls
   - `moving_target_dock.py`: cross-frame ROI, detection controls, and trajectory table
+  - `moving_target_controller.py`: moving-target state, request identity, and worker lifecycle
   - `moving_target_worker.py`: cancellable subprocess adapter for SEP-heavy sequence analysis
   - `header_dialog.py`: FITS header viewer dialog
   - `status_bar.py`: cursor/zoom/frame status display
 
-`MainWindow` is the sole coordinator: view modules emit signals and expose setters but never call services directly. Service modules return domain objects but never touch widgets.
+`MainWindow` remains the cross-feature composition root, while focused controllers
+own feature-local state and worker lifecycles. View modules emit signals and expose
+setters but never call services directly; service modules return domain objects and
+never touch widgets.
 
 ## Recent Contributions
 
