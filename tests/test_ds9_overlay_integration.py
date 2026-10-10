@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests.frame_session_fixtures import set_session_field
+
 import os
 import unittest
 
@@ -82,12 +84,12 @@ class TestDS9MainWindowIntegration(unittest.TestCase):
             wcs=_simple_wcs(),
             has_wcs=True,
         )
-        window._frames = [frame]
-        window._frame_images = [QImage(100, 80, QImage.Format.Format_Grayscale8)]
-        window._frame_dirty = [False]
-        window._frame_bkg_cache = [None]
-        window._frame_residual_cache = [None]
-        window._frame_cached_preview_dim = [0]
+        set_session_field(window, 'data', [frame])
+        set_session_field(window, 'image', [QImage(100, 80, QImage.Format.Format_Grayscale8)])
+        set_session_field(window, 'dirty', [False])
+        set_session_field(window, 'background', [None])
+        set_session_field(window, 'residual', [None])
+        set_session_field(window, 'preview_dimension', [0])
         window.fits_service.current_data = frame
         return window
 

@@ -11,6 +11,7 @@ from PySide6.QtCore import (
     QByteArray,
     QObject,
     QMarginsF,
+    QRectF,
     QSizeF,
     Slot,
     Qt,
@@ -40,6 +41,8 @@ from .. import APP_NAME, APP_RELEASES_URL, __version__
 from ..core import FITSService, OpenFileRequest, PixelSample, ROISelection, SEPService, SourceCatalog
 from ..core.catalog_service import CatalogQuery, CatalogSource
 from ..core.fits_data import open_fits_container
+from ..core.contracts import RenderResult, ResolvedRenderSpec
+from ..core import image_geometry
 from ..core.measurement_service import MeasurementService
 from ..core.moving_targets import (
     DEFAULT_MAX_MOVING_TARGET_ROI_PIXELS,
@@ -71,10 +74,13 @@ from .catalog_query_worker import GaiaQueryWorker
 from .canvas import ImageCanvas
 from .comparison_dock import ComparisonDock
 from .comparison_worker import ComparisonDisplayResult, ComparisonWorker
+from .comparison_controller import ComparisonController
 from .ds9_overlay import build_ds9_overlays
 from .ds9_region_dock import DS9RegionDock
 from .file_load_worker import FITSLoadWorker
+from .file_load_controller import FileLoadController, FrameLoadRequest, LoadSignalRelay
 from .frame_player_dock import FramePlayerDock
+from .frame_session import FrameSession
 from .frame_bkg_worker import FrameBkgWorker
 from .frame_render_worker import FrameRenderWorker
 from .header_dialog import HeaderDialog
@@ -94,6 +100,7 @@ from .moving_target_controller import MovingTargetController
 from .moving_target_dock import MovingTargetDock
 from .moving_target_worker import MovingTargetWorker
 from .sep_extract_worker import SEPExtractWorker
+from .sep_controller import SEPController, SEPCountEstimate, PendingSEPAction as _PendingSEPAction
 from .sep_panel import SEPParamsPanel
 from .source_table import SourceTableDock
 from .status_bar import AppStatusBar
@@ -116,79 +123,13 @@ class _FrameCompositePlacement:
     original_height: int
 
 
-@dataclass(frozen=True, slots=True)
-class _PendingSEPAction:
-    """A deferred SEP action tied to one concrete frame activation."""
-
-    roi: ROISelection
-    frame_index: int
-    context_generation: int
+# Compatibility names for existing integrations; ownership is in the controller.
+_PendingFrameLoad = FrameLoadRequest
 
 
-@dataclass(frozen=True, slots=True)
-class _PendingFrameLoad:
-    """The newest load request waiting for the current loader to exit."""
-
-    paths: tuple[str, ...]
-    hdu_index: int | None
-    append: bool
-
-
-class _LoadSignalRelay(QObject):
-    """Route worker signals through a QObject that has GUI-thread affinity."""
-
-    def __init__(
-        self,
-        window: Any,
-        request_id: int,
-        thread: QThread,
-        worker: FITSLoadWorker,
-    ) -> None:
-        super().__init__(window)
-        self._window = window
-        self._request_id = request_id
-        self._thread = thread
-        self._worker = worker
-
-    @Slot(object, object)
-    def handle_loaded(self, data: Any, preview_image_u8: Any) -> None:
-        self._window._handle_loaded_frame_for_request(
-            self._request_id,
-            self._worker,
-            data,
-            preview_image_u8,
-        )
-
-    @Slot(str, str)
-    def handle_error(self, path: str, detail: str) -> None:
-        self._window._handle_frame_load_error_for_request(
-            self._request_id,
-            self._worker,
-            path,
-            detail,
-        )
-
-    @Slot(int, int, str)
-    def handle_progress(self, completed: int, total: int, path: str) -> None:
-        self._window._handle_frame_load_progress_for_request(
-            self._request_id,
-            self._worker,
-            completed,
-            total,
-            path,
-        )
-
-    @Slot()
-    def handle_finished(self) -> None:
-        self._window._finish_frame_load_for_request(self._request_id, self._worker)
-
-    @Slot()
-    def handle_thread_finished(self) -> None:
-        self._window._handle_load_thread_finished(
-            self._request_id,
-            self._thread,
-            self._worker,
-        )
+class _LoadSignalRelay(LoadSignalRelay):
+    def __init__(self, window, request_id, thread, worker) -> None:
+        super().__init__(window._load_controller, request_id, thread, worker)
 
 
 class _UpdateCheckSignalRelay(QObject):
@@ -269,78 +210,6 @@ class _CatalogQuerySignalRelay(QObject):
         )
 
 
-class _ComparisonSignalRelay(QObject):
-    """Deliver one comparison job back to the owning GUI thread."""
-
-    def __init__(
-        self,
-        window: Any,
-        request_id: int,
-        left_index: int,
-        right_index: int,
-        thread: QThread,
-        worker: ComparisonWorker,
-    ) -> None:
-        super().__init__(window)
-        self._window = window
-        self._request_id = request_id
-        self._left_index = left_index
-        self._right_index = right_index
-        self._thread = thread
-        self._worker = worker
-
-    @Slot(object)
-    def handle_result(self, display: ComparisonDisplayResult) -> None:
-        self._window._handle_comparison_result_for_request(
-            self._request_id,
-            self._left_index,
-            self._right_index,
-            self._worker,
-            display,
-        )
-
-    @Slot(str)
-    def handle_error(self, detail: str) -> None:
-        self._window._handle_comparison_error_for_request(
-            self._request_id,
-            self._worker,
-            detail,
-        )
-
-    @Slot()
-    def handle_thread_finished(self) -> None:
-        self._window._clear_comparison_worker_refs(
-            self._request_id,
-            self._thread,
-            self._worker,
-        )
-
-
-class _SEPThreadFinishRelay(QObject):
-    """Run SEP thread-finalization bookkeeping on the GUI thread."""
-
-    def __init__(
-        self,
-        window: Any,
-        request_id: int,
-        thread: QThread,
-        worker: SEPExtractWorker,
-    ) -> None:
-        super().__init__(window)
-        self._window = window
-        self._request_id = request_id
-        self._thread = thread
-        self._worker = worker
-
-    @Slot()
-    def handle_thread_finished(self) -> None:
-        self._window._clear_sep_worker_refs(
-            self._request_id,
-            self._thread,
-            self._worker,
-        )
-
-
 class _FrameRenderThreadFinishRelay(QObject):
     """Finalize a frame-render request on the window's GUI thread."""
 
@@ -415,6 +284,215 @@ class MainWindow(QMainWindow):
 
     # Transitional aliases keep existing integrations and private test seams
     # stable while feature state moves behind MovingTargetController.
+    @property
+    def _sep_thread(self) -> QThread | None:
+        return self._sep_controller.task.thread
+
+    @_sep_thread.setter
+    def _sep_thread(self, value: QThread | None) -> None:
+        self._sep_controller.task.thread = value
+
+    @property
+    def _sep_worker(self) -> SEPExtractWorker | None:
+        return self._sep_controller.task.worker
+
+    @_sep_worker.setter
+    def _sep_worker(self, value: SEPExtractWorker | None) -> None:
+        self._sep_controller.task.worker = value
+
+    @property
+    def _active_sep_request_id(self) -> int | None:
+        return self._sep_controller.task.active_request_id
+
+    @_active_sep_request_id.setter
+    def _active_sep_request_id(self, value: int | None) -> None:
+        self._sep_controller.task.active_request_id = value
+
+    @property
+    def _sep_context_generation(self) -> int:
+        return self._sep_controller.context_generation
+
+    @_sep_context_generation.setter
+    def _sep_context_generation(self, value: int) -> None:
+        self._sep_controller.context_generation = value
+
+    @property
+    def _active_sep_context_generation(self) -> int | None:
+        return self._sep_controller.active_context_generation
+
+    @_active_sep_context_generation.setter
+    def _active_sep_context_generation(self, value: int | None) -> None:
+        self._sep_controller.active_context_generation = value
+
+    @property
+    def _active_sep_frame_index(self) -> int | None:
+        return self._sep_controller.active_frame_index
+
+    @_active_sep_frame_index.setter
+    def _active_sep_frame_index(self, value: int | None) -> None:
+        self._sep_controller.active_frame_index = value
+
+    @property
+    def _sep_pending_launch_roi(self) -> _PendingSEPAction | None:
+        return self._sep_controller.pending_launch
+
+    @_sep_pending_launch_roi.setter
+    def _sep_pending_launch_roi(self, value: _PendingSEPAction | None) -> None:
+        self._sep_controller.pending_launch = value
+
+    @property
+    def _sep_confirm_pending_roi(self) -> _PendingSEPAction | None:
+        return self._sep_controller.confirm_pending
+
+    @_sep_confirm_pending_roi.setter
+    def _sep_confirm_pending_roi(self, value: _PendingSEPAction | None) -> None:
+        self._sep_controller.confirm_pending = value
+
+    @property
+    def _comparison_left_index(self) -> int | None:
+        return self._comparison_controller.left_index
+
+    @_comparison_left_index.setter
+    def _comparison_left_index(self, value: int | None) -> None:
+        self._comparison_controller.left_index = value
+
+    @property
+    def _comparison_right_index(self) -> int | None:
+        return self._comparison_controller.right_index
+
+    @_comparison_right_index.setter
+    def _comparison_right_index(self, value: int | None) -> None:
+        self._comparison_controller.right_index = value
+
+    @property
+    def _comparison_thread(self) -> QThread | None:
+        return self._comparison_controller.task.thread
+
+    @_comparison_thread.setter
+    def _comparison_thread(self, value: QThread | None) -> None:
+        self._comparison_controller.task.thread = value
+
+    @property
+    def _comparison_worker(self) -> ComparisonWorker | None:
+        return self._comparison_controller.task.worker
+
+    @_comparison_worker.setter
+    def _comparison_worker(self, value: ComparisonWorker | None) -> None:
+        self._comparison_controller.task.worker = value
+
+    @property
+    def _comparison_request_id(self) -> int:
+        return self._comparison_controller.task.request_id
+
+    @_comparison_request_id.setter
+    def _comparison_request_id(self, value: int) -> None:
+        self._comparison_controller.task.request_id = value
+
+    @property
+    def _active_comparison_request_id(self) -> int | None:
+        return self._comparison_controller.task.active_request_id
+
+    @_active_comparison_request_id.setter
+    def _active_comparison_request_id(self, value: int | None) -> None:
+        self._comparison_controller.task.active_request_id = value
+
+    @property
+    def _comparison_results_enabled(self) -> bool:
+        return self._comparison_controller.task.results_enabled
+
+    @_comparison_results_enabled.setter
+    def _comparison_results_enabled(self, value: bool) -> None:
+        self._comparison_controller.task.results_enabled = value
+
+    # Transitional accessors: loading state is owned by FileLoadController.
+    @property
+    def _load_thread(self) -> QThread | None:
+        return self._load_controller.task.thread
+
+    @_load_thread.setter
+    def _load_thread(self, value: QThread | None) -> None:
+        self._load_controller.task.thread = value
+
+    @property
+    def _load_worker(self) -> FITSLoadWorker | None:
+        return self._load_controller.task.worker
+
+    @_load_worker.setter
+    def _load_worker(self, value: FITSLoadWorker | None) -> None:
+        self._load_controller.task.worker = value
+
+    @property
+    def _load_request_id(self) -> int:
+        return self._load_controller.task.request_id
+
+    @_load_request_id.setter
+    def _load_request_id(self, value: int) -> None:
+        self._load_controller.task.request_id = value
+
+    @property
+    def _active_load_request_id(self) -> int | None:
+        return self._load_controller.task.active_request_id
+
+    @_active_load_request_id.setter
+    def _active_load_request_id(self, value: int | None) -> None:
+        self._load_controller.task.active_request_id = value
+
+    @property
+    def _load_results_enabled(self) -> bool:
+        return self._load_controller.task.results_enabled
+
+    @_load_results_enabled.setter
+    def _load_results_enabled(self, value: bool) -> None:
+        self._load_controller.task.results_enabled = value
+
+    @property
+    def _pending_frame_load(self) -> FrameLoadRequest | None:
+        return self._load_controller.pending
+
+    @_pending_frame_load.setter
+    def _pending_frame_load(self, value: FrameLoadRequest | None) -> None:
+        self._load_controller.pending = value
+
+    @property
+    def _load_cancel_feedback_pending(self) -> bool:
+        return self._load_controller.cancel_feedback_pending
+
+    @_load_cancel_feedback_pending.setter
+    def _load_cancel_feedback_pending(self, value: bool) -> None:
+        self._load_controller.cancel_feedback_pending = value
+
+    @property
+    def _load_append_mode(self) -> bool:
+        return self._load_controller.append_mode
+
+    @_load_append_mode.setter
+    def _load_append_mode(self, value: bool) -> None:
+        self._load_controller.append_mode = value
+
+    @property
+    def _load_total_count(self) -> int:
+        return self._load_controller.total_count
+
+    @_load_total_count.setter
+    def _load_total_count(self, value: int) -> None:
+        self._load_controller.total_count = value
+
+    @property
+    def _load_completed_count(self) -> int:
+        return self._load_controller.completed_count
+
+    @_load_completed_count.setter
+    def _load_completed_count(self, value: int) -> None:
+        self._load_controller.completed_count = value
+
+    @property
+    def _load_error_count(self) -> int:
+        return self._load_controller.error_count
+
+    @_load_error_count.setter
+    def _load_error_count(self, value: int) -> None:
+        self._load_controller.error_count = value
+
     @property
     def _moving_target_roi(self) -> ROISelection | None:
         return self._moving_target_controller.roi
@@ -585,36 +663,37 @@ class MainWindow(QMainWindow):
         self._last_auto_interval_name = self.fits_service.current_interval
         self._histogram_axis_limits: tuple[float, float] | None = None
 
-        from ..core.fits_data import FITSData
-        self._frames: list[FITSData] = []
-        self._frame_images: list[QImage | None] = []
-        self._frame_dirty: list[bool] = []
-        self._frame_bkg_cache: list[FITSData | None] = []
-        self._frame_residual_cache: list[FITSData | None] = []
-        # Resolution of the preview already shown for each frame under the
-        # current stretch/interval/view-mode. Used by `_schedule_frame_render`
-        # to skip preview stages whose dimension is <= the cached preview,
-        # eliminating the redundant 1024 / 2048 passes after a fresh load.
-        self._frame_cached_preview_dim: list[int] = []
+        self._session = FrameSession()
         self._view_mode: str = "original"  # "original" | "background" | "residual"
         self._frame_layout_mode: str = "single"  # "single" | "tiled" | "vertical"
         self._last_title_detail: str | None = None
         self._orientation: tuple[bool, bool, bool] = self._load_orientation_setting()
-        self._current_frame_index: int = 0
+        self._session.current_index: int = 0
         self._frame_step_direction: int = 1
         self._next_source_group_id: int = 0
 
-        self._load_thread: QThread | None = None
-        self._load_worker: FITSLoadWorker | None = None
-        self._pending_frame_load: _PendingFrameLoad | None = None
-        self._load_request_id: int = 0
-        self._active_load_request_id: int | None = None
-        self._load_results_enabled: bool = False
-        self._load_cancel_feedback_pending: bool = False
-        self._load_append_mode: bool = False
-        self._load_total_count: int = 0
-        self._load_completed_count: int = 0
-        self._load_error_count: int = 0
+        self._load_controller = FileLoadController(
+            self,
+            join_wait_ms=self.THREAD_JOIN_WAIT_MS,
+            thread_factory=lambda parent: QThread(parent),
+            worker_factory=lambda *args, **kwargs: FITSLoadWorker(*args, **kwargs),
+        )
+        self._load_controller.launch_requested.connect(lambda request: self._launch_frame_load(request))
+        self._load_controller.request_queued.connect(
+            lambda request: self._set_loading_state(True, loaded=0, total=len(request.paths))
+        )
+        self._load_controller.frame_accepted.connect(
+            lambda data, preview: self._handle_loaded_frame(data, preview)
+        )
+        self._load_controller.error_accepted.connect(
+            lambda path, detail: self._handle_frame_load_error(path, detail)
+        )
+        self._load_controller.progress_accepted.connect(
+            lambda completed, total, path: self._handle_frame_load_progress(completed, total, path)
+        )
+        self._load_controller.load_finished.connect(lambda: self._finish_frame_load())
+        self._load_controller.load_cancelled.connect(self._handle_frame_load_cancelled)
+        self._load_controller.idle.connect(self._schedule_pending_close_retry)
 
         self._render_generation: int = 0
         self._render_request_id: int = 0
@@ -642,17 +721,23 @@ class MainWindow(QMainWindow):
         # Each tuple is (frame_index, generation, concrete FITSData object).
         self._pending_bkg_current: tuple[int, int, Any] | None = None
         self._pending_bkg_prewarm: list[tuple[int, int, Any]] = []
-        self._sep_thread: QThread | None = None
-        self._sep_worker: SEPExtractWorker | None = None
-        self._sep_request_id: int = 0
-        self._active_sep_request_id: int | None = None
-        self._sep_context_generation: int = 0
-        self._active_sep_context_generation: int | None = None
-        self._active_sep_frame_index: int | None = None
-        self._sep_is_estimate_phase: bool = False
-        self._sep_pending_extract_roi: ROISelection | None = None
-        self._sep_pending_launch_roi: _PendingSEPAction | None = None
-        self._sep_confirm_pending_roi: _PendingSEPAction | None = None
+        self._sep_controller = SEPController(
+            self,
+            join_wait_ms=self.THREAD_JOIN_WAIT_MS,
+            estimate_min_pixels=self.SEP_ESTIMATE_MIN_PIXELS,
+            estimate_sigma=self.SEP_ESTIMATE_THRESHOLD_SIGMA,
+            dense_field_per_mpx=self.SEP_DENSE_FIELD_PER_MPX,
+            large_count_warning=self.SEP_LARGE_COUNT_WARNING,
+            thread_factory=lambda parent: QThread(parent),
+            worker_factory=lambda *args, **kwargs: SEPExtractWorker(*args, **kwargs),
+        )
+        self._sep_controller.validation_failed.connect(self._handle_sep_validation_failed)
+        self._sep_controller.run_started.connect(self._handle_sep_started)
+        self._sep_controller.confirmation_requested.connect(self._handle_sep_confirmation)
+        self._sep_controller.full_run_requested.connect(lambda roi: self._start_sep_extract_full(roi))
+        self._sep_controller.extraction_accepted.connect(self._handle_sep_result_accepted)
+        self._sep_controller.error_accepted.connect(self._handle_sep_error_accepted)
+        self._sep_controller.idle.connect(self._handle_sep_idle)
         self._update_check_thread: QThread | None = None
         self._update_check_worker: UpdateCheckWorker | None = None
         self._update_check_request_id: int = 0
@@ -673,16 +758,19 @@ class MainWindow(QMainWindow):
         self._gaia_pixel_coords: list[tuple[float, float]] = []
         self._last_measurement_roi: ROISelection | None = None
         self._last_aperture_measurement: Any = None
-        self._comparison_left_index: int | None = None
-        self._comparison_right_index: int | None = None
+        self._comparison_controller = ComparisonController(
+            self,
+            join_wait_ms=self.THREAD_JOIN_WAIT_MS,
+            thread_factory=lambda parent: QThread(parent),
+            worker_factory=lambda *args, **kwargs: ComparisonWorker(*args, **kwargs),
+        )
+        self._comparison_controller.comparison_started.connect(self._handle_comparison_started)
+        self._comparison_controller.result_accepted.connect(self._handle_comparison_result_accepted)
+        self._comparison_controller.error_accepted.connect(self._handle_comparison_error_accepted)
+        self._comparison_controller.comparison_finished.connect(self._handle_comparison_finished)
         self._comparison_active: bool = False
         self._comparison_display_images: tuple[QImage | None, QImage | None] = (None, None)
         self._comparison_original_view_state: dict[str, float | str] | None = None
-        self._comparison_thread: QThread | None = None
-        self._comparison_worker: ComparisonWorker | None = None
-        self._comparison_request_id: int = 0
-        self._active_comparison_request_id: int | None = None
-        self._comparison_results_enabled: bool = False
         self._moving_target_controller = MovingTargetController(
             self,
             join_wait_ms=self.THREAD_JOIN_WAIT_MS,
@@ -1990,7 +2078,7 @@ class MainWindow(QMainWindow):
             return
 
         self._settings.setValue("session/last_paths", session_paths)
-        self._settings.setValue("session/current_index", self._current_frame_index)
+        self._settings.setValue("session/current_index", self._session.current_index)
         self._refresh_recent_files_menu()
 
     def _session_frame_paths(self) -> list[str]:
@@ -2000,7 +2088,7 @@ class MainWindow(QMainWindow):
         seen_source_groups: set[int] = set()
         previous_path: str | None = None
 
-        for frame in self._frames:
+        for frame in self._session.datasets:
             path = getattr(frame, "path", None)
             if not path:
                 continue
@@ -2053,7 +2141,7 @@ class MainWindow(QMainWindow):
         if view_suffix:
             computing = (
                 self._view_mode != "original"
-                and self._current_frame_index in self._bkg_threads
+                and self._session.current_index in self._bkg_threads
             )
             if computing:
                 view_suffix = f"{view_suffix} {self.tr('Computing...')}"
@@ -2372,7 +2460,7 @@ class MainWindow(QMainWindow):
 
         self._gaia_query_request_id += 1
         request_id = self._gaia_query_request_id
-        frame_index = self._current_frame_index
+        frame_index = self._session.current_index
         thread = QThread(self)
         worker = GaiaQueryWorker(query)
         relay = _CatalogQuerySignalRelay(self, request_id, frame_index, thread, worker)
@@ -2416,7 +2504,7 @@ class MainWindow(QMainWindow):
             or worker is not self._gaia_query_worker
         ):
             return
-        if frame_index != self._current_frame_index:
+        if frame_index != self._session.current_index:
             return
         data = self.fits_service.current_data
         if data is None or data.data is None or data.wcs is None or not data.has_wcs:
@@ -2469,7 +2557,7 @@ class MainWindow(QMainWindow):
             or worker is not self._gaia_query_worker
         ):
             return
-        if frame_index != self._current_frame_index or self._is_closing:
+        if frame_index != self._session.current_index or self._is_closing:
             return
         if self.catalog_overlay_dock is not None:
             self.catalog_overlay_dock.set_error(detail)
@@ -2684,18 +2772,18 @@ class MainWindow(QMainWindow):
         self._update_region_capture_enabled()
 
     def _comparison_frame_label(self, index: int) -> str:
-        if not 0 <= index < len(self._frames):
+        if not 0 <= index < len(self._session):
             return self.tr("Unavailable frame")
-        frame = self._frames[index]
+        frame = self._session[index].data
         name = Path(frame.path).name if frame.path else self.tr("Frame {index}").format(index=index + 1)
         if frame.frame_count > 1:
             name = f"{name} [{frame.frame_index + 1}/{frame.frame_count}]"
         return f"{index + 1}: {name}"
 
     def _sync_comparison_inputs(self) -> None:
-        if self._comparison_left_index is not None and not 0 <= self._comparison_left_index < len(self._frames):
+        if self._comparison_left_index is not None and not 0 <= self._comparison_left_index < len(self._session):
             self._comparison_left_index = None
-        if self._comparison_right_index is not None and not 0 <= self._comparison_right_index < len(self._frames):
+        if self._comparison_right_index is not None and not 0 <= self._comparison_right_index < len(self._session):
             self._comparison_right_index = None
         if self.comparison_dock is not None:
             left = (
@@ -2711,16 +2799,16 @@ class MainWindow(QMainWindow):
             self.comparison_dock.set_inputs(left, right)
 
     def _select_comparison_frame(self, pane: int) -> None:
-        if pane not in (0, 1) or not self._frames:
+        if pane not in (0, 1) or not self._session:
             if self.comparison_dock is not None:
                 self.comparison_dock.set_status(self.tr("Load at least two frames to compare."))
             return
-        labels = [self._comparison_frame_label(index) for index in range(len(self._frames))]
+        labels = [self._comparison_frame_label(index) for index in range(len(self._session))]
         current_index = (
             self._comparison_left_index if pane == 0 else self._comparison_right_index
         )
         if current_index is None:
-            current_index = min(self._current_frame_index + pane, len(labels) - 1)
+            current_index = min(self._session.current_index + pane, len(labels) - 1)
         selected, accepted = QInputDialog.getItem(
             self,
             self.tr("Choose Comparison Frame"),
@@ -2755,57 +2843,32 @@ class MainWindow(QMainWindow):
         if (
             left_index is None
             or right_index is None
-            or not 0 <= left_index < len(self._frames)
-            or not 0 <= right_index < len(self._frames)
+            or not 0 <= left_index < len(self._session)
+            or not 0 <= right_index < len(self._session)
         ):
             if self.comparison_dock is not None:
                 self.comparison_dock.set_status(self.tr("Choose two valid frames to compare."))
             return
-        if self._comparison_thread is not None:
-            try:
-                if self._comparison_thread.isRunning():
-                    return
-            except RuntimeError:
-                pass
+        if self._is_closing or self._comparison_controller.task.running:
+            return
         if self._status_activity_kind in ("load", "sep", "catalog", "moving"):
             if self.comparison_dock is not None:
                 self.comparison_dock.set_status(self.tr("Wait for the current task to finish before comparing."))
             return
 
         self._end_comparison_display(restore=True)
-        self._comparison_request_id += 1
-        request_id = self._comparison_request_id
-        thread = QThread(self)
-        worker = ComparisonWorker(
-            self._frames[left_index],
-            self._frames[right_index],
+        self._comparison_controller.closing = self._is_closing
+        self._comparison_controller.start(
+            self._session[left_index].data,
+            self._session[right_index].data,
             mode=mode,
             alignment=alignment,
             stretch_name=self.fits_service.current_stretch,
             interval_name=self.fits_service.current_interval,
             manual_limits=self.fits_service.manual_interval_limits,
         )
-        relay = _ComparisonSignalRelay(
-            self,
-            request_id,
-            left_index,
-            right_index,
-            thread,
-            worker,
-        )
-        self._active_comparison_request_id = request_id
-        self._comparison_results_enabled = True
-        self._comparison_thread = thread
-        self._comparison_worker = worker
-        worker.moveToThread(thread)
-        thread.started.connect(worker.run)
-        worker.result_ready.connect(relay.handle_result)
-        worker.comparison_error.connect(relay.handle_error)
-        worker.finished.connect(thread.quit)
-        worker.finished.connect(worker.deleteLater)
-        thread.finished.connect(relay.handle_thread_finished)
-        thread.finished.connect(relay.deleteLater)
-        thread.finished.connect(thread.deleteLater)
+
+    def _handle_comparison_started(self) -> None:
         if self.comparison_dock is not None:
             self.comparison_dock.set_busy(True)
             self.comparison_dock.set_status(self.tr("Preparing comparison..."))
@@ -2816,7 +2879,6 @@ class MainWindow(QMainWindow):
             progress_max=0,
             cancellable=True,
         )
-        thread.start()
 
     def _handle_comparison_result_for_request(
         self,
@@ -2826,19 +2888,10 @@ class MainWindow(QMainWindow):
         worker: ComparisonWorker,
         display: ComparisonDisplayResult,
     ) -> None:
-        if self._is_closing:
-            return
-        if (
-            not self._comparison_results_enabled
-            or request_id != self._active_comparison_request_id
-            or worker is not self._comparison_worker
-        ):
-            return
-        if (left_index, right_index) != (
-            self._comparison_left_index,
-            self._comparison_right_index,
-        ):
-            return
+        self._comparison_controller.closing = self._is_closing
+        self._comparison_controller.handle_result(request_id, left_index, right_index, worker, display)
+
+    def _handle_comparison_result_accepted(self, display: ComparisonDisplayResult) -> None:
         if self.comparison_dock is not None:
             self.comparison_dock.set_comparison_result(display.result)
         if not display.result.success:
@@ -2913,12 +2966,10 @@ class MainWindow(QMainWindow):
         worker: ComparisonWorker,
         detail: str,
     ) -> None:
-        if (
-            not self._comparison_results_enabled
-            or request_id != self._active_comparison_request_id
-            or worker is not self._comparison_worker
-        ):
-            return
+        self._comparison_controller.closing = self._is_closing
+        self._comparison_controller.handle_error(request_id, worker, detail)
+
+    def _handle_comparison_error_accepted(self, detail: str) -> None:
         if self.comparison_dock is not None:
             self.comparison_dock.set_comparison_available(False, detail)
         self.show_error(self.tr("Image comparison failed"), detail)
@@ -2929,43 +2980,17 @@ class MainWindow(QMainWindow):
         thread: QThread,
         worker: ComparisonWorker,
     ) -> None:
-        if request_id != self._active_comparison_request_id:
-            return
-        if thread is not self._comparison_thread or worker is not self._comparison_worker:
-            return
-        self._active_comparison_request_id = None
-        self._comparison_results_enabled = False
-        self._comparison_thread = None
-        self._comparison_worker = None
+        self._comparison_controller.handle_thread_finished(request_id, thread, worker)
+
+    def _handle_comparison_finished(self) -> None:
         if self.comparison_dock is not None:
             self.comparison_dock.set_busy(False)
         self._clear_status_activity(kind="compare")
+        self._schedule_pending_close_retry()
 
     def _stop_comparison_worker(self, *, wait: bool = False) -> bool:
-        thread = self._comparison_thread
-        worker = self._comparison_worker
-        request_id = self._active_comparison_request_id
-        self._comparison_results_enabled = False
-        if thread is None or worker is None or request_id is None:
-            return True
-        worker.cancel()
-        try:
-            running = thread.isRunning()
-        except RuntimeError:
-            running = False
-        if running:
-            thread.requestInterruption()
-            thread.quit()
-        if wait and running:
-            thread.wait(self.THREAD_JOIN_WAIT_MS)
-        try:
-            running = thread.isRunning()
-        except RuntimeError:
-            running = False
-        if not running:
-            self._clear_comparison_worker_refs(request_id, thread, worker)
-            return True
-        return False
+        self._comparison_controller.closing = self._is_closing
+        return self._comparison_controller.stop(wait=wait)
 
     def _end_comparison_display(self, *, restore: bool) -> None:
         was_active = self._comparison_active
@@ -2990,11 +3015,11 @@ class MainWindow(QMainWindow):
         self._sync_moving_target_context()
 
     def _moving_target_dataset_signature(self) -> tuple[int, ...]:
-        return tuple(id(frame) for frame in self._frames)
+        return tuple(id(frame) for frame in self._session.datasets)
 
     def _common_moving_target_frame_shape(self) -> tuple[int, int] | None:
         shape: tuple[int, int] | None = None
-        for frame in self._frames:
+        for frame in self._session.datasets:
             data = getattr(frame, "data", None)
             if data is None:
                 return None
@@ -3013,12 +3038,12 @@ class MainWindow(QMainWindow):
         if self.moving_target_dock is None:
             return
         self.moving_target_dock.set_input_context(
-            len(self._frames),
+            len(self._session),
             self._common_moving_target_frame_shape(),
             self._moving_target_roi,
         )
         if self._moving_target_result is not None:
-            self.moving_target_dock.update_current_frame(self._current_frame_index)
+            self.moving_target_dock.update_current_frame(self._session.current_index)
 
     def _show_moving_target_dock(self) -> None:
         if self.moving_target_dock is None:
@@ -3032,7 +3057,7 @@ class MainWindow(QMainWindow):
             self._moving_target_controller.cancel_roi_capture()
 
     def _begin_moving_target_roi_capture(self) -> None:
-        if not self._frames or self.fits_service.current_data is None:
+        if not self._session.datasets or self.fits_service.current_data is None:
             if self.moving_target_dock is not None:
                 self.moving_target_dock.set_status(self.tr("Load a FITS sequence before selecting an analysis ROI."))
             return
@@ -3077,7 +3102,7 @@ class MainWindow(QMainWindow):
                     self.tr("Wait for the current task to finish before detecting moving targets.")
                 )
             return
-        if len(self._frames) < 5:
+        if len(self._session) < 5:
             if self.moving_target_dock is not None:
                 self.moving_target_dock.set_status(self.tr("Moving-target detection requires at least 5 frames."))
             return
@@ -3101,7 +3126,7 @@ class MainWindow(QMainWindow):
                 self.app_status_bar.showMessage(detail, 6000)
             return
         try:
-            parameters = parameters.validated(len(self._frames), (roi.height, roi.width))
+            parameters = parameters.validated(len(self._session), (roi.height, roi.width))
         except Exception as exc:
             detail = localize_moving_target_text(str(exc), self.tr)
             if self.moving_target_dock is not None:
@@ -3110,7 +3135,7 @@ class MainWindow(QMainWindow):
 
         self._pause_playback_for_manual_frame_navigation()
         self._moving_target_controller.start(
-            frames=self._frames,
+            frames=self._session.datasets,
             roi=roi,
             parameters=parameters,
             fallback_cadence_seconds=fallback_cadence_seconds,
@@ -3138,7 +3163,7 @@ class MainWindow(QMainWindow):
     ) -> bool:
         if self._is_closing:
             return False
-        self._moving_target_controller.sync_sequence(self._frames)
+        self._moving_target_controller.sync_sequence(self._session.datasets)
         return self._moving_target_controller.request_is_current(
             request_id,
             context_generation,
@@ -3156,7 +3181,7 @@ class MainWindow(QMainWindow):
     ) -> None:
         if self._is_closing:
             return
-        self._moving_target_controller.sync_sequence(self._frames)
+        self._moving_target_controller.sync_sequence(self._session.datasets)
         self._moving_target_controller.handle_result_for_request(
             request_id,
             context_generation,
@@ -3167,7 +3192,7 @@ class MainWindow(QMainWindow):
 
     def _handle_moving_target_result_accepted(self, result: MovingTargetResult) -> None:
         if self.moving_target_dock is not None:
-            self.moving_target_dock.set_result(result, self._current_frame_index)
+            self.moving_target_dock.set_result(result, self._session.current_index)
             self.moving_target_dock.show()
             self.moving_target_dock.raise_()
         self._redraw_moving_target_roi()
@@ -3190,7 +3215,7 @@ class MainWindow(QMainWindow):
     ) -> None:
         if self._is_closing:
             return
-        self._moving_target_controller.sync_sequence(self._frames)
+        self._moving_target_controller.sync_sequence(self._session.datasets)
         self._moving_target_controller.handle_progress_for_request(
             request_id,
             context_generation,
@@ -3228,7 +3253,7 @@ class MainWindow(QMainWindow):
     ) -> None:
         if self._is_closing:
             return
-        self._moving_target_controller.sync_sequence(self._frames)
+        self._moving_target_controller.sync_sequence(self._session.datasets)
         self._moving_target_controller.handle_error_for_request(
             request_id,
             context_generation,
@@ -3313,7 +3338,7 @@ class MainWindow(QMainWindow):
         if self.canvas is None:
             return
         result = self._moving_target_result
-        frame_index = self._current_frame_index
+        frame_index = self._session.current_index
         if (
             result is None
             or self._comparison_active
@@ -3528,156 +3553,52 @@ class MainWindow(QMainWindow):
         hdu_index: int | None = None,
         append: bool = False,
     ) -> None:
-        """Start background loading for one or more FITS files."""
+        self._load_controller.closing = self._is_closing
+        self._load_controller.start(FrameLoadRequest(tuple(paths), hdu_index, append))
 
-        if not paths:
-            return
-        if self._is_closing:
-            return
-
-        request = _PendingFrameLoad(tuple(paths), hdu_index, append)
-        thread = self._load_thread
-        if thread is not None:
-            try:
-                running = thread.isRunning()
-            except RuntimeError:
-                running = False
-            if running:
-                # FITS decompression and array allocation cannot always stop at
-                # the instant interruption is requested. Keep at most one
-                # loader alive and replace (rather than accumulate) pending
-                # requests until it exits.
-                self._pending_frame_load = request
-                self._load_cancel_feedback_pending = False
-                self._stop_active_frame_load(wait=False)
-                self._set_loading_state(True, loaded=0, total=len(paths))
-                return
-
-            # The worker has exited but its queued GUI cleanup has not run.
-            # Replace any older pending request before cleanup so that cleanup
-            # can launch exactly this newest request, then return to avoid a
-            # second launch below.
-            self._pending_frame_load = request
-            self._load_cancel_feedback_pending = False
-            self._load_results_enabled = False
-            self._handle_load_thread_finished(
-                self._active_load_request_id,
-                thread,
-                self._load_worker,
-            )
-            return
-
-        self._pending_frame_load = None
-        self._launch_frame_load(request)
-
-    def _launch_frame_load(self, request: _PendingFrameLoad) -> None:
-        """Launch a load after the preceding loader has fully exited."""
+    def _launch_frame_load(self, request: FrameLoadRequest) -> None:
+        """Prepare presentation/session state before the controller launches."""
 
         if self._is_closing:
             return
-
         paths = list(request.paths)
-        hdu_index = request.hdu_index
-        append = request.append
-        if append:
+        if request.append:
             self._invalidate_moving_target_sequence(clear_roi=False)
-        self._load_append_mode = append
+        self._load_append_mode = request.append
         self._load_total_count = len(paths)
         self._load_completed_count = 0
         self._load_error_count = 0
         self._load_cancel_feedback_pending = False
-
-        if not append:
+        if not request.append:
             self.close_current_file()
-
         self._set_loading_state(True, loaded=0, total=len(paths))
-
-        self._load_request_id += 1
-        request_id = self._load_request_id
-        thread = QThread(self)
-        worker = FITSLoadWorker(
-            paths,
-            hdu_index=hdu_index,
+        if self._load_controller.launch(
+            request,
             source_group_start=self._next_source_group_id,
-            preview_first_frame=not append,
+            preview_first_frame=not request.append,
             preview_each_frame=True,
             stretch_name=self.fits_service.current_stretch,
             interval_name=self.fits_service.current_interval,
             preview_max_dimension=self._preview_load_dimension(),
+            sampled_previews=True,
             manual_limits=self.fits_service.manual_interval_limits,
-        )
-        self._active_load_request_id = request_id
-        self._load_results_enabled = True
-        self._load_thread = thread
-        self._load_worker = worker
-        relay = _LoadSignalRelay(self, request_id, thread, worker)
-        self._next_source_group_id += len(paths)
-        worker.moveToThread(thread)
-
-        thread.started.connect(worker.run)
-        worker.file_loaded.connect(relay.handle_loaded)
-        worker.file_error.connect(relay.handle_error)
-        worker.progress.connect(relay.handle_progress)
-        worker.finished.connect(relay.handle_finished)
-        worker.finished.connect(thread.quit)
-        worker.finished.connect(worker.deleteLater)
-        thread.finished.connect(relay.handle_thread_finished)
-        thread.finished.connect(relay.deleteLater)
-        thread.finished.connect(thread.deleteLater)
-        thread.start()
+        ):
+            self._next_source_group_id += len(paths)
 
     def _stop_active_frame_load(self, *, wait: bool = False) -> bool:
-        """Request cancellation for the active background load, if any."""
-
-        thread = self._load_thread
-        worker = self._load_worker
-        request_id = self._active_load_request_id
-        if thread is None:
-            return True
-
-        # Cancellation has strong semantics: already-queued worker callbacks
-        # are rejected immediately even though the thread stays tracked until
-        # its cooperative shutdown completes.
-        self._load_results_enabled = False
-        if thread.isRunning():
-            thread.requestInterruption()
-            thread.quit()
-        if wait and thread.isRunning():
-            thread.wait(self.THREAD_JOIN_WAIT_MS)
-        stopped = not thread.isRunning()
-        if stopped:
-            self._handle_load_thread_finished(request_id, thread, worker)
-        return stopped
+        self._load_controller.closing = self._is_closing
+        return self._load_controller.stop(wait=wait)
 
     def _handle_load_thread_finished(
-        self,
-        request_id: int | None,
-        thread: QThread,
-        worker: FITSLoadWorker | None,
+        self, request_id: int | None, thread: QThread, worker: FITSLoadWorker | None
     ) -> None:
-        """Clear the sole loader, then launch only the newest queued request."""
+        self._load_controller.closing = self._is_closing
+        self._load_controller.handle_thread_finished(request_id, thread, worker)
 
-        if thread is not self._load_thread or worker is not self._load_worker:
-            return
-
-        if request_id == self._active_load_request_id:
-            self._active_load_request_id = None
-        self._load_thread = None
-        self._load_worker = None
-        self._load_results_enabled = False
-
-        pending = self._pending_frame_load
-        self._pending_frame_load = None
-        if not self._is_closing and pending is not None:
-            self._launch_frame_load(pending)
-            return
-
-        if not self._is_closing and self._load_cancel_feedback_pending:
-            self._load_cancel_feedback_pending = False
-            self._set_loading_state(False)
-            if self.app_status_bar is not None:
-                self.app_status_bar.showMessage(self.tr("FITS load cancelled."), 3000)
-        self._schedule_pending_close_retry()
+    def _handle_frame_load_cancelled(self) -> None:
+        self._set_loading_state(False)
+        if self.app_status_bar is not None:
+            self.app_status_bar.showMessage(self.tr("FITS load cancelled."), 3000)
 
     def _clear_load_worker_refs(
         self,
@@ -3685,30 +3606,15 @@ class MainWindow(QMainWindow):
         thread: QThread | None = None,
         worker: FITSLoadWorker | None = None,
     ) -> None:
-        """Drop references only for the load worker/thread pair that exited."""
-
-        if request_id is None:
-            request_id = self._active_load_request_id
-        if thread is None:
-            thread = self._load_thread
-        if worker is None:
-            worker = self._load_worker
-        if request_id != self._active_load_request_id:
-            return
-        if thread is not self._load_thread or worker is not self._load_worker:
-            return
-        self._active_load_request_id = None
-        self._load_thread = None
-        self._load_worker = None
-        self._load_results_enabled = False
+        task = self._load_controller.task
+        task.retire(
+            task.active_request_id if request_id is None else request_id,
+            task.thread if thread is None else thread,
+            task.worker if worker is None else worker,
+        )
 
     def _is_current_load_request(self, request_id: int, worker: FITSLoadWorker) -> bool:
-        return (
-            not self._is_closing
-            and self._load_results_enabled
-            and request_id == self._active_load_request_id
-            and worker is self._load_worker
-        )
+        return not self._is_closing and self._load_controller.request_is_current(request_id, worker)
 
     def _handle_loaded_frame_for_request(
         self,
@@ -3818,8 +3724,8 @@ class MainWindow(QMainWindow):
         if (
             pending is not None
             and pending[1] == self._render_generation
-            and 0 <= pending[0] < len(self._frame_dirty)
-            and self._frame_dirty[pending[0]]
+            and 0 <= pending[0] < len(self._session)
+            and self._session[pending[0]].dirty
         ):
             self._schedule_frame_render(pending[0], playback_bg=pending[2])
             return
@@ -3890,13 +3796,13 @@ class MainWindow(QMainWindow):
         never blocks the UI thread on SEP computation.
         """
 
-        original = self._frames[index]
+        original = self._session[index].data
         if self._view_mode == "original" or original.data is None:
             return original
         if self._view_mode == "background":
-            cached = self._frame_bkg_cache[index] if index < len(self._frame_bkg_cache) else None
+            cached = self._session[index].background if index < len(self._session) else None
         else:
-            cached = self._frame_residual_cache[index] if index < len(self._frame_residual_cache) else None
+            cached = self._session[index].residual if index < len(self._session) else None
         return cached if cached is not None else original
 
     def _frame_bkg_cached(self, index: int) -> bool:
@@ -3904,39 +3810,39 @@ class MainWindow(QMainWindow):
 
         if self._view_mode == "original":
             return True
-        if not (0 <= index < len(self._frames)):
+        if not (0 <= index < len(self._session)):
             return True
         if self._view_mode == "background":
-            return self._frame_bkg_cache[index] is not None
-        return self._frame_residual_cache[index] is not None
+            return self._session[index].background is not None
+        return self._session[index].residual is not None
 
     def _source_cutout_needs_bkg(self, index: int) -> bool:
         """Whether the current source cutout still consumes a missing BKG cache."""
 
-        if index != self._current_frame_index or self.source_table_dock is None:
+        if index != self._session.current_index or self.source_table_dock is None:
             return False
         mode = self.source_table_dock.current_cutout_mode()
         if mode == SourceTableDock.CUTOUT_MODE_BACKGROUND:
-            return index >= len(self._frame_bkg_cache) or self._frame_bkg_cache[index] is None
+            return index >= len(self._session) or self._session[index].background is None
         if mode == SourceTableDock.CUTOUT_MODE_RESIDUAL:
-            return index >= len(self._frame_residual_cache) or self._frame_residual_cache[index] is None
+            return index >= len(self._session) or self._session[index].residual is None
         return False
 
     def _frame_needs_bkg(self, index: int) -> bool:
         """Whether a dirty main view or current cutout still needs BKG data."""
 
-        if not (0 <= index < len(self._frames)):
+        if not (0 <= index < len(self._session)):
             return False
         main_view_needs_bkg = (
             self._view_mode != "original"
-            and index < len(self._frame_dirty)
-            and self._frame_dirty[index]
+            and index < len(self._session)
+            and self._session[index].dirty
             and not self._frame_bkg_cached(index)
         )
         return main_view_needs_bkg or self._source_cutout_needs_bkg(index)
 
     def _bkg_action(self, index: int) -> tuple[int, int, Any]:
-        return (index, self._bkg_generation, self._frames[index])
+        return (index, self._bkg_generation, self._session[index].data)
 
     def _bkg_action_is_valid(
         self,
@@ -3948,9 +3854,9 @@ class MainWindow(QMainWindow):
         return (
             not self._is_closing
             and generation == self._bkg_generation
-            and 0 <= index < len(self._frames)
-            and self._frames[index] is frame
-            and (not require_current or index == self._current_frame_index)
+            and 0 <= index < len(self._session)
+            and self._session[index].data is frame
+            and (not require_current or index == self._session.current_index)
             and self._frame_needs_bkg(index)
         )
 
@@ -3972,9 +3878,9 @@ class MainWindow(QMainWindow):
 
         if self._is_closing:
             return
-        if not (0 <= index < len(self._frames)):
+        if not (0 <= index < len(self._session)):
             return
-        original = self._frames[index]
+        original = self._session[index].data
         if original.data is None:
             return
 
@@ -3994,7 +3900,7 @@ class MainWindow(QMainWindow):
                 return
 
             action = self._bkg_action(index)
-            foreground = index == self._current_frame_index
+            foreground = index == self._session.current_index
             if foreground:
                 self._pending_bkg_current = action
             elif self._is_playback_active():
@@ -4033,9 +3939,9 @@ class MainWindow(QMainWindow):
     def _launch_bkg_worker(self, index: int) -> None:
         """Occupy the global BKG slot for one already-validated frame."""
 
-        if self._is_closing or not (0 <= index < len(self._frames)):
+        if self._is_closing or not (0 <= index < len(self._session)):
             return
-        original = self._frames[index]
+        original = self._session[index].data
         if original.data is None:
             return
 
@@ -4051,7 +3957,7 @@ class MainWindow(QMainWindow):
         self._bkg_threads[index] = thread
         self._bkg_workers[index] = worker
 
-        if index == self._current_frame_index:
+        if index == self._session.current_index:
             if self.app_status_bar is not None:
                 self.app_status_bar.showMessage(self.tr("Calculating background..."), 0)
             self._set_window_title(self._last_title_detail)
@@ -4076,18 +3982,16 @@ class MainWindow(QMainWindow):
     def _handle_bkg_ready(self, index: int, generation: int, bkg: Any, residual: Any) -> None:
         if self._is_closing or generation != self._bkg_generation:
             return
-        if not (0 <= index < len(self._frames)):
+        if not (0 <= index < len(self._session)):
             return
         import dataclasses
-        original = self._frames[index]
-        self._frame_bkg_cache[index] = dataclasses.replace(original, data=bkg)
-        self._frame_residual_cache[index] = dataclasses.replace(original, data=residual)
+        original = self._session[index].data
+        self._session[index].background = dataclasses.replace(original, data=bkg)
+        self._session[index].residual = dataclasses.replace(original, data=residual)
         if self._view_mode != "original":
-            self._frame_dirty[index] = True
-            if 0 <= index < len(self._frame_cached_preview_dim):
-                self._frame_cached_preview_dim[index] = 0
+            self._session[index].invalidate_render()
             self._schedule_frame_render(index)
-        if index == self._current_frame_index and self.source_table_dock is not None:
+        if index == self._session.current_index and self.source_table_dock is not None:
             mode = self.source_table_dock.current_cutout_mode()
             if mode in (
                 SourceTableDock.CUTOUT_MODE_BACKGROUND,
@@ -4099,7 +4003,7 @@ class MainWindow(QMainWindow):
         if self._is_closing or generation != self._bkg_generation:
             return
         logger.error("Background computation failed for frame %d: %s", index, detail)
-        if not (0 <= index < len(self._frames)):
+        if not (0 <= index < len(self._session)):
             return
 
         if (
@@ -4117,14 +4021,14 @@ class MainWindow(QMainWindow):
         # There is no useful automatic retry for a same-generation SEP/BKG
         # failure. End the render feedback and keep the already visible
         # original image as a safe fallback instead of spinning forever.
-        if self._view_mode != "original" and index < len(self._frame_dirty):
-            self._frame_dirty[index] = False
+        if self._view_mode != "original" and index < len(self._session):
+            self._session[index].dirty = False
             self._sync_current_canvas_image_state()
         if self._source_cutout_needs_bkg(index) and self.source_table_dock is not None:
             self.source_table_dock.clear_cutout_image(
                 self.tr("Background unavailable: {detail}").format(detail=detail)
             )
-        if index == self._current_frame_index:
+        if index == self._session.current_index:
             self.show_error(self.tr("Background calculation failed"), detail)
 
     def _resume_bkg_index(self, index: int) -> bool:
@@ -4134,8 +4038,8 @@ class MainWindow(QMainWindow):
             return False
         main_view_needs_bkg = (
             self._view_mode != "original"
-            and index < len(self._frame_dirty)
-            and self._frame_dirty[index]
+            and index < len(self._session)
+            and self._session[index].dirty
             and not self._frame_bkg_cached(index)
         )
         if main_view_needs_bkg:
@@ -4165,7 +4069,7 @@ class MainWindow(QMainWindow):
             return
         self._bkg_threads.pop(index, None)
         self._bkg_workers.pop(index, None)
-        if index == self._current_frame_index:
+        if index == self._session.current_index:
             self._set_window_title(self._last_title_detail)
             if not self._bkg_threads and self.app_status_bar is not None:
                 self.app_status_bar.clearMessage()
@@ -4180,7 +4084,7 @@ class MainWindow(QMainWindow):
         # retry as an intent, but give the currently visible frame/cutout first
         # claim on the one global BKG slot.
         if generation != self._bkg_generation:
-            current_index = self._current_frame_index
+            current_index = self._session.current_index
             if self._frame_needs_bkg(current_index):
                 self._pending_bkg_current = self._bkg_action(current_index)
             elif self._frame_needs_bkg(index):
@@ -4251,21 +4155,7 @@ class MainWindow(QMainWindow):
         mode depends on the cache, the affected frames are re-rendered.
         """
 
-        if indices is None:
-            for i in range(len(self._frame_bkg_cache)):
-                self._frame_bkg_cache[i] = None
-            for i in range(len(self._frame_residual_cache)):
-                self._frame_residual_cache[i] = None
-            target_indices = list(range(len(self._frames)))
-        else:
-            target_indices = []
-            for i in indices:
-                if 0 <= i < len(self._frame_bkg_cache):
-                    self._frame_bkg_cache[i] = None
-                if 0 <= i < len(self._frame_residual_cache):
-                    self._frame_residual_cache[i] = None
-                if 0 <= i < len(self._frames):
-                    target_indices.append(i)
+        target_indices = self._session.invalidate_backgrounds(indices)
 
         self._pending_bkg_current = None
         self._pending_bkg_prewarm.clear()
@@ -4279,13 +4169,10 @@ class MainWindow(QMainWindow):
         self._cancel_active_frame_renders(wait=False)
         self._render_request_index_by_id.clear()
         self._latest_render_request_by_index.clear()
-        for i in target_indices:
-            self._frame_dirty[i] = True
-            if 0 <= i < len(self._frame_cached_preview_dim):
-                self._frame_cached_preview_dim[i] = 0
+        self._session.invalidate_renders(target_indices)
         self._sync_current_canvas_image_state()
-        if self._current_frame_index in target_indices:
-            self._ensure_frame_rendered(self._current_frame_index)
+        if self._session.current_index in target_indices:
+            self._ensure_frame_rendered(self._session.current_index)
 
     _VIEW_MODE_ORDER = ("original", "background", "residual")
     _VIEW_MODE_LABELS = {
@@ -4330,54 +4217,16 @@ class MainWindow(QMainWindow):
         )
 
     def _orient_point(self, x: float, y: float, w: int, h: int) -> tuple[float, float]:
-        """Map original-image coords (within w×h) to displayed coords."""
-        fh, fv, tr = self._orientation
-        if tr:
-            x, y = y, x
-            w, h = h, w
-        if fh:
-            x = (w - 1) - x
-        if fv:
-            y = (h - 1) - y
-        return x, y
+        return image_geometry.orient_point(x, y, w, h, self._orientation)
 
     def _orient_edge_point(self, x: float, y: float, w: int, h: int) -> tuple[float, float]:
-        """Map half-open image-edge coordinates through the active D4 transform."""
-
-        fh, fv, tr = self._orientation
-        if tr:
-            x, y = y, x
-            w, h = h, w
-        if fh:
-            x = w - x
-        if fv:
-            y = h - y
-        return x, y
+        return image_geometry.orient_edge_point(x, y, w, h, self._orientation)
 
     def _unorient_point(self, x: float, y: float, w: int, h: int) -> tuple[float, float]:
-        """Map displayed coords back to original (w, h are ORIGINAL dims)."""
-        fh, fv, tr = self._orientation
-        wd, hd = (h, w) if tr else (w, h)
-        if fh:
-            x = (wd - 1) - x
-        if fv:
-            y = (hd - 1) - y
-        if tr:
-            x, y = y, x
-        return x, y
+        return image_geometry.unorient_point(x, y, w, h, self._orientation)
 
     def _unorient_edge_point(self, x: float, y: float, w: int, h: int) -> tuple[float, float]:
-        """Map displayed half-open rectangle edges back to original image edges."""
-
-        fh, fv, tr = self._orientation
-        displayed_width, displayed_height = (h, w) if tr else (w, h)
-        if fh:
-            x = displayed_width - x
-        if fv:
-            y = displayed_height - y
-        if tr:
-            x, y = y, x
-        return x, y
+        return image_geometry.unorient_edge_point(x, y, w, h, self._orientation)
 
     def _orient_qimage(self, image: QImage) -> QImage:
         """Apply the current orientation to a QImage. Returns a transformed copy."""
@@ -4402,21 +4251,7 @@ class MainWindow(QMainWindow):
         return out
 
     def _axis_directions(self) -> tuple[tuple[float, float], tuple[float, float]]:
-        """Return displayed-frame direction vectors for original +X and +Y axes."""
-
-        fh, fv, tr = self._orientation
-        x_axis = [1.0, 0.0]
-        y_axis = [0.0, 1.0]
-        if tr:
-            x_axis = [x_axis[1], x_axis[0]]
-            y_axis = [y_axis[1], y_axis[0]]
-        if fh:
-            x_axis[0] = -x_axis[0]
-            y_axis[0] = -y_axis[0]
-        if fv:
-            x_axis[1] = -x_axis[1]
-            y_axis[1] = -y_axis[1]
-        return tuple(x_axis), tuple(y_axis)
+        return image_geometry.axis_directions(self._orientation)
 
     def _current_original_shape(self) -> tuple[int, int] | None:
         data = self.fits_service.current_data
@@ -4428,34 +4263,27 @@ class MainWindow(QMainWindow):
     def _frame_original_shape(self, index: int) -> tuple[int, int] | None:
         """Return the original (width, height) for one frame."""
 
-        if not (0 <= index < len(self._frames)):
+        if not (0 <= index < len(self._session)):
             return None
-        data = self._frames[index].data
+        data = self._session[index].data.data
         if data is not None:
             h, w = data.shape[:2]
             return w, h
-        if 0 <= index < len(self._frame_images):
-            image = self._frame_images[index]
+        if 0 <= index < len(self._session):
+            image = self._session[index].image
             if isinstance(image, QImage) and not image.isNull():
                 return image.width(), image.height()
         return None
 
     def _frame_display_shape(self, index: int) -> tuple[int, int] | None:
-        """Return the displayed (width, height) for one frame after orientation."""
-
         shape = self._frame_original_shape(index)
-        if shape is None:
-            return None
-        width, height = shape
-        if self._orientation[2]:
-            return height, width
-        return width, height
+        return None if shape is None else image_geometry.display_dimensions(*shape, self._orientation)
 
     def _frame_composite_layout(self) -> tuple[int, int, list[_FrameCompositePlacement]]:
         """Return composite image size and frame placements for the active layout."""
 
         placements: list[_FrameCompositePlacement] = []
-        count = len(self._frames)
+        count = len(self._session)
         if count == 0:
             return 0, 0, placements
 
@@ -4506,7 +4334,7 @@ class MainWindow(QMainWindow):
     def _is_composite_frame_layout_active(self) -> bool:
         """Return whether the current frame layout displays multiple frames as one image."""
 
-        return self._frame_layout_mode != "single" and len(self._frames) > 1
+        return self._frame_layout_mode != "single" and len(self._session) > 1
 
     def _current_canvas_image_dimensions(self) -> tuple[int, int]:
         """Return the dimensions of the image currently shown on the canvas."""
@@ -4606,24 +4434,34 @@ class MainWindow(QMainWindow):
         self._redraw_moving_target_overlays()
 
     def _build_composite_frame_image(self) -> QImage | None:
-        """Build the currently requested composite frame image from cached frame renders."""
-
+        """Paint cached textures directly into the full composite extent."""
         width, height, placements = self._frame_composite_layout()
         if width <= 0 or height <= 0:
             return None
-
         composite = QImage(width, height, QImage.Format.Format_Grayscale8)
         composite.fill(0)
-
         painter = QPainter(composite)
         try:
             for placement in placements:
-                if not (0 <= placement.index < len(self._frame_images)):
+                if not 0 <= placement.index < len(self._session):
                     continue
-                image = self._frame_images[placement.index]
-                if image is None:
+                frame = self._session[placement.index]
+                if frame.image is None:
                     continue
-                painter.drawImage(placement.x, placement.y, self._orient_qimage(image))
+                image = self._orient_qimage(frame.image)
+                step = frame.sample_step
+                offset = self._sampled_image_offset(
+                    image, (placement.display_width, placement.display_height), step,
+                )
+                painter.save()
+                painter.setClipRect(QRectF(
+                    placement.x, placement.y, placement.display_width, placement.display_height,
+                ))
+                painter.drawImage(QRectF(
+                    placement.x + offset[0], placement.y + offset[1],
+                    image.width() * step, image.height() * step,
+                ), image)
+                painter.restore()
         finally:
             painter.end()
         return composite
@@ -4642,7 +4480,7 @@ class MainWindow(QMainWindow):
             local_x = x - placement.x
             local_y = y - placement.y
             ox, oy = self._unorient_point(local_x, local_y, placement.original_width, placement.original_height)
-            frame = self._frames[placement.index]
+            frame = self._session[placement.index].data
             return frame.sample_pixel(int(ox), int(oy))
 
         return PixelSample(x=int(x), y=int(y), inside_image=False)
@@ -4681,7 +4519,7 @@ class MainWindow(QMainWindow):
     def _cycle_view_mode(self) -> None:
         """TAB: cycle through original → background → residual → original."""
 
-        if not self._frames:
+        if not self._session:
             if self.app_status_bar is not None:
                 self.app_status_bar.showMessage(self.tr("No image loaded"), 2000)
             return
@@ -4700,6 +4538,7 @@ class MainWindow(QMainWindow):
                 2000,
             )
         self._rerender_all_frames()
+        self._refresh_histogram_view()
 
     def _set_frame_layout_mode(self, mode: str) -> None:
         """Switch between single-frame and composite multi-frame display layouts."""
@@ -4737,8 +4576,8 @@ class MainWindow(QMainWindow):
         """Restore full UI state and trigger a full render when playback stops."""
         self._playback_render_queue.clear()
         self._playback_bg_render_ids.clear()
-        idx = self._current_frame_index
-        if 0 <= idx < len(self._frame_dirty) and self._frame_dirty[idx]:
+        idx = self._session.current_index
+        if 0 <= idx < len(self._session) and self._session[idx].dirty:
             self._schedule_frame_render(idx)
 
         # Refresh panels that were skipped during playback.
@@ -4759,15 +4598,15 @@ class MainWindow(QMainWindow):
         Frames are ordered starting after the current frame so that upcoming
         frames in the playback sequence are rendered first.
         """
-        count = len(self._frames)
+        count = len(self._session)
         if count == 0:
             self._playback_render_queue = []
             return
-        start = self._current_frame_index
+        start = self._session.current_index
         queue = []
         for offset in range(count):
             idx = (start + offset + 1) % count
-            if self._frame_dirty[idx]:
+            if self._session[idx].dirty:
                 queue.append(idx)
         self._playback_render_queue = queue
 
@@ -4784,7 +4623,7 @@ class MainWindow(QMainWindow):
 
         while self._playback_render_queue:
             idx = self._playback_render_queue.pop(0)
-            if 0 <= idx < len(self._frame_dirty) and self._frame_dirty[idx]:
+            if 0 <= idx < len(self._session) and self._session[idx].dirty:
                 self._schedule_frame_render(idx, playback_bg=True)
                 return
         # Queue exhausted — nothing left to do.
@@ -4794,9 +4633,9 @@ class MainWindow(QMainWindow):
 
         if self._is_closing:
             return
-        if index < 0 or index >= len(self._frames):
+        if index < 0 or index >= len(self._session):
             return
-        if not self._frame_dirty[index]:
+        if not self._session[index].dirty:
             return
         if not self._frame_bkg_cached(index):
             self._dispatch_bkg_worker(index)
@@ -4806,9 +4645,9 @@ class MainWindow(QMainWindow):
 
         if not playback_bg:
             # During playback, skip rendering if a preview image is already cached.
-            if playing and self._frame_images[index] is not None:
+            if playing and self._session[index].image is not None:
                 return
-            if index != self._current_frame_index and self._has_active_render_for_index(self._current_frame_index):
+            if index != self._session.current_index and self._has_active_render_for_index(self._session.current_index):
                 return
 
         active_request_ids = list(self._render_threads)
@@ -4868,7 +4707,7 @@ class MainWindow(QMainWindow):
                 self._handle_frame_render_thread_finished(request_id, request_index)
             return
 
-        if not playback_bg and index == self._current_frame_index:
+        if not playback_bg and index == self._session.current_index:
             self._cancel_stale_frame_renders(index)
 
         self._render_request_id += 1
@@ -4882,8 +4721,8 @@ class MainWindow(QMainWindow):
         use_preview_only = playing and not playback_bg
 
         cached_dim = 0
-        if 0 <= index < len(self._frame_cached_preview_dim):
-            cached_dim = self._frame_cached_preview_dim[index]
+        if 0 <= index < len(self._session):
+            cached_dim = self._session[index].preview_dimension
         preview_dimensions = tuple(
             d for d in self._preview_render_dimensions() if d > cached_dim
         )
@@ -4899,6 +4738,12 @@ class MainWindow(QMainWindow):
             preview_dimensions=preview_dimensions,
             manual_limits=self.fits_service.manual_interval_limits,
             preview_only=use_preview_only,
+            sampled_previews=True,
+            resolved_spec=(
+                self._session[index].resolved_spec
+                if self._render_spec_matches_controls(self._session[index].resolved_spec)
+                else None
+            ),
         )
         worker.moveToThread(thread)
         self._render_workers[request_id] = worker
@@ -4924,7 +4769,7 @@ class MainWindow(QMainWindow):
             return False
         if generation != self._render_generation:
             return False
-        if index < 0 or index >= len(self._frames):
+        if index < 0 or index >= len(self._session):
             return False
         return self._latest_render_request_by_index.get(index) == request_id
 
@@ -4940,13 +4785,12 @@ class MainWindow(QMainWindow):
         if not self._should_accept_render_result(request_id, generation, index):
             return
 
-        self._frame_images[index] = self._qimage_from_u8(image_u8)
-        if self._is_composite_frame_layout_active() or self._current_frame_index == index:
+        self._cache_frame_render(index, image_u8)
+        if index == self._session.current_index:
+            self._refresh_histogram_view()
+        if self._is_composite_frame_layout_active() or self._session.current_index == index:
             self._show_current_frame_image()
             self._sync_current_canvas_image_state()
-            if self.canvas is not None and len(self._frames) == 1:
-                self.canvas.show_actual_pixels()
-                self.canvas.centerOn(self.canvas._pixmap_item)
 
     def _handle_frame_rendered(
         self,
@@ -4960,12 +4804,14 @@ class MainWindow(QMainWindow):
         if not self._should_accept_render_result(request_id, generation, index):
             return
 
-        self._frame_images[index] = self._qimage_from_u8(image_u8)
-        self._frame_dirty[index] = False
-        if self._is_composite_frame_layout_active() or self._current_frame_index == index:
+        self._cache_frame_render(index, image_u8)
+        self._session[index].dirty = False
+        if index == self._session.current_index:
+            self._refresh_histogram_view()
+        if self._is_composite_frame_layout_active() or self._session.current_index == index:
             self._show_current_frame_image()
             self._sync_current_canvas_image_state()
-            if self._current_frame_index == index:
+            if self._session.current_index == index:
                 self._prewarm_adjacent_frame()
 
     def _handle_frame_render_error(
@@ -4979,8 +4825,8 @@ class MainWindow(QMainWindow):
 
         if not self._should_accept_render_result(request_id, generation, index):
             return
-        self._frame_dirty[index] = False
-        if self._is_composite_frame_layout_active() or self._current_frame_index == index:
+        self._session[index].dirty = False
+        if self._is_composite_frame_layout_active() or self._session.current_index == index:
             self._sync_current_canvas_image_state()
         self.show_error(self.tr("Render failed"), detail)
 
@@ -5097,23 +4943,24 @@ class MainWindow(QMainWindow):
                 if self.app_status_bar is not None:
                     self.app_status_bar.showMessage(self.tr("FITS load cancelled."), 3000)
         elif self._status_activity_kind == "sep":
-            self._sep_pending_extract_roi = None
-            self._sep_pending_launch_roi = None
-            if self._sep_confirm_pending_roi is not None:
-                # User declined the large-count prompt; no worker is active.
-                self._sep_confirm_pending_roi = None
+            if self._sep_controller.decline_confirmation():
                 self._clear_status_activity(kind="sep")
                 if self.app_status_bar is not None:
                     self.app_status_bar.showMessage(self.tr("SEP extraction cancelled."), 3000)
                 return
-            self._cancel_active_sep_extract(wait=False)
-            self._set_status_activity(
-                kind="sep",
-                text=self.tr("Cancelling SEP extraction..."),
-                progress_value=0,
-                progress_max=0,
-                cancellable=False,
-            )
+            stopped = self._cancel_active_sep_extract(wait=False)
+            if stopped:
+                self._clear_status_activity(kind="sep")
+                if self.app_status_bar is not None:
+                    self.app_status_bar.showMessage(self.tr("SEP extraction cancelled."), 3000)
+            else:
+                self._set_status_activity(
+                    kind="sep",
+                    text=self.tr("Cancelling SEP extraction..."),
+                    progress_value=0,
+                    progress_max=0,
+                    cancellable=False,
+                )
         elif self._status_activity_kind == "catalog":
             stopped = self._stop_gaia_query(wait=False)
             if stopped:
@@ -5146,24 +4993,11 @@ class MainWindow(QMainWindow):
             self._cancel_moving_target_detection()
 
     def _handle_status_bar_continue_requested(self) -> None:
-        """Accept a non-modal confirmation prompt surfaced in the status bar."""
-
-        if self._status_activity_kind != "sep":
+        if self._status_activity_kind != "sep" or self._sep_controller.confirm_pending is None:
             return
-        pending = self._sep_confirm_pending_roi
-        self._sep_confirm_pending_roi = None
-        if pending is None:
-            return
-        if not self._sep_action_is_current(pending):
-            self._clear_status_activity(kind="sep")
-            return
+        self._sync_sep_controller_context()
         self._clear_status_activity(kind="sep")
-        if self._sep_thread is not None:
-            # Estimate thread may still be tearing down; chain the launch through
-            # _clear_sep_worker_refs so we don't clobber its references.
-            self._sep_pending_launch_roi = pending
-            return
-        self._start_sep_extract_full(pending.roi)
+        self._sep_controller.confirm()
 
     def _show_latest_error_details(self) -> None:
         """Open a dialog with the most recently stored error detail."""
@@ -5179,27 +5013,28 @@ class MainWindow(QMainWindow):
     def _handle_loaded_frame(self, data: Any, preview_image_u8: Any = None) -> None:
         """Accept one loaded FITS frame from the background worker."""
 
-        self._frames.append(data)
-        if preview_image_u8 is not None:
-            self._frame_images.append(self._qimage_from_u8(preview_image_u8))
-            cached_dim = self._preview_load_dimension()
-        else:
-            self._frame_images.append(None)
-            cached_dim = 0
-        self._frame_dirty.append(True)
-        self._frame_bkg_cache.append(None)
-        self._frame_residual_cache.append(None)
-        self._frame_cached_preview_dim.append(cached_dim)
+        frame = self._session.append(data)
+        preview_matches = (
+            self._view_mode == "original"
+            and (
+                not isinstance(preview_image_u8, RenderResult)
+                or preview_image_u8.resolved_spec is None
+                or self._render_spec_matches_controls(preview_image_u8.resolved_spec)
+            )
+        )
+        if preview_image_u8 is not None and preview_matches:
+            self._cache_frame_render(len(self._session) - 1, preview_image_u8)
+            frame.preview_dimension = self._preview_load_dimension()
 
-        if len(self._frames) == 1:
+        if len(self._session) == 1:
             self._activate_frame(0)
 
         self._sync_frame_player()
         self._sync_comparison_inputs()
         self._sync_moving_target_context()
         self._schedule_next_composite_dirty_frame()
-        if self.app_status_bar is not None and self._frames:
-            self.app_status_bar.set_frame_info(self._current_frame_index, len(self._frames))
+        if self.app_status_bar is not None and self._session:
+            self.app_status_bar.set_frame_info(self._session.current_index, len(self._session))
 
     def _handle_frame_load_error(self, path: str, detail: str) -> None:
         """Receive a file-load failure from the background worker."""
@@ -5221,7 +5056,7 @@ class MainWindow(QMainWindow):
         self._set_loading_state(False)
         success_count = max(0, self._load_total_count - self._load_error_count)
 
-        if not self._frames:
+        if not self._session:
             self._pending_session_restore_frame_index = None
             if self.app_status_bar is not None:
                 self.app_status_bar.showMessage(self.tr("No FITS files were loaded."), 5000)
@@ -5248,9 +5083,9 @@ class MainWindow(QMainWindow):
                     3000,
                 )
         self._persist_session_state()
-        if self._pending_session_restore_frame_index is not None and len(self._frames) > 1:
-            restore_index = max(0, min(self._pending_session_restore_frame_index, len(self._frames) - 1))
-            if restore_index != self._current_frame_index:
+        if self._pending_session_restore_frame_index is not None and len(self._session) > 1:
+            restore_index = max(0, min(self._pending_session_restore_frame_index, len(self._session) - 1))
+            if restore_index != self._session.current_index:
                 self._switch_frame(restore_index)
         self._pending_session_restore_frame_index = None
 
@@ -5362,12 +5197,7 @@ class MainWindow(QMainWindow):
         self.fits_service.close_file()
         self.current_catalog = None
         self._catalog_results_stale = False
-        self._frames.clear()
-        self._frame_images.clear()
-        self._frame_dirty.clear()
-        self._frame_bkg_cache.clear()
-        self._frame_residual_cache.clear()
-        self._frame_cached_preview_dim.clear()
+        self._session.clear()
         self._next_source_group_id = 0
         self._current_wcs_grid = None
         self._current_wcs_center = None
@@ -5383,7 +5213,7 @@ class MainWindow(QMainWindow):
             self._view_mode = "original"
             if self.app_status_bar is not None:
                 self.app_status_bar.set_view_mode_label("")
-        self._current_frame_index = 0
+        self._session.current_index = 0
         self._set_window_title()
         self._refresh_view_mode_indicators()
 
@@ -5611,14 +5441,14 @@ class MainWindow(QMainWindow):
 
         width, height = self._current_canvas_image_dimensions()
         feedback = ViewFeedbackState(status="ready")
-        if self._is_composite_frame_layout_active() and any(self._frame_dirty) and not self._is_playback_active():
+        if self._is_composite_frame_layout_active() and any(frame.dirty for frame in self._session) and not self._is_playback_active():
             feedback = ViewFeedbackState(
                 status="loading",
                 title=self.tr("Rendering Composite View"),
                 detail=self.tr("Visible frame previews are shown while the remaining frames finish rendering."),
                 visible=True,
             )
-        elif self._is_frame_rendering(self._current_frame_index) and not self._is_playback_active():
+        elif self._is_frame_rendering(self._session.current_index) and not self._is_playback_active():
             feedback = self.build_rendering_image_feedback(
                 has_preview=self._current_frame_has_preview_image()
             )
@@ -5900,7 +5730,20 @@ class MainWindow(QMainWindow):
         if not self.histogram_dock.isVisible():
             return
 
-        interval_limits = self.fits_service.current_interval_limits()
+        index = self._session.current_index
+        target = self.fits_service.current_data
+        spec = None
+        if 0 <= index < len(self._session) and target is self._session[index].data:
+            if not self._frame_bkg_cached(index):
+                self.histogram_dock.clear_histogram()
+                return
+            target = self._render_data_for_index(index)
+            cached = self._session[index].resolved_spec
+            if self._render_spec_matches_controls(cached):
+                spec = cached
+        if spec is None:
+            spec = self.fits_service.resolve_render_spec(target)
+        interval_limits = spec.limits
         if self.fits_service.current_interval == "Manual":
             axis_limits = self._histogram_axis_limits or interval_limits
         else:
@@ -5908,7 +5751,10 @@ class MainWindow(QMainWindow):
             if axis_limits is not None:
                 self._histogram_axis_limits = axis_limits
 
-        counts, min_value, max_value = self.fits_service.histogram(limits=axis_limits)
+        if axis_limits == spec.limits:
+            counts, min_value, max_value = self.fits_service.histogram(target, resolved_spec=spec)
+        else:
+            counts, min_value, max_value = self.fits_service.histogram(target, limits=axis_limits)
         if counts.size == 0 or (counts.sum() == 0 and min_value == 0.0 and max_value == 0.0):
             self.histogram_dock.clear_histogram()
             return
@@ -5954,75 +5800,27 @@ class MainWindow(QMainWindow):
             self._show_current_frame_image()
         self._refresh_histogram_view()
 
-    def _is_sep_extract_running(self) -> bool:
-        """Return whether a background SEP extraction is currently active."""
+    def _sync_sep_controller_context(self) -> None:
+        index = self._session.current_index
+        frame = self._session[index].data if 0 <= index < len(self._session) else None
+        self._sep_controller.closing = self._is_closing
+        self._sep_controller.sync_context(index, frame, self.fits_service.current_data)
 
-        # Worker.finished can be delivered before QThread.finished cleanup.
-        # Retain the slot until the thread object is fully retired so another
-        # request cannot overwrite its references and later consume stale
-        # pending actions.
-        return self._active_sep_request_id is not None or self._sep_thread is not None
+    def _is_sep_extract_running(self) -> bool:
+        return self._sep_controller.is_running
 
     def _pending_sep_action(self, roi: ROISelection) -> _PendingSEPAction:
-        return _PendingSEPAction(
-            roi=roi,
-            frame_index=self._current_frame_index,
-            context_generation=self._sep_context_generation,
-        )
-
-    def _sep_action_is_current(self, action: _PendingSEPAction) -> bool:
-        return (
-            not self._is_closing
-            and action.frame_index == self._current_frame_index
-            and action.context_generation == self._sep_context_generation
-            and 0 <= action.frame_index < len(self._frames)
-            and self.fits_service.current_data is self._frames[action.frame_index]
-        )
+        self._sync_sep_controller_context()
+        return self._sep_controller.pending_action(roi)
 
     def _sep_request_matches_current_context(self, request_id: int) -> bool:
-        return (
-            not self._is_closing
-            and request_id == self._active_sep_request_id
-            and self._active_sep_frame_index == self._current_frame_index
-            and self._active_sep_context_generation == self._sep_context_generation
-            and 0 <= self._current_frame_index < len(self._frames)
-            and self.fits_service.current_data is self._frames[self._current_frame_index]
-        )
+        self._sync_sep_controller_context()
+        return self._sep_controller.request_is_current(request_id)
 
-    def _clear_pending_sep_actions(self) -> None:
-        self._sep_pending_extract_roi = None
-        self._sep_pending_launch_roi = None
-        self._sep_confirm_pending_roi = None
-
-    def _cancel_active_sep_extract(self, *, wait: bool = False) -> None:
-        """Request shutdown for any active SEP worker thread."""
-
-        # Invalidate the request before asking the worker to stop. A result
-        # signal may already be queued for the GUI thread; cancellation must
-        # still prevent that result from replacing the catalog/overlays.
-        self._sep_context_generation += 1
-        thread = self._sep_thread
-        worker = self._sep_worker
-        request_id = self._active_sep_request_id
-        self._clear_pending_sep_actions()
+    def _cancel_active_sep_extract(self, *, wait: bool = False) -> bool:
+        self._sync_sep_controller_context()
         self._clear_status_activity(kind="sep")
-        if thread is None or worker is None:
-            self._active_sep_request_id = None
-            self._active_sep_context_generation = None
-            self._active_sep_frame_index = None
-            return
-
-        if thread.isRunning():
-            try:
-                worker.cancel()
-            except Exception:
-                pass
-            thread.requestInterruption()
-            thread.quit()
-        if wait and thread.isRunning():
-            thread.wait(self.THREAD_JOIN_WAIT_MS)
-        if not thread.isRunning():
-            self._clear_sep_worker_refs(request_id, thread, worker)
+        return self._sep_controller.cancel(wait=wait)
 
     def _clear_sep_worker_refs(
         self,
@@ -6030,29 +5828,16 @@ class MainWindow(QMainWindow):
         thread: QThread | None = None,
         worker: SEPExtractWorker | None = None,
     ) -> None:
-        """Clear only the SEP pair that exited, then validate any chained run."""
+        self._sync_sep_controller_context()
+        task = self._sep_controller.task
+        self._sep_controller.handle_thread_finished(
+            task.active_request_id if request_id is None else request_id,
+            task.thread if thread is None else thread,
+            task.worker if worker is None else worker,
+        )
 
-        if request_id is None:
-            request_id = self._active_sep_request_id
-        if thread is None:
-            thread = self._sep_thread
-        if worker is None:
-            worker = self._sep_worker
-        if thread is not self._sep_thread or worker is not self._sep_worker:
-            return
-        self._sep_thread = None
-        self._sep_worker = None
-        if request_id == self._active_sep_request_id:
-            self._active_sep_request_id = None
-            self._active_sep_context_generation = None
-            self._active_sep_frame_index = None
-        pending = self._sep_pending_launch_roi
-        self._sep_pending_launch_roi = None
-        if pending is not None and self._sep_action_is_current(pending):
-            self._start_sep_extract_full(pending.roi)
-            return
-
-        if self._sep_confirm_pending_roi is None:
+    def _handle_sep_idle(self) -> None:
+        if self._sep_controller.confirm_pending is None:
             self._clear_status_activity(kind="sep")
         self.sync_sep_panel_state()
         if self.source_table_dock is not None:
@@ -6063,147 +5848,30 @@ class MainWindow(QMainWindow):
         self._schedule_pending_close_retry()
 
     def _start_sep_extract(self, roi: ROISelection) -> None:
-        """Run a count-estimate pre-pass, then the full SEP extraction on confirm."""
-
-        prepared = self._prepare_sep_run(roi)
-        if prepared is None:
-            return
-        normalized_roi, subarray, params, wcs = prepared
-
-        if not self._should_run_sep_estimate(normalized_roi):
-            self._sep_pending_extract_roi = None
-            self._launch_sep_worker(
-                subarray=subarray,
-                roi=normalized_roi,
-                params=params,
-                wcs=wcs,
-                estimate_only=False,
-                status_text=self.tr("Running SEP extraction on {width}x{height} ROI...").format(
-                    width=normalized_roi.width,
-                    height=normalized_roi.height,
-                ),
-            )
-            return
-
-        self._sep_pending_extract_roi = normalized_roi
-        self._launch_sep_worker(
-            subarray=subarray,
-            roi=normalized_roi,
-            params=params,
-            wcs=wcs,
-            estimate_only=True,
-            status_text=self.tr("Estimating SEP source count on {width}x{height} ROI...").format(
-                width=normalized_roi.width,
-                height=normalized_roi.height,
-            ),
-        )
+        self._start_sep_workflow(roi, full=False)
 
     def _start_sep_extract_full(self, roi: ROISelection) -> None:
-        """Start the real SEP extraction without the estimate pre-pass."""
+        self._start_sep_workflow(roi, full=True)
 
-        prepared = self._prepare_sep_run(roi)
-        if prepared is None:
-            return
-        normalized_roi, subarray, params, wcs = prepared
+    def _start_sep_workflow(self, roi: ROISelection, *, full: bool) -> None:
+        self._sync_sep_controller_context()
+        params = self.sep_panel.params_from_form_state() if self.sep_panel else self.sep_service.params
+        self._sep_controller.start(self.fits_service.current_data, roi, params, full=full)
 
-        self._sep_pending_extract_roi = None
-        self._launch_sep_worker(
-            subarray=subarray,
-            roi=normalized_roi,
-            params=params,
-            wcs=wcs,
-            estimate_only=False,
-            status_text=self.tr("Running SEP extraction on {width}x{height} ROI...").format(
-                width=normalized_roi.width,
-                height=normalized_roi.height,
-            ),
-        )
-
-    def _prepare_sep_run(
-        self, roi: ROISelection
-    ) -> tuple[ROISelection, np.ndarray, SEPParameters, Any] | None:
-        """Validate state and clip the ROI; returns (roi, subarray, params, wcs)."""
-
-        if self._is_sep_extract_running():
+    def _handle_sep_validation_failed(self, reason: str) -> None:
+        if reason == "busy":
             if self.app_status_bar is not None:
                 self.app_status_bar.showMessage(self.tr("SEP extraction is already running."), 3000)
-            return None
-
-        data = self.fits_service.current_data
-        if data is None or data.data is None:
+        elif reason == "no_data":
             self.show_error(self.tr("SEP"), self.tr("No FITS image loaded."))
-            return None
-
-        h, w = data.data.shape[:2]
-        x0 = max(0, min(roi.x0, w))
-        y0 = max(0, min(roi.y0, h))
-        x1 = max(x0, min(roi.x0 + roi.width, w))
-        y1 = max(y0, min(roi.y0 + roi.height, h))
-        if x1 <= x0 or y1 <= y0:
+        elif reason == "empty_roi":
             self.show_error(self.tr("SEP"), self.tr("Selected ROI is empty."))
-            return None
 
-        normalized_roi = ROISelection(x0=x0, y0=y0, width=x1 - x0, height=y1 - y0)
-        source_slice = data.data[y0:y1, x0:x1]
-        params = self.sep_panel.params_from_form_state() if self.sep_panel else self.sep_service.params
-        return normalized_roi, source_slice, params, (data.wcs if data.has_wcs else None)
-
-    def _should_run_sep_estimate(self, roi: ROISelection) -> bool:
-        """Only run the estimate pre-pass for large ROIs where the warning matters."""
-
-        return (roi.width * roi.height) >= self.SEP_ESTIMATE_MIN_PIXELS
-
-    def _launch_sep_worker(
-        self,
-        *,
-        subarray: np.ndarray,
-        roi: ROISelection,
-        params: SEPParameters,
-        wcs: Any,
-        estimate_only: bool,
-        status_text: str,
-    ) -> None:
-        """Spin up the SEP worker thread for either an estimate pass or full extract."""
-
-        if self._is_closing:
-            return
-        self._sep_request_id += 1
-        request_id = self._sep_request_id
-        self._active_sep_request_id = request_id
-        self._active_sep_context_generation = self._sep_context_generation
-        self._active_sep_frame_index = self._current_frame_index
-        self._sep_is_estimate_phase = estimate_only
+    def _handle_sep_started(self, roi: ROISelection, estimate_only: bool) -> None:
         if not estimate_only:
             self.current_catalog = None
             self._catalog_results_stale = False
         self._clear_latest_error()
-
-        thread = QThread(self)
-        worker = SEPExtractWorker(
-            request_id=request_id,
-            data_subarray=subarray,
-            roi=roi,
-            params=params,
-            wcs=wcs,
-            estimate_only=estimate_only,
-            estimate_threshold=self.SEP_ESTIMATE_THRESHOLD_SIGMA if estimate_only else None,
-        )
-        self._sep_thread = thread
-        self._sep_worker = worker
-        finish_relay = _SEPThreadFinishRelay(self, request_id, thread, worker)
-        worker.moveToThread(thread)
-
-        thread.started.connect(worker.run)
-        worker.extraction_ready.connect(self._handle_sep_extraction_ready)
-        worker.estimation_ready.connect(self._handle_sep_estimation_ready)
-        worker.extraction_error.connect(self._handle_sep_extraction_error)
-        worker.finished.connect(self._handle_sep_extraction_finished)
-        worker.finished.connect(thread.quit)
-        worker.finished.connect(worker.deleteLater)
-        thread.finished.connect(finish_relay.handle_thread_finished)
-        thread.finished.connect(finish_relay.deleteLater)
-        thread.finished.connect(thread.deleteLater)
-
         if not estimate_only:
             if self.source_table_dock is not None:
                 self.source_table_dock.show()
@@ -6216,63 +5884,36 @@ class MainWindow(QMainWindow):
             if self.canvas is not None:
                 self.canvas.clear_sources()
                 self.canvas.set_overlay_state(self.build_canvas_overlay_state())
+        status_text = (
+            self.tr("Estimating SEP source count on {width}x{height} ROI...")
+            if estimate_only else self.tr("Running SEP extraction on {width}x{height} ROI...")
+        ).format(width=roi.width, height=roi.height)
         self._set_status_activity(
-            kind="sep",
-            text=status_text,
-            progress_value=0,
-            progress_max=0,
-            cancellable=True,
+            kind="sep", text=status_text, progress_value=0, progress_max=0, cancellable=True,
         )
         self.sync_sep_panel_state()
         self.sync_render_controls()
-        thread.start()
 
-    def _handle_sep_estimation_ready(self, request_id: int, roi: ROISelection, count: int) -> None:
-        """Process a count-estimate pre-pass and decide whether to run the full extraction."""
-
-        if not self._sep_request_matches_current_context(request_id):
-            return
-        pending_roi = self._sep_pending_extract_roi
-        self._sep_pending_extract_roi = None
-        if pending_roi is None:
-            return
-
-        params = self.sep_panel.params_from_form_state() if self.sep_panel else self.sep_service.params
-        user_thresh = max(float(params.thresh), 0.1)
-        area_mpx = max((pending_roi.width * pending_roi.height) / 1_000_000.0, 1e-6)
-        density = count / area_mpx
-        # Rough Gaussian-tail extrapolation: source counts roughly scale with (estimate/real)^2.
-        extrapolation_factor = (self.SEP_ESTIMATE_THRESHOLD_SIGMA / user_thresh) ** 2
-        extrapolated = int(round(count * extrapolation_factor))
-
-        dense = density >= self.SEP_DENSE_FIELD_PER_MPX
-        large = extrapolated >= self.SEP_LARGE_COUNT_WARNING
-        if not (dense or large):
-            self._sep_pending_launch_roi = self._pending_sep_action(pending_roi)
-            return
-
-        # Defer decision to the user via a non-modal status-bar prompt.
-        self._sep_confirm_pending_roi = self._pending_sep_action(pending_roi)
+    def _handle_sep_confirmation(self, estimate: SEPCountEstimate) -> None:
         if self.app_status_bar is not None:
-            crowded_hint = self.tr("crowded ") if dense else ""
+            crowded_hint = self.tr("crowded ") if estimate.dense else ""
             prompt = self.tr(
                 "SEP: {crowded_hint}field — {count} sources at {sigma}σ ({density}/Mpx), ~{expected} expected at {user_sigma}σ. Continue?"
             ).format(
                 crowded_hint=crowded_hint,
-                count=count,
-                sigma=f"{self.SEP_ESTIMATE_THRESHOLD_SIGMA:g}",
-                density=f"{density:.0f}",
-                expected=extrapolated,
-                user_sigma=f"{user_thresh:g}",
+                count=estimate.count,
+                sigma=f"{estimate.sigma:g}",
+                density=f"{estimate.density:.0f}",
+                expected=estimate.expected,
+                user_sigma=f"{estimate.user_sigma:g}",
             )
             self.app_status_bar.set_prompt(prompt)
 
     def _handle_sep_extraction_ready(self, request_id: int, roi: ROISelection, catalog: SourceCatalog) -> None:
-        """Accept a SEP extraction result if it still matches the latest request."""
+        self._sync_sep_controller_context()
+        self._sep_controller.handle_result(request_id, roi, catalog)
 
-        if not self._sep_request_matches_current_context(request_id):
-            return
-
+    def _handle_sep_result_accepted(self, roi: ROISelection, catalog: SourceCatalog) -> None:
         self._catalog_results_stale = False
         self.set_current_catalog(catalog)
         self.sync_catalog_views()
@@ -6290,23 +5931,16 @@ class MainWindow(QMainWindow):
             )
 
     def _handle_sep_extraction_error(self, request_id: int, detail: str) -> None:
-        """Report a SEP extraction failure if it still matches the latest request."""
+        self._sync_sep_controller_context()
+        self._sep_controller.handle_error(request_id, detail)
 
-        if not self._sep_request_matches_current_context(request_id):
-            return
-
-        self._clear_pending_sep_actions()
+    def _handle_sep_error_accepted(self, detail: str) -> None:
         self.show_error(self.tr("SEP extraction failed"), detail)
         if self.source_table_dock is not None:
             self.source_table_dock.set_view_state(self.build_table_view_state())
 
     def _handle_sep_extraction_finished(self, request_id: int) -> None:
-        """Observe worker completion while retaining identity until thread exit."""
-
-        # QThread.finished performs the authoritative cleanup. Clearing the
-        # active identity here opens a GUI-event window where a new worker can
-        # overwrite `_sep_thread` before the old cleanup consumes/invalidates
-        # its pending estimate action.
+        """Worker completion does not retire its still-owned QThread slot."""
         return
 
     def _apply_markers(self, entries: list) -> None:
@@ -6598,7 +6232,7 @@ class MainWindow(QMainWindow):
                 return rendered
         if self.canvas.current_image is None:
             raise RuntimeError(self.tr("No image is currently displayed on the canvas."))
-        return self.canvas.current_image
+        return self.canvas.render_raster_image()
 
     def _export_visual_image_to_png(self, path: str, *, with_annotations: bool) -> None:
         image = self._visual_image_for_export(with_annotations=with_annotations)
@@ -6906,6 +6540,7 @@ class MainWindow(QMainWindow):
         if params is not None:
             old = self.sep_service.params
             self.sep_service.params = params
+            self._sep_controller.set_parameters(params)
             if old != params and self.current_catalog is not None and len(self.current_catalog) > 0:
                 self._catalog_results_stale = True
                 if self.app_status_bar is not None:
@@ -7046,6 +6681,27 @@ class MainWindow(QMainWindow):
 
     # --- Frame management ---
 
+    def _render_spec_matches_controls(self, spec: ResolvedRenderSpec | None) -> bool:
+        return bool(
+            spec is not None
+            and spec.stretch_name == self.fits_service.current_stretch
+            and spec.interval_name == self.fits_service.current_interval
+            and (
+                spec.interval_name != "Manual"
+                or spec.limits == self.fits_service.manual_interval_limits
+            )
+        )
+
+    def _cache_frame_render(self, index: int, payload: Any) -> None:
+        frame = self._session[index]
+        if isinstance(payload, RenderResult):
+            frame.image = self._qimage_from_u8(payload.image_u8)
+            frame.sample_step = payload.sample_step
+            frame.resolved_spec = payload.resolved_spec
+        else:
+            frame.image = self._qimage_from_u8(payload)
+            frame.sample_step = 1
+
     def _qimage_from_u8(self, image_u8: Any) -> QImage | None:
         """Convert an 8-bit grayscale numpy image into a detached QImage."""
 
@@ -7167,13 +6823,13 @@ class MainWindow(QMainWindow):
     ) -> Any:
         """Render a cutout from the cached background or residual image."""
 
-        idx = self._current_frame_index
-        if not (0 <= idx < len(self._frames)):
+        idx = self._session.current_index
+        if not (0 <= idx < len(self._session)):
             return None
         substitute = (
-            self._frame_bkg_cache[idx]
+            self._session[idx].background
             if mode == SourceTableDock.CUTOUT_MODE_BACKGROUND
-            else self._frame_residual_cache[idx]
+            else self._session[idx].residual
         )
         if substitute is None or substitute.data is None:
             self._dispatch_bkg_worker(idx)
@@ -7234,12 +6890,9 @@ class MainWindow(QMainWindow):
         self._cancel_active_frame_renders(wait=False)
         self._render_request_index_by_id.clear()
         self._latest_render_request_by_index.clear()
-        for i in range(len(self._frames)):
-            self._frame_dirty[i] = True
-            if 0 <= i < len(self._frame_cached_preview_dim):
-                self._frame_cached_preview_dim[i] = 0
+        self._session.invalidate_renders()
         self._sync_current_canvas_image_state()
-        self._ensure_frame_rendered(self._current_frame_index)
+        self._ensure_frame_rendered(self._session.current_index)
         if self._is_playback_active():
             self._build_playback_render_queue()
             self._pump_playback_render_queue()
@@ -7247,9 +6900,9 @@ class MainWindow(QMainWindow):
     def _ensure_frame_rendered(self, index: int) -> None:
         """Schedule background rendering for a dirty frame."""
 
-        if index < 0 or index >= len(self._frames):
+        if index < 0 or index >= len(self._session):
             return
-        if not self._frame_dirty[index]:
+        if not self._session[index].dirty:
             return
         self._schedule_frame_render(index)
 
@@ -7264,22 +6917,22 @@ class MainWindow(QMainWindow):
                 return
 
         candidate_indices: list[int] = []
-        if 0 <= self._current_frame_index < len(self._frames):
-            candidate_indices.append(self._current_frame_index)
+        if 0 <= self._session.current_index < len(self._session):
+            candidate_indices.append(self._session.current_index)
         candidate_indices.extend(
-            index for index in range(len(self._frames))
-            if index != self._current_frame_index
+            index for index in range(len(self._session))
+            if index != self._session.current_index
         )
 
         for index in candidate_indices:
-            if 0 <= index < len(self._frame_dirty) and self._frame_dirty[index]:
+            if 0 <= index < len(self._session) and self._session[index].dirty:
                 self._schedule_frame_render(index)
                 return
 
     def _activate_frame(self, index: int) -> None:
         """Switch to frame at index: update service, canvas, title, controls."""
 
-        if index < 0 or index >= len(self._frames):
+        if index < 0 or index >= len(self._session):
             return
 
         playing = self._is_playback_active()
@@ -7299,8 +6952,8 @@ class MainWindow(QMainWindow):
             self.source_table_dock.set_row_view_models([])
             self.source_table_dock.clear_cutout_image()
 
-        self._current_frame_index = index
-        data = self._frames[index]
+        self._session.current_index = index
+        data = self._session[index].data
         self.fits_service.current_data = data
         if self.measurement_dock is not None and data.data is not None:
             height, width = data.data.shape[:2]
@@ -7308,8 +6961,8 @@ class MainWindow(QMainWindow):
         self._sync_wcs_catalog_state()
 
         label = data.path or f"Frame {index}"
-        if len(self._frames) > 1:
-            self._set_window_title(f"{label} [{index + 1}/{len(self._frames)}]")
+        if len(self._session) > 1:
+            self._set_window_title(f"{label} [{index + 1}/{len(self._session)}]")
         else:
             self._set_window_title(label)
 
@@ -7321,7 +6974,7 @@ class MainWindow(QMainWindow):
             # skip expensive histogram, session persistence, SEP panel, and source
             # table refreshes to keep the UI responsive.
             if self.app_status_bar is not None:
-                self.app_status_bar.set_frame_info(index, len(self._frames))
+                self.app_status_bar.set_frame_info(index, len(self._session))
             self._ensure_frame_rendered(index)
             return
 
@@ -7330,12 +6983,12 @@ class MainWindow(QMainWindow):
         if self.canvas is not None:
             self.canvas.set_image_state(self.build_canvas_image_state())
             self.canvas.set_overlay_state(self.build_canvas_overlay_state())
-            if len(self._frames) == 1:
+            if len(self._session) == 1:
                 self.canvas.show_actual_pixels()
                 self.canvas.centerOn(self.canvas._pixmap_item)
 
         if self.app_status_bar is not None:
-            self.app_status_bar.set_frame_info(index, len(self._frames))
+            self.app_status_bar.set_frame_info(index, len(self._session))
 
         self.sync_sep_panel_state()
         if self.source_table_dock is not None:
@@ -7347,13 +7000,9 @@ class MainWindow(QMainWindow):
         self._persist_session_state()
 
     def _show_current_frame_image(self) -> None:
-        """Push the cached QImage for the current frame into the canvas."""
-
-        if self.canvas is None:
+        """Display a cached texture in the original scientific coordinate grid."""
+        if self.canvas is None or self._comparison_active:
             return
-        if self._comparison_active:
-            return
-
         if self._is_composite_frame_layout_active():
             image = self._build_composite_frame_image()
             if image is None:
@@ -7361,37 +7010,58 @@ class MainWindow(QMainWindow):
                 return
             self._set_canvas_image_preserving_view(image)
             return
-        idx = self._current_frame_index
-        if 0 <= idx < len(self._frame_images):
-            img = self._frame_images[idx]
-            if img is None:
-                self.canvas.clear_image()
-                return
-            self._set_canvas_image_preserving_view(self._orient_qimage(img))
-        else:
+        index = self._session.current_index
+        if not 0 <= index < len(self._session) or self._session[index].image is None:
             self.canvas.clear_image()
+            return
+        frame = self._session[index]
+        image = self._orient_qimage(frame.image)
+        if frame.sample_step > 1:
+            logical_size = self._frame_display_shape(index)
+            self._set_canvas_image_preserving_view(
+                image, logical_size=logical_size, sample_step=frame.sample_step,
+                sampling_offset=self._sampled_image_offset(image, logical_size, frame.sample_step),
+            )
+        else:
+            self._set_canvas_image_preserving_view(image)
 
-    def _set_canvas_image_preserving_view(self, image: QImage) -> None:
-        """Swap the canvas image while keeping the user's pan/zoom stable.
+    def _sampled_image_offset(
+        self, image: QImage, logical_size: tuple[int, int], step: int,
+    ) -> tuple[float, float]:
+        # Flip the cropped final block along with its texture, including after
+        # transpose. This exactly matches repeat -> crop -> orient at full size.
+        return (
+            logical_size[0] - image.width() * step if self._orientation[0] else 0.0,
+            logical_size[1] - image.height() * step if self._orientation[1] else 0.0,
+        )
 
-        When the new pixmap has the same dimensions as the current one the
-        scene rect and transform are unchanged, so we can skip the
-        ``capture_view_state`` / ``restore_view_state`` round-trip. That
-        round-trip introduces sub-pixel scrollbar rounding that accumulates
-        as a visible drift when playback swaps many same-size frames.
+    def _set_canvas_image_preserving_view(
+        self, image: QImage, *, logical_size: tuple[int, int] | None = None,
+        sample_step: int = 1, sampling_offset: tuple[float, float] = (0.0, 0.0),
+    ) -> None:
+        """Preserve the viewport across texture changes with the same extent.
+
+        Comparing scientific dimensions also keeps a sampled preview -> full
+        render transition from repeating Qt's lossy centerOn round trip.
         """
-
-        current_pixmap = self.canvas._pixmap_item.pixmap()
+        options = {} if logical_size is None else {
+            "logical_size": logical_size, "sample_step": sample_step,
+            "sampling_offset": sampling_offset,
+        }
+        desired = logical_size
+        if desired is None and isinstance(image, QImage):
+            desired = (image.width(), image.height())
+        item = self.canvas._pixmap_item
+        current_rect = item.boundingRect()
         same_size = (
-            not current_pixmap.isNull()
-            and current_pixmap.width() == image.width()
-            and current_pixmap.height() == image.height()
+            not item.pixmap().isNull() and desired is not None
+            and current_rect.width() == desired[0] and current_rect.height() == desired[1]
         )
         if same_size:
-            self.canvas.set_image(image)
+            self.canvas.set_image(image, **options)
             return
         view_state = self.canvas.capture_view_state()
-        self.canvas.set_image(image)
+        self.canvas.set_image(image, **options)
         self.canvas.restore_view_state(view_state)
 
     def _sync_current_canvas_image_state(self) -> None:
@@ -7404,22 +7074,22 @@ class MainWindow(QMainWindow):
     def _is_frame_rendering(self, index: int) -> bool:
         """Return whether the given frame still has a background render pending."""
 
-        return 0 <= index < len(self._frame_dirty) and self._frame_dirty[index]
+        return 0 <= index < len(self._session) and self._session[index].dirty
 
     def _current_frame_has_preview_image(self) -> bool:
         """Return whether the active frame already has a visible preview image."""
 
-        idx = self._current_frame_index
-        return 0 <= idx < len(self._frame_images) and self._frame_images[idx] is not None
+        idx = self._session.current_index
+        return 0 <= idx < len(self._session) and self._session[idx].image is not None
 
     def _sync_frame_player(self) -> None:
         """Update frame player dock state and visibility."""
 
         if self.frame_player_dock is None:
             return
-        count = len(self._frames)
+        count = len(self._session)
         self.frame_player_dock.set_frame_count(count)
-        self.frame_player_dock.set_current_frame(self._current_frame_index)
+        self.frame_player_dock.set_current_frame(self._session.current_index)
         if count > 1:
             self.frame_player_dock.show()
         else:
@@ -7433,8 +7103,8 @@ class MainWindow(QMainWindow):
         if self.frame_player_dock is None:
             return
 
-        index = self._current_frame_index
-        has_frames = 0 <= index < len(self._frames)
+        index = self._session.current_index
+        has_frames = 0 <= index < len(self._session)
         is_rendering = has_frames and self._is_frame_rendering(index) and not self._is_playback_active()
         has_preview = has_frames and self._current_frame_has_preview_image()
         self.frame_player_dock.set_render_state(is_rendering, has_preview=has_preview)
@@ -7442,7 +7112,7 @@ class MainWindow(QMainWindow):
     def _switch_frame(self, index: int) -> None:
         """Handle frame change signal from the player dock."""
 
-        self._update_frame_step_direction(self._current_frame_index, index)
+        self._update_frame_step_direction(self._session.current_index, index)
         self._activate_frame(index)
         if self.frame_player_dock is not None:
             self.frame_player_dock.set_current_frame(index)
@@ -7459,7 +7129,7 @@ class MainWindow(QMainWindow):
         if next_index == previous_index:
             return
 
-        last_index = len(self._frames) - 1
+        last_index = len(self._session) - 1
         if previous_index == last_index and next_index == 0:
             self._frame_step_direction = 1
         elif previous_index == 0 and next_index == last_index:
@@ -7470,11 +7140,11 @@ class MainWindow(QMainWindow):
     def _preferred_adjacent_frame_index(self) -> int | None:
         """Return the most likely next frame to view, if any."""
 
-        count = len(self._frames)
+        count = len(self._session)
         if count < 2:
             return None
 
-        candidate = self._current_frame_index + self._frame_step_direction
+        candidate = self._session.current_index + self._frame_step_direction
         last_index = count - 1
 
         if 0 <= candidate <= last_index:
@@ -7484,7 +7154,7 @@ class MainWindow(QMainWindow):
             return None
 
         if self.frame_player_dock.bounce_btn.isChecked():
-            bounce_candidate = self._current_frame_index - self._frame_step_direction
+            bounce_candidate = self._session.current_index - self._frame_step_direction
             if 0 <= bounce_candidate <= last_index:
                 return bounce_candidate
             return None
@@ -7503,7 +7173,7 @@ class MainWindow(QMainWindow):
         if self._view_mode != "original" and not self._frame_bkg_cached(candidate):
             self._dispatch_bkg_worker(candidate)
             return
-        if not self._frame_dirty[candidate]:
+        if not self._session[candidate].dirty:
             return
         self._schedule_frame_render(candidate)
 
@@ -7609,13 +7279,13 @@ class MainWindow(QMainWindow):
         super().closeEvent(event)
 
     def _go_prev_frame(self) -> None:
-        count = len(self._frames)
+        count = len(self._session)
         if count > 1:
             self._pause_playback_for_manual_frame_navigation()
-            self._switch_frame((self._current_frame_index - 1) % count)
+            self._switch_frame((self._session.current_index - 1) % count)
 
     def _go_next_frame(self) -> None:
-        count = len(self._frames)
+        count = len(self._session)
         if count > 1:
             self._pause_playback_for_manual_frame_navigation()
-            self._switch_frame((self._current_frame_index + 1) % count)
+            self._switch_frame((self._session.current_index + 1) % count)

@@ -151,7 +151,7 @@ for dll_name in [
 ]:
     _require_binary([pyside_package_dir, qt_bin], dll_name)
 
-_require_binary_glob([pyside_package_dir, qt_bin], "pyside6*.dll")
+_require_binary_glob([pyside_package_dir, qt_bin], "pyside6.*.dll")
 
 for dll_name in [
     "concrt140.dll",
@@ -249,10 +249,18 @@ binaries = unique_binaries
 
 
 datas = []
-runtime_icon = spec_dir / "resources" / "icons" / "main_icon.png"
-if not runtime_icon.is_file():
-    raise FileNotFoundError(f"Required runtime icon is missing: {runtime_icon}")
-datas.append((str(runtime_icon), "astroview/resources/icons"))
+runtime_icon_names = [
+    "main_icon.ico",
+    "spinbox_arrow_up_light.png",
+    "spinbox_arrow_down_light.png",
+    "spinbox_arrow_up_dark.png",
+    "spinbox_arrow_down_dark.png",
+]
+for runtime_icon_name in runtime_icon_names:
+    runtime_icon = spec_dir / "resources" / "icons" / runtime_icon_name
+    if not runtime_icon.is_file():
+        raise FileNotFoundError(f"Required runtime icon is missing: {runtime_icon}")
+    datas.append((str(runtime_icon), "astroview/resources/icons"))
 version_file = spec_dir / "VERSION"
 if not version_file.is_file():
     raise FileNotFoundError(f"Required VERSION file is missing: {version_file}")
@@ -422,11 +430,11 @@ _strip_patterns = [
 ]
 
 _strip_exact_binaries = {
+    # Keep the ICO image-format plugin for the runtime application icon.
     "qcertonlybackend.dll",
     "qdirect2d.dll",
     "qgif.dll",
     "qicns.dll",
-    "qico.dll",
     "qjpeg.dll",
     "qminimal.dll",
     "qmodernwindowsstyle.dll",

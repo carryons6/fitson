@@ -1,5 +1,8 @@
 # Project documentation
 
+[`architecture.md`](architecture.md) describes frame ownership, controller
+lifecycles, scientific coordinates, sampled previews and regression checks.
+
 Active follow-up work is tracked in [`../TODO_NEXT.md`](../TODO_NEXT.md). Keep
 that file limited to work that is still relevant after the latest release.
 

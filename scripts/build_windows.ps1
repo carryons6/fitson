@@ -194,6 +194,7 @@ function Invoke-BundledSmokeAttempt {
         Remove-Item -LiteralPath $ReportPath -Force
     }
 
+    $startupTimer = [Diagnostics.Stopwatch]::StartNew()
     $process = Start-Process `
         -FilePath $BundledExePath `
         -ArgumentList "--smoke-test" `
@@ -236,6 +237,8 @@ function Invoke-BundledSmokeAttempt {
     if ($process.ExitCode -ne 0 -or -not $report.StartsWith("OK ")) {
         throw "Bundled executable $AttemptName smoke test failed with exit code $($process.ExitCode).`n$report"
     }
+    $startupTimer.Stop()
+    return [math]::Round($startupTimer.Elapsed.TotalMilliseconds, 1)
 }
 
 function Invoke-BundledSmokeTest {
@@ -255,16 +258,31 @@ function Invoke-BundledSmokeTest {
     try {
         # The first launch covers cold endpoint scanning; the second proves
         # that normal warmed startup still stays within the strict budget.
-        Invoke-BundledSmokeAttempt `
+        $coldStartMilliseconds = Invoke-BundledSmokeAttempt `
             -BundledExePath $bundledExePath `
             -ReportPath $reportPath `
             -AttemptName "cold-start" `
             -TimeoutMilliseconds 300000
-        Invoke-BundledSmokeAttempt `
+        $warmStartMilliseconds = Invoke-BundledSmokeAttempt `
             -BundledExePath $bundledExePath `
             -ReportPath $reportPath `
             -AttemptName "warm-start" `
             -TimeoutMilliseconds 60000
+
+        $timingPath = Join-Path $reportDir "startup-timings.json"
+        $timingRecord = [ordered]@{
+            measuredAtUtc = [DateTime]::UtcNow.ToString("o")
+            artifactSha256 = (Get-FileHash -LiteralPath $bundledExePath -Algorithm SHA256).Hash.ToLowerInvariant()
+            coldStartMilliseconds = $coldStartMilliseconds
+            warmStartMilliseconds = $warmStartMilliseconds
+        }
+        $timingJson = $timingRecord | ConvertTo-Json
+        $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+        [System.IO.File]::WriteAllText($timingPath, $timingJson + "`n", $utf8NoBom)
+        Write-Host (
+            "Bundled startup smoke: cold-start={0:N1} ms, warm-start={1:N1} ms" -f `
+                $coldStartMilliseconds, $warmStartMilliseconds
+        )
     }
     finally {
         [Environment]::SetEnvironmentVariable("ASTROVIEW_SMOKE_REPORT", $previousReportPath, "Process")

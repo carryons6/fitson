@@ -13,6 +13,7 @@ from unittest.mock import Mock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import QApplication
 
 REPO_PARENT = Path(__file__).resolve().parents[2]
@@ -136,6 +137,33 @@ class TestMainEntry(unittest.TestCase):
 
         self.assertTrue(args.smoke_test)
         self.assertNotIn("--smoke-test", parser.format_help())
+
+    def test_application_icon_uses_compact_multiresolution_ico(self) -> None:
+        icon_path = main_module._application_icon_path()
+
+        self.assertEqual(icon_path.name, "main_icon.ico")
+        self.assertTrue(icon_path.is_file())
+
+    def test_smoke_rejects_icon_that_cannot_decode_required_pixmap(self) -> None:
+        for missing_size in (16, 32):
+            with self.subTest(missing_size=missing_size):
+                icon = Mock()
+                icon.isNull.return_value = False
+                icon.pixmap.side_effect = lambda width, height: (
+                    QPixmap() if width == missing_size else QPixmap(width, height)
+                )
+                with (
+                    patch.object(main_module, "QIcon", return_value=icon),
+                    patch.object(main_module, "apply_theme"),
+                    patch.object(main_module, "_write_smoke_report") as report,
+                    patch("astroview.app.release_smoke.run_moving_target_spawn_smoke") as spawn,
+                ):
+                    self.assertEqual(main_module.run_smoke_test(), 1)
+                spawn.assert_not_called()
+                reports = [call.args[0] for call in report.call_args_list]
+                self.assertTrue(reports[-1].startswith("FAILED\n"))
+                self.assertIn(f"cannot be decoded at {missing_size}x{missing_size}", reports[-1])
+                self.assertFalse(any(message.startswith("OK ") for message in reports))
 
     def test_main_smoke_test_bypasses_normal_gui_startup(self) -> None:
         parser = Mock()

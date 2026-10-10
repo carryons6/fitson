@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests.frame_session_fixtures import set_session_field
+
 import os
 import unittest
 from unittest.mock import Mock
@@ -80,15 +82,15 @@ class TestComparisonMainWindow(unittest.TestCase):
         window.initialize(apply_startup_request=False)
         left = FITSData(path="left.fits", data=np.arange(12, dtype=float).reshape(3, 4))
         right = FITSData(path="right.fits", data=np.arange(12, dtype=float).reshape(3, 4) + 2.0)
-        window._frames = [left, right]
-        window._frame_images = [
+        set_session_field(window, 'data', [left, right])
+        set_session_field(window, 'image', [
             QImage(4, 3, QImage.Format.Format_Grayscale8),
             QImage(4, 3, QImage.Format.Format_Grayscale8),
-        ]
-        window._frame_dirty = [False, False]
-        window._frame_bkg_cache = [None, None]
-        window._frame_residual_cache = [None, None]
-        window._frame_cached_preview_dim = [0, 0]
+        ])
+        set_session_field(window, 'dirty', [False, False])
+        set_session_field(window, 'background', [None, None])
+        set_session_field(window, 'residual', [None, None])
+        set_session_field(window, 'preview_dimension', [0, 0])
         window.fits_service.current_data = left
         window._comparison_left_index = 0
         window._comparison_right_index = 1
@@ -102,8 +104,8 @@ class TestComparisonMainWindow(unittest.TestCase):
         window._active_comparison_request_id = 9
         window._comparison_results_enabled = True
         core_result = compare_fits_images(
-            window._frames[0],
-            window._frames[1],
+            window._session[0].data,
+            window._session[1].data,
             mode="side_by_side",
             alignment="pixel",
         )
@@ -132,8 +134,8 @@ class TestComparisonMainWindow(unittest.TestCase):
         window._active_comparison_request_id = 3
         window._comparison_results_enabled = True
         result = compare_fits_images(
-            window._frames[0],
-            window._frames[1],
+            window._session[0].data,
+            window._session[1].data,
             mode=ComparisonMode.BLINK,
             alignment="pixel",
         )
@@ -166,7 +168,7 @@ class TestComparisonMainWindow(unittest.TestCase):
         window._comparison_thread = thread
         window._active_comparison_request_id = 12
         window._comparison_results_enabled = True
-        result = compare_fits_images(window._frames[0], window._frames[1])
+        result = compare_fits_images(window._session[0].data, window._session[1].data)
         display = ComparisonDisplayResult(
             result=result,
             left_u8=np.zeros((3, 4), dtype=np.uint8),

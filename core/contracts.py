@@ -23,14 +23,33 @@ class RenderRequest:
     manual_vmax: float | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class ResolvedRenderSpec:
+    """One brightness mapping shared by every display stage of a frame.
+
+    ``limits=None`` means that no finite display range could be resolved;
+    equal limits describe a constant frame. Both render as black.
+    """
+
+    stretch_name: str
+    interval_name: str
+    limits: tuple[float, float] | None
+
+
 @dataclass(slots=True)
 class RenderResult:
-    """Display-oriented render output produced by FITSService."""
+    """Display pixels and their original image-space dimensions.
+
+    A sampled preview may contain fewer pixels than ``width`` / ``height``.
+    ``sample_step`` is the source stride used to create that preview.
+    """
 
     image_u8: np.ndarray | None
     width: int = 0
     height: int = 0
     invalid_pixels: bool = False
+    sample_step: int = 1
+    resolved_spec: ResolvedRenderSpec | None = None
 
 
 @dataclass(slots=True)

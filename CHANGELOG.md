@@ -2,6 +2,51 @@
 
 ## Unreleased
 
+## 1.11.0 - 2026-10-10
+
+### English
+
+#### Changed
+- Grouped each frame's dataset, display texture and derived caches in `FrameSession`.
+- Extracted file-loading, SEP workflow and comparison task ownership into controllers with shared
+  cancellation, stale-result rejection and thread-retirement rules.
+- Extracted pure image-coordinate transforms and dedicated canvas overlay layers.
+- Unified interval resolution in an immutable render specification shared by
+  previews, full rendering and histogram display.
+- Kept preview textures sampled in the desktop pipeline while retaining scientific
+  coordinates, exact cropped edge blocks, magnifier behavior and export dimensions.
+- Replaced runtime-generated theme arrows with packaged PNG resources and used the
+  compact multi-resolution application icon at startup.
+- Recorded cold/warm frozen-app smoke-test timings alongside build diagnostics.
+- Extended release smoke tests to run the real moving-target spawn pipeline and
+  verify that the packaged application icon can be decoded.
+
+#### Fixed
+- Preserve zoom and pan when sampled previews are replaced by full-resolution images.
+- Ignore late loader previews using outdated display controls, and use displayed
+  background/residual data for histogram ranges.
+- Finish SEP cancellation feedback immediately when its worker already stopped,
+  instead of leaving a permanent cancelling indicator after delayed cleanup.
+
+### 简体中文
+
+#### 变更
+- 使用 `FrameSession` 统一管理每帧科学数据、显示纹理与派生缓存。
+- 将文件加载、SEP 工作流与图像比较的请求及 worker 生命周期移入专用控制器，
+  共享取消、过期结果拒绝与线程退出规则。
+- 提取独立的图像坐标变换与画布叠加层管理模块。
+- 用不可变的显示参数统一预览、完整图像与直方图的区间计算。
+- 在桌面显示流程中保留低分辨率预览纹理，同时维持原图科学坐标、奇数尺寸边缘裁剪、
+  放大镜行为及导出尺寸。
+- 将运行时生成的主题箭头改为随程序打包的 PNG 资源，启动时使用紧凑的多分辨率图标。
+- 在构建诊断中记录冻结程序冷启动与热启动 smoke test 耗时。
+- 发布 smoke test 运行真实动目标 spawn 流程，并验证打包后的应用图标可以正常解码。
+
+#### 修复
+- 在低分辨率预览替换为完整图像时保留缩放和平移状态。
+- 拒绝使用旧显示设置生成的延迟加载预览，并根据实际显示的背景或残差数据更新直方图。
+- SEP worker 已停止时立即结束取消反馈，避免延迟清理后仍永久显示“正在取消”。
+
 ## 1.10.0 - 2026-07-28
 
 ### English

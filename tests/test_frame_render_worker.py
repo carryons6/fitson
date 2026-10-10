@@ -4,6 +4,8 @@ import os
 import unittest
 from unittest.mock import patch
 
+import numpy as np
+
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QEventLoop, QThread, QTimer
@@ -17,6 +19,7 @@ if str(REPO_PARENT) not in sys.path:
     sys.path.insert(0, str(REPO_PARENT))
 
 from astroview.app.frame_render_worker import FrameRenderWorker
+from astroview.core.contracts import RenderResult, ResolvedRenderSpec
 from astroview.core.fits_data import FITSData
 
 
@@ -32,6 +35,86 @@ class TestFrameRenderWorker(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls._app = QApplication.instance() or QApplication([])
+
+    def test_sampled_previews_keep_logical_extent_and_match_full_render(self) -> None:
+        worker = FrameRenderWorker(
+            request_id=4,
+            generation=2,
+            frame_index=1,
+            data=FITSData(data=np.arange(35, dtype=np.float32).reshape(5, 7)),
+            stretch_name="Linear",
+            interval_name="Original",
+            preview_dimensions=(2, 3),
+            sampled_previews=True,
+        )
+        previews = []
+        renders = []
+        worker.preview_ready.connect(lambda req, gen, idx, image: previews.append(image))
+        worker.render_ready.connect(lambda req, gen, idx, image: renders.append(image))
+
+        with patch("astroview.app.frame_render_worker.QThread.currentThread", return_value=_FakeThread()):
+            worker.run()
+
+        self.assertEqual(len(previews), 2)
+        self.assertEqual(len(renders), 1)
+        full = renders[0]
+        self.assertIsInstance(full, RenderResult)
+        self.assertEqual((full.width, full.height, full.sample_step), (7, 5, 1))
+        for preview in previews:
+            self.assertIsInstance(preview, RenderResult)
+            self.assertEqual((preview.width, preview.height), (7, 5))
+            step = preview.sample_step
+            np.testing.assert_array_equal(preview.image_u8, full.image_u8[::step, ::step])
+            self.assertIs(preview.resolved_spec, full.resolved_spec)
+        self.assertIs(previews[0].resolved_spec, previews[1].resolved_spec)
+
+    def test_cached_loading_spec_is_reused_for_preview_and_final_without_estimation(self) -> None:
+        spec = ResolvedRenderSpec("Linear", "Original", (0.0, 100.0))
+        worker = FrameRenderWorker(
+            request_id=1, generation=1, frame_index=0,
+            data=FITSData(data=np.arange(35, dtype=np.float32).reshape(5, 7)),
+            stretch_name="Linear", interval_name="Original", preview_dimensions=(3,),
+            sampled_previews=True, resolved_spec=spec,
+        )
+        previews = []
+        renders = []
+        errors = []
+        worker.preview_ready.connect(lambda req, gen, idx, image: previews.append(image))
+        worker.render_ready.connect(lambda req, gen, idx, image: renders.append(image))
+        worker.render_error.connect(lambda req, gen, idx, detail: errors.append(detail))
+
+        with patch("astroview.app.frame_render_worker.compute_interval_limits", side_effect=AssertionError("recomputed")) as compute_mock:
+            worker.run()
+
+        self.assertEqual(errors, [])
+        compute_mock.assert_not_called()
+        self.assertEqual((len(previews), len(renders)), (1, 1))
+        self.assertIs(previews[0].resolved_spec, spec)
+        self.assertIs(renders[0].resolved_spec, spec)
+        self.assertEqual(renders[0].sample_step, 1)
+        # The pre-existing 0..100 mapping remains, even though this frame's
+        # brightest source pixel is 34 and re-estimation would turn it white.
+        self.assertEqual(renders[0].image_u8[-1, -1], 86)
+
+    def test_constant_and_empty_limits_are_resolved_once_without_manual_conversion(self) -> None:
+        for limits in ((7.0, 7.0), None):
+            with self.subTest(limits=limits):
+                worker = FrameRenderWorker(
+                    request_id=1, generation=1, frame_index=0,
+                    data=FITSData(data=np.ones((4, 4))),
+                    stretch_name="Linear", interval_name="Original",
+                    preview_dimensions=(1, 2),
+                )
+                with patch("astroview.app.frame_render_worker.compute_interval_limits", return_value=limits) as interval_mock:
+                    with patch("astroview.app.frame_render_worker.render_preview_u8", return_value=None) as preview_mock:
+                        with patch("astroview.app.frame_render_worker.render_image_u8", return_value=None) as full_mock:
+                            worker.run()
+                interval_mock.assert_called_once()
+                spec = full_mock.call_args.kwargs["resolved_spec"]
+                self.assertEqual(spec.interval_name, "Original")
+                self.assertEqual(spec.limits, limits)
+                for call in preview_mock.call_args_list:
+                    self.assertIs(call.kwargs["resolved_spec"], spec)
 
     def test_run_emits_multi_stage_previews_then_full_render(self) -> None:
         worker = FrameRenderWorker(

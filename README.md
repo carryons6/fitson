@@ -146,7 +146,7 @@ rejected before decompression; safely decompress those files first.
 
 ### Windows release installer
 
-Download `AstroView_Setup_1.10.0.exe` and `SHA256SUMS.txt` from the
+Download `AstroView_Setup_1.11.0.exe` and `SHA256SUMS.txt` from the
 [GitHub Releases page](https://github.com/carryons6/fitson/releases). The
 Windows installer is **not Authenticode-signed**, so Windows SmartScreen may
 display a warning. Verify the installer against the release checksum before
@@ -202,6 +202,10 @@ hashes before using them.
   - `contracts.py`: typed dataclasses shared across layers
 
 - **`app/`**: PySide6 UI layer
+  - `frame_session.py`: per-frame dataset, display texture and derived-cache ownership
+  - `file_load_controller.py`, `sep_controller.py`, `comparison_controller.py`: feature requests and lifecycles
+  - `task_lifecycle.py`: shared request validity and physical worker ownership
+  - `canvas_layers.py`, `image_item.py`: overlay ownership and sampled textures in scientific coordinates
   - `main_window.py`: composition root for UI, controllers, workers, and services
   - `canvas.py`: QGraphicsView-based image display with overlays
   - `file_load_worker.py`: background FITS file loading worker
@@ -219,6 +223,9 @@ hashes before using them.
   - `moving_target_worker.py`: cancellable subprocess adapter for SEP-heavy sequence analysis
   - `header_dialog.py`: FITS header viewer dialog
   - `status_bar.py`: cursor/zoom/frame status display
+
+See [Application boundaries](docs/architecture.md) for coordinate, preview and
+task-lifecycle contracts and their regression checks.
 
 `MainWindow` remains the cross-feature composition root, while focused controllers
 own feature-local state and worker lifecycles. View modules emit signals and expose

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests.frame_session_fixtures import set_session_field
+
 import gzip
 import os
 import threading
@@ -33,7 +35,7 @@ from astroview.app.main_window import (
     _UpdateCheckSignalRelay,
 )
 from astroview.app.update_check_worker import UpdateCheckResult
-from astroview.core.contracts import ROISelection
+from astroview.core.contracts import ROISelection, RenderResult
 from astroview.core.sep_service import SEPParameters
 from astroview.core.fits_data import FITSData
 from astroview.core.source_catalog import SourceCatalog, SourceRecord
@@ -515,10 +517,10 @@ class TestMainWindowLoading(unittest.TestCase):
         window = MainWindow()
         window.canvas = Mock()
         window.fits_service.current_data = FITSData(path="frame.fits", data=np.zeros((2, 2)))
-        window._frames = [window.fits_service.current_data]
-        window._frame_images = ["old-image"]
-        window._frame_dirty = [False]
-        window._current_frame_index = 0
+        set_session_field(window, 'data', [window.fits_service.current_data])
+        set_session_field(window, 'image', ["old-image"])
+        set_session_field(window, 'dirty', [False])
+        window._session.current_index = 0
         window._render_generation = 4
         window._render_request_index_by_id = {9: 0}
         window._latest_render_request_by_index = {0: 9}
@@ -530,7 +532,7 @@ class TestMainWindowLoading(unittest.TestCase):
                         window._handle_interval_changed("99%")
 
             self.assertEqual(window._render_generation, 6)
-            self.assertEqual(window._frame_dirty, [True])
+            self.assertEqual([frame.dirty for frame in window._session], [True])
             self.assertEqual(window._render_request_index_by_id, {})
             self.assertEqual(window._latest_render_request_by_index, {})
             self.assertEqual(cancel_mock.call_count, 2)
@@ -545,10 +547,10 @@ class TestMainWindowLoading(unittest.TestCase):
         window = MainWindow()
         window.canvas = Mock()
         window.fits_service.current_data = FITSData(path="frame.fits", data=np.zeros((2, 2)))
-        window._frames = [window.fits_service.current_data]
-        window._frame_images = ["fresh-image"]
-        window._frame_dirty = [False]
-        window._current_frame_index = 0
+        set_session_field(window, 'data', [window.fits_service.current_data])
+        set_session_field(window, 'image', ["fresh-image"])
+        set_session_field(window, 'dirty', [False])
+        window._session.current_index = 0
         window._render_generation = 10
         window._latest_render_request_by_index = {0: 40}
         try:
@@ -560,8 +562,8 @@ class TestMainWindowLoading(unittest.TestCase):
 
             self.assertEqual(window._render_generation, 12)
             window._latest_render_request_by_index[0] = 41
-            window._frame_images[0] = "fresh-image"
-            window._frame_dirty[0] = True
+            window._session[0].image = "fresh-image"
+            window._session[0].dirty = True
 
             with patch.object(window, "_qimage_from_u8", return_value="stale-preview") as qimage_mock:
                 with patch.object(window, "_show_current_frame_image") as show_mock:
@@ -569,7 +571,7 @@ class TestMainWindowLoading(unittest.TestCase):
 
             qimage_mock.assert_not_called()
             show_mock.assert_not_called()
-            self.assertEqual(window._frame_images[0], "fresh-image")
+            self.assertEqual(window._session[0].image, "fresh-image")
 
             with patch.object(window, "_qimage_from_u8", return_value="stale-full") as qimage_mock:
                 with patch.object(window, "_show_current_frame_image") as show_mock:
@@ -577,8 +579,8 @@ class TestMainWindowLoading(unittest.TestCase):
 
             qimage_mock.assert_not_called()
             show_mock.assert_not_called()
-            self.assertEqual(window._frame_images[0], "fresh-image")
-            self.assertTrue(window._frame_dirty[0])
+            self.assertEqual(window._session[0].image, "fresh-image")
+            self.assertTrue(window._session[0].dirty)
         finally:
             window.deleteLater()
 
@@ -638,9 +640,9 @@ class TestMainWindowLoading(unittest.TestCase):
                 with patch.object(window, "_sync_frame_player") as sync_mock:
                     window._handle_loaded_frame(FITSData(path="first.fits"), None)
 
-            self.assertEqual(len(window._frames), 1)
-            self.assertEqual(len(window._frame_images), 1)
-            self.assertEqual(window._frame_dirty, [True])
+            self.assertEqual(len(window._session), 1)
+            self.assertEqual(len(window._session), 1)
+            self.assertEqual([frame.dirty for frame in window._session], [True])
             activate_mock.assert_called_once_with(0)
             sync_mock.assert_called_once_with()
             window.app_status_bar.set_frame_info.assert_called_once_with(0, 1)
@@ -650,18 +652,18 @@ class TestMainWindowLoading(unittest.TestCase):
     def test_handle_loaded_frame_preserves_current_frame_during_append(self) -> None:
         window = MainWindow()
         window.app_status_bar = Mock()
-        window._frames = [FITSData(path="existing.fits")]
-        window._frame_images = [None]
-        window._frame_dirty = [False]
-        window._current_frame_index = 0
+        set_session_field(window, 'data', [FITSData(path="existing.fits")])
+        set_session_field(window, 'image', [None])
+        set_session_field(window, 'dirty', [False])
+        window._session.current_index = 0
         try:
             with patch.object(window, "_activate_frame") as activate_mock:
                 with patch.object(window, "_sync_frame_player") as sync_mock:
                     window._handle_loaded_frame(FITSData(path="appended.fits"), None)
 
-            self.assertEqual([frame.path for frame in window._frames], ["existing.fits", "appended.fits"])
-            self.assertEqual(window._frame_images, [None, None])
-            self.assertEqual(window._frame_dirty, [False, True])
+            self.assertEqual([frame.path for frame in [frame.data for frame in window._session]], ["existing.fits", "appended.fits"])
+            self.assertEqual([frame.image for frame in window._session], [None, None])
+            self.assertEqual([frame.dirty for frame in window._session], [False, True])
             activate_mock.assert_not_called()
             sync_mock.assert_called_once_with()
             window.app_status_bar.set_frame_info.assert_called_once_with(0, 2)
@@ -677,8 +679,8 @@ class TestMainWindowLoading(unittest.TestCase):
                     with patch.object(window, "_sync_frame_player") as sync_mock:
                         window._handle_loaded_frame(FITSData(path="first.fits"), preview_image_u8="preview-u8")
 
-            self.assertEqual(window._frame_images, ["preview-image"])
-            self.assertEqual(window._frame_dirty, [True])
+            self.assertEqual([frame.image for frame in window._session], ["preview-image"])
+            self.assertEqual([frame.dirty for frame in window._session], [True])
             qimage_mock.assert_called_once_with("preview-u8")
             activate_mock.assert_called_once_with(0)
             sync_mock.assert_called_once_with()
@@ -891,9 +893,9 @@ class TestMainWindowLoading(unittest.TestCase):
 
     def test_activate_frame_schedules_background_render_for_dirty_frame(self) -> None:
         window = MainWindow()
-        window._frames = [FITSData(path="first.fits")]
-        window._frame_images = [None]
-        window._frame_dirty = [True]
+        set_session_field(window, 'data', [FITSData(path="first.fits")])
+        set_session_field(window, 'image', [None])
+        set_session_field(window, 'dirty', [True])
         try:
             with patch.object(window, "_schedule_frame_render") as schedule_mock:
                 window._activate_frame(0)
@@ -906,13 +908,13 @@ class TestMainWindowLoading(unittest.TestCase):
         window = MainWindow()
         first = FITSData(path="first.fits", data=np.zeros((2, 2)))
         second = FITSData(path="second.fits", data=np.ones((2, 2)))
-        window._frames = [first, second]
-        window._frame_images = [None, None]
-        window._frame_dirty = [False, False]
-        window._frame_bkg_cache = [None, None]
-        window._frame_residual_cache = [None, None]
-        window._frame_cached_preview_dim = [0, 0]
-        window._current_frame_index = 0
+        set_session_field(window, 'data', [first, second])
+        set_session_field(window, 'image', [None, None])
+        set_session_field(window, 'dirty', [False, False])
+        set_session_field(window, 'background', [None, None])
+        set_session_field(window, 'residual', [None, None])
+        set_session_field(window, 'preview_dimension', [0, 0])
+        window._session.current_index = 0
         window.fits_service.current_data = first
         window.current_catalog = SourceCatalog(
             records=[SourceRecord(source_id=1, x=1.0, y=1.0)]
@@ -939,9 +941,9 @@ class TestMainWindowLoading(unittest.TestCase):
     def test_cancelled_sep_estimate_cannot_launch_full_extract_during_thread_cleanup(self) -> None:
         window = MainWindow()
         frame = FITSData(path="frame.fits", data=np.zeros((2, 2)))
-        window._frames = [frame]
+        set_session_field(window, 'data', [frame])
         window.fits_service.current_data = frame
-        window._current_frame_index = 0
+        window._session.current_index = 0
         window._active_sep_request_id = 5
         window._active_sep_context_generation = window._sep_context_generation
         window._active_sep_frame_index = 0
@@ -956,6 +958,7 @@ class TestMainWindowLoading(unittest.TestCase):
         try:
             with patch.object(window, "_start_sep_extract_full") as start_mock:
                 window._cancel_active_sep_extract(wait=False)
+                thread.isRunning.return_value = False
                 window._clear_sep_worker_refs(5, thread, worker)
 
             start_mock.assert_not_called()
@@ -968,9 +971,9 @@ class TestMainWindowLoading(unittest.TestCase):
     def test_cancelled_sep_request_rejects_already_queued_result(self) -> None:
         window = MainWindow()
         frame = FITSData(path="frame.fits", data=np.zeros((2, 2)))
-        window._frames = [frame]
+        set_session_field(window, 'data', [frame])
         window.fits_service.current_data = frame
-        window._current_frame_index = 0
+        window._session.current_index = 0
         window._active_sep_request_id = 6
         window._active_sep_context_generation = window._sep_context_generation
         window._active_sep_frame_index = 0
@@ -1002,8 +1005,8 @@ class TestMainWindowLoading(unittest.TestCase):
         window = MainWindow()
         first = FITSData(path="first.fits", data=np.zeros((2, 2)))
         second = FITSData(path="second.fits", data=np.ones((2, 2)))
-        window._frames = [first, second]
-        window._current_frame_index = 1
+        set_session_field(window, 'data', [first, second])
+        window._session.current_index = 1
         window.fits_service.current_data = second
         window._sep_context_generation = 2
         window._active_sep_request_id = 9
@@ -1028,12 +1031,12 @@ class TestMainWindowLoading(unittest.TestCase):
         original = FITSData(path="frame.fits", data=np.zeros((2, 2)))
         background = np.ones((2, 2), dtype=np.float32)
         residual = np.full((2, 2), 2.0, dtype=np.float32)
-        window._frames = [original]
-        window._frame_images = [None]
-        window._frame_dirty = [True]
-        window._frame_bkg_cache = [None]
-        window._frame_residual_cache = [None]
-        window._frame_cached_preview_dim = [0]
+        set_session_field(window, 'data', [original])
+        set_session_field(window, 'image', [None])
+        set_session_field(window, 'dirty', [True])
+        set_session_field(window, 'background', [None])
+        set_session_field(window, 'residual', [None])
+        set_session_field(window, 'preview_dimension', [0])
         window._view_mode = "background"
         window._bkg_generation = 3
         window._render_generation = 99
@@ -1041,8 +1044,8 @@ class TestMainWindowLoading(unittest.TestCase):
             with patch.object(window, "_schedule_frame_render") as schedule_mock:
                 window._handle_bkg_ready(0, 3, background, residual)
 
-            np.testing.assert_array_equal(window._frame_bkg_cache[0].data, background)
-            np.testing.assert_array_equal(window._frame_residual_cache[0].data, residual)
+            np.testing.assert_array_equal(window._session[0].background.data, background)
+            np.testing.assert_array_equal(window._session[0].residual.data, residual)
             schedule_mock.assert_called_once_with(0)
         finally:
             window.deleteLater()
@@ -1050,12 +1053,12 @@ class TestMainWindowLoading(unittest.TestCase):
     def test_stale_bkg_completion_redispatches_under_current_generation(self) -> None:
         window = MainWindow()
         frame = FITSData(path="frame.fits", data=np.zeros((2, 2)))
-        window._frames = [frame]
-        window._frame_images = [None]
-        window._frame_dirty = [True]
-        window._frame_bkg_cache = [None]
-        window._frame_residual_cache = [None]
-        window._frame_cached_preview_dim = [0]
+        set_session_field(window, 'data', [frame])
+        set_session_field(window, 'image', [None])
+        set_session_field(window, 'dirty', [True])
+        set_session_field(window, 'background', [None])
+        set_session_field(window, 'residual', [None])
+        set_session_field(window, 'preview_dimension', [0])
         window._view_mode = "background"
         window._bkg_generation = 8
         thread = Mock()
@@ -1076,11 +1079,11 @@ class TestMainWindowLoading(unittest.TestCase):
     def test_stale_bkg_completion_redispatches_for_source_cutout_in_original_view(self) -> None:
         window = MainWindow()
         frame = FITSData(path="frame.fits", data=np.zeros((2, 2)))
-        window._frames = [frame]
-        window._frame_bkg_cache = [None]
-        window._frame_residual_cache = [None]
+        set_session_field(window, 'data', [frame])
+        set_session_field(window, 'background', [None])
+        set_session_field(window, 'residual', [None])
         window._view_mode = "original"
-        window._current_frame_index = 0
+        window._session.current_index = 0
         window._bkg_generation = 8
         window.source_table_dock = Mock()
         window.source_table_dock.current_cutout_mode.return_value = "Background"
@@ -1100,12 +1103,12 @@ class TestMainWindowLoading(unittest.TestCase):
     def test_current_bkg_error_ends_render_feedback_without_retry_loop(self) -> None:
         window = MainWindow()
         frame = FITSData(path="frame.fits", data=np.zeros((2, 2)))
-        window._frames = [frame]
-        window._frame_dirty = [True]
-        window._frame_bkg_cache = [None]
-        window._frame_residual_cache = [None]
+        set_session_field(window, 'data', [frame])
+        set_session_field(window, 'dirty', [True])
+        set_session_field(window, 'background', [None])
+        set_session_field(window, 'residual', [None])
         window._view_mode = "background"
-        window._current_frame_index = 0
+        window._session.current_index = 0
         window._bkg_generation = 4
         thread = Mock()
         worker = Mock()
@@ -1129,12 +1132,12 @@ class TestMainWindowLoading(unittest.TestCase):
     def test_current_bkg_error_replaces_cutout_loading_message(self) -> None:
         window = MainWindow()
         frame = FITSData(path="frame.fits", data=np.zeros((2, 2)))
-        window._frames = [frame]
-        window._frame_dirty = [False]
-        window._frame_bkg_cache = [None]
-        window._frame_residual_cache = [None]
+        set_session_field(window, 'data', [frame])
+        set_session_field(window, 'dirty', [False])
+        set_session_field(window, 'background', [None])
+        set_session_field(window, 'residual', [None])
         window._view_mode = "original"
-        window._current_frame_index = 0
+        window._session.current_index = 0
         window._bkg_generation = 4
         window.source_table_dock = Mock()
         window.source_table_dock.current_cutout_mode.return_value = "Residual"
@@ -1182,13 +1185,13 @@ class TestMainWindowLoading(unittest.TestCase):
         window = MainWindow()
         window.canvas = Mock()
         window.fits_service.current_data = frames[0]
-        window._frames = frames
-        window._frame_images = [None] * len(frames)
-        window._frame_dirty = [True] * len(frames)
-        window._frame_bkg_cache = [None] * len(frames)
-        window._frame_residual_cache = [None] * len(frames)
-        window._frame_cached_preview_dim = [0] * len(frames)
-        window._current_frame_index = 0
+        set_session_field(window, 'data', frames)
+        set_session_field(window, 'image', [None] * len(frames))
+        set_session_field(window, 'dirty', [True] * len(frames))
+        set_session_field(window, 'background', [None] * len(frames))
+        set_session_field(window, 'residual', [None] * len(frames))
+        set_session_field(window, 'preview_dimension', [0] * len(frames))
+        window._session.current_index = 0
         window._view_mode = "background"
         first_compute_entered = threading.Event()
         release_first_compute = threading.Event()
@@ -1227,7 +1230,7 @@ class TestMainWindowLoading(unittest.TestCase):
                     self._wait_until(first_compute_entered.is_set)
 
                     for index in range(1, len(frames)):
-                        window._current_frame_index = index
+                        window._session.current_index = index
                         window.fits_service.current_data = frames[index]
                         window._dispatch_bkg_worker(index)
                         self.assertEqual(len(window._bkg_threads), 1)
@@ -1241,15 +1244,15 @@ class TestMainWindowLoading(unittest.TestCase):
                     self._wait_until(
                         lambda: (
                             not window._bkg_threads
-                            and window._frame_bkg_cache[4] is not None
+                            and window._session[4].background is not None
                         ),
                         timeout=5.0,
                     )
 
             with compute_lock:
                 self.assertEqual(compute_call_count, 2)
-            self.assertIsNone(window._frame_bkg_cache[0])
-            self.assertIsNotNone(window._frame_bkg_cache[4])
+            self.assertIsNone(window._session[0].background)
+            self.assertIsNotNone(window._session[4].background)
             self.assertIsNone(window._pending_bkg_current)
         finally:
             release_first_compute.set()
@@ -1266,13 +1269,13 @@ class TestMainWindowLoading(unittest.TestCase):
         window.frame_player_dock = Mock()
         window.frame_player_dock.is_playing.return_value = True
         window.fits_service.current_data = frames[0]
-        window._frames = frames
-        window._frame_images = [None, None]
-        window._frame_dirty = [True, True]
-        window._frame_bkg_cache = [None, None]
-        window._frame_residual_cache = [None, None]
-        window._frame_cached_preview_dim = [0, 0]
-        window._current_frame_index = 0
+        set_session_field(window, 'data', frames)
+        set_session_field(window, 'image', [None, None])
+        set_session_field(window, 'dirty', [True, True])
+        set_session_field(window, 'background', [None, None])
+        set_session_field(window, 'residual', [None, None])
+        set_session_field(window, 'preview_dimension', [0, 0])
+        window._session.current_index = 0
         window._view_mode = "background"
         window._playback_render_queue = [1]
         thread = Mock()
@@ -1301,11 +1304,11 @@ class TestMainWindowLoading(unittest.TestCase):
         ]
         window = MainWindow()
         window.fits_service.current_data = frames[0]
-        window._frames = frames
-        window._frame_dirty = [True, True]
-        window._frame_bkg_cache = [None, None]
-        window._frame_residual_cache = [None, None]
-        window._current_frame_index = 0
+        set_session_field(window, 'data', frames)
+        set_session_field(window, 'dirty', [True, True])
+        set_session_field(window, 'background', [None, None])
+        set_session_field(window, 'residual', [None, None])
+        window._session.current_index = 0
         window._view_mode = "background"
         window._frame_layout_mode = "tiled"
         thread = Mock()
@@ -1319,7 +1322,7 @@ class TestMainWindowLoading(unittest.TestCase):
                 window._dispatch_bkg_worker(1)
 
             launch_mock.assert_not_called()
-            self.assertTrue(window._frame_dirty[1])
+            self.assertTrue(window._session[1].dirty)
             self.assertEqual(list(window._bkg_threads), [0])
 
             thread.isRunning.return_value = False
@@ -1472,10 +1475,10 @@ class TestMainWindowLoading(unittest.TestCase):
 
     def test_handle_frame_preview_rendered_updates_current_image(self) -> None:
         window = MainWindow()
-        window._frames = [FITSData(path="frame.fits")]
-        window._frame_images = [None]
-        window._frame_dirty = [True]
-        window._current_frame_index = 0
+        set_session_field(window, 'data', [FITSData(path="frame.fits")])
+        set_session_field(window, 'image', [None])
+        set_session_field(window, 'dirty', [True])
+        window._session.current_index = 0
         window._render_generation = 3
         window._latest_render_request_by_index[0] = 11
         window.canvas = Mock()
@@ -1484,8 +1487,8 @@ class TestMainWindowLoading(unittest.TestCase):
                 with patch.object(window, "_show_current_frame_image") as show_mock:
                     window._handle_frame_preview_rendered(11, 3, 0, "preview-u8")
 
-            self.assertEqual(window._frame_images, ["preview-image"])
-            self.assertEqual(window._frame_dirty, [True])
+            self.assertEqual([frame.image for frame in window._session], ["preview-image"])
+            self.assertEqual([frame.dirty for frame in window._session], [True])
             qimage_mock.assert_called_once_with("preview-u8")
             show_mock.assert_called_once_with()
             window.canvas.set_image_state.assert_called_once()
@@ -1494,10 +1497,10 @@ class TestMainWindowLoading(unittest.TestCase):
 
     def test_handle_frame_rendered_marks_frame_clean(self) -> None:
         window = MainWindow()
-        window._frames = [FITSData(path="frame.fits")]
-        window._frame_images = [None]
-        window._frame_dirty = [True]
-        window._current_frame_index = 0
+        set_session_field(window, 'data', [FITSData(path="frame.fits")])
+        set_session_field(window, 'image', [None])
+        set_session_field(window, 'dirty', [True])
+        window._session.current_index = 0
         window._render_generation = 3
         window._latest_render_request_by_index[0] = 12
         window.canvas = Mock()
@@ -1506,8 +1509,8 @@ class TestMainWindowLoading(unittest.TestCase):
                 with patch.object(window, "_show_current_frame_image") as show_mock:
                     window._handle_frame_rendered(12, 3, 0, "full-u8")
 
-            self.assertEqual(window._frame_images, ["final-image"])
-            self.assertEqual(window._frame_dirty, [False])
+            self.assertEqual([frame.image for frame in window._session], ["final-image"])
+            self.assertEqual([frame.dirty for frame in window._session], [False])
             qimage_mock.assert_called_once_with("full-u8")
             show_mock.assert_called_once_with()
             window.canvas.set_image_state.assert_called_once()
@@ -1529,10 +1532,10 @@ class TestMainWindowLoading(unittest.TestCase):
 
     def test_handle_frame_rendered_prewarms_adjacent_frame_for_current_frame(self) -> None:
         window = MainWindow()
-        window._frames = [FITSData(path="frame-0.fits"), FITSData(path="frame-1.fits")]
-        window._frame_images = [None, None]
-        window._frame_dirty = [True, True]
-        window._current_frame_index = 0
+        set_session_field(window, 'data', [FITSData(path="frame-0.fits"), FITSData(path="frame-1.fits")])
+        set_session_field(window, 'image', [None, None])
+        set_session_field(window, 'dirty', [True, True])
+        window._session.current_index = 0
         window._render_generation = 3
         window._latest_render_request_by_index[0] = 12
         window.canvas = Mock()
@@ -1550,8 +1553,8 @@ class TestMainWindowLoading(unittest.TestCase):
         window = MainWindow()
         window.canvas = Mock()
         window.canvas.capture_view_state.return_value = {"scale_factor": 2.0}
-        window._frame_images = ["rendered-image"]
-        window._current_frame_index = 0
+        set_session_field(window, 'image', ["rendered-image"])
+        window._session.current_index = 0
         try:
             window._show_current_frame_image()
 
@@ -1563,14 +1566,14 @@ class TestMainWindowLoading(unittest.TestCase):
 
     def test_build_composite_frame_image_tiles_loaded_frames(self) -> None:
         window = MainWindow()
-        window._frames = [
+        set_session_field(window, 'data', [
             FITSData(path="frame-0.fits", data=np.zeros((2, 2))),
             FITSData(path="frame-1.fits", data=np.zeros((2, 2))),
-        ]
-        window._frame_images = [
+        ])
+        set_session_field(window, 'image', [
             self._grayscale_image([[10, 20], [30, 40]]),
             self._grayscale_image([[50, 60], [70, 80]]),
-        ]
+        ])
         window._frame_layout_mode = "tiled"
         try:
             image = window._build_composite_frame_image()
@@ -1585,14 +1588,14 @@ class TestMainWindowLoading(unittest.TestCase):
 
     def test_build_composite_frame_image_stacks_loaded_frames_vertically(self) -> None:
         window = MainWindow()
-        window._frames = [
+        set_session_field(window, 'data', [
             FITSData(path="frame-0.fits", data=np.zeros((2, 2))),
             FITSData(path="frame-1.fits", data=np.zeros((2, 2))),
-        ]
-        window._frame_images = [
+        ])
+        set_session_field(window, 'image', [
             self._grayscale_image([[1, 2], [3, 4]]),
             self._grayscale_image([[5, 6], [7, 8]]),
-        ]
+        ])
         window._frame_layout_mode = "vertical"
         try:
             image = window._build_composite_frame_image()
@@ -1608,12 +1611,12 @@ class TestMainWindowLoading(unittest.TestCase):
     def test_update_status_from_cursor_samples_frame_under_tiled_composite_layout(self) -> None:
         window = MainWindow()
         window.app_status_bar = Mock()
-        window._frames = [
+        set_session_field(window, 'data', [
             FITSData(path="frame-0.fits", data=np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32)),
             FITSData(path="frame-1.fits", data=np.array([[9.0, 8.0], [7.0, 6.0]], dtype=np.float32)),
-        ]
+        ])
         window._frame_layout_mode = "tiled"
-        window.fits_service.current_data = window._frames[0]
+        window.fits_service.current_data = window._session[0].data
         try:
             window.update_status_from_cursor(2.2, 0.4)
 
@@ -1627,7 +1630,7 @@ class TestMainWindowLoading(unittest.TestCase):
 
     def test_build_sep_enablement_state_disables_sep_for_composite_layout(self) -> None:
         window = MainWindow()
-        window._frames = [FITSData(path="0.fits"), FITSData(path="1.fits")]
+        set_session_field(window, 'data', [FITSData(path="0.fits"), FITSData(path="1.fits")])
         window._frame_layout_mode = "vertical"
         window.fits_service.current_data = FITSData(path="0.fits", data=np.zeros((2, 2)))
         try:
@@ -1641,7 +1644,7 @@ class TestMainWindowLoading(unittest.TestCase):
     def test_sync_catalog_views_hides_canvas_sources_in_composite_layout(self) -> None:
         window = MainWindow()
         window.canvas = Mock()
-        window._frames = [FITSData(path="0.fits"), FITSData(path="1.fits")]
+        set_session_field(window, 'data', [FITSData(path="0.fits"), FITSData(path="1.fits")])
         window._frame_layout_mode = "tiled"
         window.current_catalog = SourceCatalog(records=[SourceRecord(source_id=1, x=10.0, y=12.0)])
         try:
@@ -1657,10 +1660,10 @@ class TestMainWindowLoading(unittest.TestCase):
         window.canvas = Mock()
         window.frame_player_dock = Mock()
         window.frame_player_dock.is_playing.return_value = False
-        window._frames = [FITSData(path="frame.fits")]
-        window._frame_images = [None]
-        window._frame_dirty = [True]
-        window._current_frame_index = 0
+        set_session_field(window, 'data', [FITSData(path="frame.fits")])
+        set_session_field(window, 'image', [None])
+        set_session_field(window, 'dirty', [True])
+        window._session.current_index = 0
         window.fits_service.current_data = FITSData(path="frame.fits", data=np.zeros((2, 2)))
         try:
             window._sync_current_canvas_image_state()
@@ -1672,10 +1675,10 @@ class TestMainWindowLoading(unittest.TestCase):
 
     def test_schedule_frame_render_skips_non_current_frame_when_current_render_is_active(self) -> None:
         window = MainWindow()
-        window._frames = [FITSData(path="frame-0.fits"), FITSData(path="frame-1.fits")]
-        window._frame_images = [None, None]
-        window._frame_dirty = [True, True]
-        window._current_frame_index = 0
+        set_session_field(window, 'data', [FITSData(path="frame-0.fits"), FITSData(path="frame-1.fits")])
+        set_session_field(window, 'image', [None, None])
+        set_session_field(window, 'dirty', [True, True])
+        window._session.current_index = 0
         running_thread = Mock()
         running_thread.isRunning.return_value = True
         window._render_threads[8] = running_thread
@@ -1694,10 +1697,10 @@ class TestMainWindowLoading(unittest.TestCase):
     def test_schedule_frame_render_uses_configured_preview_dimensions(self) -> None:
         window = MainWindow()
         window._preview_profile_name = "Fast"
-        window._frames = [FITSData(path="frame-0.fits")]
-        window._frame_images = [None]
-        window._frame_dirty = [True]
-        window._current_frame_index = 0
+        set_session_field(window, 'data', [FITSData(path="frame-0.fits")])
+        set_session_field(window, 'image', [None])
+        set_session_field(window, 'dirty', [True])
+        window._session.current_index = 0
         try:
             with patch("astroview.app.main_window.QThread", _FakeThread):
                 with patch("astroview.app.main_window.FrameRenderWorker") as worker_cls:
@@ -1720,10 +1723,10 @@ class TestMainWindowLoading(unittest.TestCase):
         window = MainWindow()
         window.canvas = Mock()
         window.fits_service.current_data = frame
-        window._frames = [frame]
-        window._frame_images = [None]
-        window._frame_dirty = [True]
-        window._current_frame_index = 0
+        set_session_field(window, 'data', [frame])
+        set_session_field(window, 'image', [None])
+        set_session_field(window, 'dirty', [True])
+        window._session.current_index = 0
         converted: list[object] = []
 
         def convert(image_u8: object) -> object:
@@ -1731,19 +1734,22 @@ class TestMainWindowLoading(unittest.TestCase):
             return image_u8
 
         try:
-            with patch("astroview.app.frame_render_worker.render_preview_u8", side_effect=["preview-1024", "preview-2048"]):
+            with patch("astroview.app.frame_render_worker.render_preview_result", side_effect=[
+                RenderResult("preview-1024", width=2, height=2),
+                RenderResult("preview-2048", width=2, height=2),
+            ]):
                 with patch("astroview.app.frame_render_worker.render_image_u8", return_value="full-render"):
                     with patch.object(window, "_qimage_from_u8", side_effect=convert):
                         with patch.object(window, "_prewarm_adjacent_frame") as prewarm_mock:
                             window._schedule_frame_render(0)
                             request_id = window._latest_render_request_by_index[0]
                             self._wait_until(
-                                lambda: request_id not in window._render_threads and window._frame_dirty == [False]
+                                lambda: request_id not in window._render_threads and [frame.dirty for frame in window._session] == [False]
                             )
 
             self.assertEqual(converted, ["preview-1024", "preview-2048", "full-render"])
-            self.assertEqual(window._frame_images, ["full-render"])
-            self.assertEqual(window._frame_dirty, [False])
+            self.assertEqual([frame.image for frame in window._session], ["full-render"])
+            self.assertEqual([frame.dirty for frame in window._session], [False])
             self.assertNotIn(request_id, window._render_threads)
             self.assertNotIn(request_id, window._render_request_index_by_id)
             prewarm_mock.assert_called_once_with()
@@ -1756,13 +1762,13 @@ class TestMainWindowLoading(unittest.TestCase):
         window = MainWindow()
         window.canvas = Mock()
         window.fits_service.current_data = frame
-        window._frames = [frame]
-        window._frame_images = [None]
-        window._frame_dirty = [True]
-        window._frame_bkg_cache = [None]
-        window._frame_residual_cache = [None]
-        window._frame_cached_preview_dim = [0]
-        window._current_frame_index = 0
+        set_session_field(window, 'data', [frame])
+        set_session_field(window, 'image', [None])
+        set_session_field(window, 'dirty', [True])
+        set_session_field(window, 'background', [None])
+        set_session_field(window, 'residual', [None])
+        set_session_field(window, 'preview_dimension', [0])
+        window._session.current_index = 0
         first_compute_entered = threading.Event()
         release_first_compute = threading.Event()
         compute_call_count = 0
@@ -1819,14 +1825,14 @@ class TestMainWindowLoading(unittest.TestCase):
                                 self._wait_until(
                                     lambda: (
                                         not window._render_threads
-                                        and window._frame_dirty == [False]
+                                        and [frame.dirty for frame in window._session] == [False]
                                     ),
                                     timeout=5.0,
                                 )
 
             with compute_lock:
                 self.assertEqual(compute_call_count, 2)
-            self.assertEqual(window._frame_images, ["latest-full-render"])
+            self.assertEqual([frame.image for frame in window._session], ["latest-full-render"])
             self.assertEqual(window._active_render_request_by_index, {})
             self.assertIsNone(window._pending_render_intent)
         finally:
@@ -1842,12 +1848,12 @@ class TestMainWindowLoading(unittest.TestCase):
         window = MainWindow()
         window.canvas = Mock()
         window.fits_service.current_data = frames[0]
-        window._frames = frames
-        window._frame_images = [None] * len(frames)
-        window._frame_dirty = [True] * len(frames)
-        window._frame_bkg_cache = [None] * len(frames)
-        window._frame_residual_cache = [None] * len(frames)
-        window._frame_cached_preview_dim = [0] * len(frames)
+        set_session_field(window, 'data', frames)
+        set_session_field(window, 'image', [None] * len(frames))
+        set_session_field(window, 'dirty', [True] * len(frames))
+        set_session_field(window, 'background', [None] * len(frames))
+        set_session_field(window, 'residual', [None] * len(frames))
+        set_session_field(window, 'preview_dimension', [0] * len(frames))
         first_compute_entered = threading.Event()
         release_first_compute = threading.Event()
         compute_call_count = 0
@@ -1882,12 +1888,12 @@ class TestMainWindowLoading(unittest.TestCase):
                             side_effect=lambda image: image,
                         ):
                             with patch.object(window, "_show_current_frame_image"):
-                                window._current_frame_index = 0
+                                window._session.current_index = 0
                                 window._schedule_frame_render(0)
                                 self._wait_until(first_compute_entered.is_set)
 
                                 for index in range(1, len(frames)):
-                                    window._current_frame_index = index
+                                    window._session.current_index = index
                                     window.fits_service.current_data = frames[index]
                                     window._schedule_frame_render(index)
                                     self.assertEqual(len(window._render_threads), 1)
@@ -1903,14 +1909,14 @@ class TestMainWindowLoading(unittest.TestCase):
                                 self._wait_until(
                                     lambda: (
                                         not window._render_threads
-                                        and window._frame_dirty[4] is False
+                                        and window._session[4].dirty is False
                                     ),
                                     timeout=5.0,
                                 )
 
             with compute_lock:
                 self.assertEqual(compute_call_count, 2)
-            self.assertEqual(window._frame_images[4], "latest-frame-render")
+            self.assertEqual(window._session[4].image, "latest-frame-render")
             self.assertIsNone(window._pending_render_intent)
         finally:
             release_first_compute.set()
@@ -1927,13 +1933,13 @@ class TestMainWindowLoading(unittest.TestCase):
         window.frame_player_dock = Mock()
         window.frame_player_dock.is_playing.return_value = True
         window.fits_service.current_data = frames[0]
-        window._frames = frames
-        window._frame_images = [None] * len(frames)
-        window._frame_dirty = [True] * len(frames)
-        window._frame_bkg_cache = [None] * len(frames)
-        window._frame_residual_cache = [None] * len(frames)
-        window._frame_cached_preview_dim = [0] * len(frames)
-        window._current_frame_index = 0
+        set_session_field(window, 'data', frames)
+        set_session_field(window, 'image', [None] * len(frames))
+        set_session_field(window, 'dirty', [True] * len(frames))
+        set_session_field(window, 'background', [None] * len(frames))
+        set_session_field(window, 'residual', [None] * len(frames))
+        set_session_field(window, 'preview_dimension', [0] * len(frames))
+        window._session.current_index = 0
         entered = [threading.Event() for _ in frames]
         releases = [threading.Event() for _ in frames]
         rendered_paths: list[str] = []
@@ -1978,7 +1984,7 @@ class TestMainWindowLoading(unittest.TestCase):
                                     self._wait_until(
                                         lambda: (
                                             not window._render_threads
-                                            and window._frame_dirty == [False, False, False]
+                                            and [frame.dirty for frame in window._session] == [False, False, False]
                                         ),
                                         timeout=5.0,
                                     )
@@ -2003,13 +2009,13 @@ class TestMainWindowLoading(unittest.TestCase):
         window = MainWindow()
         window.canvas = Mock()
         window.fits_service.current_data = frames[0]
-        window._frames = frames
-        window._frame_images = [None] * len(frames)
-        window._frame_dirty = [True] * len(frames)
-        window._frame_bkg_cache = [None] * len(frames)
-        window._frame_residual_cache = [None] * len(frames)
-        window._frame_cached_preview_dim = [0] * len(frames)
-        window._current_frame_index = 0
+        set_session_field(window, 'data', frames)
+        set_session_field(window, 'image', [None] * len(frames))
+        set_session_field(window, 'dirty', [True] * len(frames))
+        set_session_field(window, 'background', [None] * len(frames))
+        set_session_field(window, 'residual', [None] * len(frames))
+        set_session_field(window, 'preview_dimension', [0] * len(frames))
+        window._session.current_index = 0
         window._frame_layout_mode = "tiled"
         entered = [threading.Event() for _ in frames]
         releases = [threading.Event() for _ in frames]
@@ -2054,7 +2060,7 @@ class TestMainWindowLoading(unittest.TestCase):
                                     self._wait_until(
                                         lambda: (
                                             not window._render_threads
-                                            and window._frame_dirty == [False, False, False]
+                                            and [frame.dirty for frame in window._session] == [False, False, False]
                                         ),
                                         timeout=5.0,
                                     )
@@ -2078,9 +2084,9 @@ class TestMainWindowLoading(unittest.TestCase):
         window.app_status_bar = Mock()
         window.frame_player_dock = Mock()
         window.sep_panel = Mock()
-        window._frames = [FITSData(path="frame-0.fits")]
-        window._frame_images = ["preview-image"]
-        window._frame_dirty = [True]
+        set_session_field(window, 'data', [FITSData(path="frame-0.fits")])
+        set_session_field(window, 'image', ["preview-image"])
+        set_session_field(window, 'dirty', [True])
         window._render_request_index_by_id = {4: 0}
         window._latest_render_request_by_index = {0: 4}
         window._render_workers = {4: Mock()}
@@ -2098,10 +2104,10 @@ class TestMainWindowLoading(unittest.TestCase):
             self.assertEqual(window._render_request_index_by_id, {})
             self.assertEqual(window._latest_render_request_by_index, {})
             self.assertEqual(window._render_workers, {})
-            self.assertEqual(window._frames, [])
-            self.assertEqual(window._frame_images, [])
-            self.assertEqual(window._frame_dirty, [])
-            self.assertEqual(window._current_frame_index, 0)
+            self.assertEqual([frame.data for frame in window._session], [])
+            self.assertEqual([frame.image for frame in window._session], [])
+            self.assertEqual([frame.dirty for frame in window._session], [])
+            self.assertEqual(window._session.current_index, 0)
             self.assertEqual(window.windowTitle(), f"AstroView v{__version__}")
             sync_sep_mock.assert_called_once_with()
             sync_render_mock.assert_called_once_with()
@@ -2157,9 +2163,9 @@ class TestMainWindowLoading(unittest.TestCase):
 
     def test_activate_frame_includes_version_in_window_title(self) -> None:
         window = MainWindow()
-        window._frames = [FITSData(path="frame-0.fits")]
-        window._frame_images = [None]
-        window._frame_dirty = [False]
+        set_session_field(window, 'data', [FITSData(path="frame-0.fits")])
+        set_session_field(window, 'image', [None])
+        set_session_field(window, 'dirty', [False])
         window.canvas = Mock()
         window.app_status_bar = Mock()
         try:
@@ -2173,10 +2179,10 @@ class TestMainWindowLoading(unittest.TestCase):
 
     def test_schedule_frame_render_cancels_stale_other_frame_requests_for_current_frame(self) -> None:
         window = MainWindow()
-        window._frames = [FITSData(path="frame-0.fits"), FITSData(path="frame-1.fits")]
-        window._frame_images = [None, None]
-        window._frame_dirty = [True, True]
-        window._current_frame_index = 1
+        set_session_field(window, 'data', [FITSData(path="frame-0.fits"), FITSData(path="frame-1.fits")])
+        set_session_field(window, 'image', [None, None])
+        set_session_field(window, 'dirty', [True, True])
+        window._session.current_index = 1
         stale_thread = Mock()
         stale_thread.isRunning.return_value = True
         window._render_threads[8] = stale_thread
@@ -2207,8 +2213,8 @@ class TestMainWindowLoading(unittest.TestCase):
 
     def test_preferred_adjacent_frame_index_uses_recent_forward_direction(self) -> None:
         window = MainWindow()
-        window._frames = [FITSData(path="0.fits"), FITSData(path="1.fits"), FITSData(path="2.fits")]
-        window._current_frame_index = 1
+        set_session_field(window, 'data', [FITSData(path="0.fits"), FITSData(path="1.fits"), FITSData(path="2.fits")])
+        window._session.current_index = 1
         window._frame_step_direction = 1
         try:
             self.assertEqual(window._preferred_adjacent_frame_index(), 2)
@@ -2217,8 +2223,8 @@ class TestMainWindowLoading(unittest.TestCase):
 
     def test_preferred_adjacent_frame_index_wraps_in_loop_mode(self) -> None:
         window = MainWindow()
-        window._frames = [FITSData(path="0.fits"), FITSData(path="1.fits"), FITSData(path="2.fits")]
-        window._current_frame_index = 2
+        set_session_field(window, 'data', [FITSData(path="0.fits"), FITSData(path="1.fits"), FITSData(path="2.fits")])
+        window._session.current_index = 2
         window._frame_step_direction = 1
         window.frame_player_dock = Mock()
         window.frame_player_dock.bounce_btn.isChecked.return_value = False
@@ -2230,8 +2236,8 @@ class TestMainWindowLoading(unittest.TestCase):
 
     def test_preferred_adjacent_frame_index_reflects_bounce_direction(self) -> None:
         window = MainWindow()
-        window._frames = [FITSData(path="0.fits"), FITSData(path="1.fits"), FITSData(path="2.fits")]
-        window._current_frame_index = 2
+        set_session_field(window, 'data', [FITSData(path="0.fits"), FITSData(path="1.fits"), FITSData(path="2.fits")])
+        window._session.current_index = 2
         window._frame_step_direction = 1
         window.frame_player_dock = Mock()
         window.frame_player_dock.bounce_btn.isChecked.return_value = True
@@ -2243,9 +2249,9 @@ class TestMainWindowLoading(unittest.TestCase):
 
     def test_prewarm_adjacent_frame_schedules_likely_next_dirty_frame(self) -> None:
         window = MainWindow()
-        window._frames = [FITSData(path="0.fits"), FITSData(path="1.fits"), FITSData(path="2.fits")]
-        window._frame_dirty = [False, False, True]
-        window._current_frame_index = 1
+        set_session_field(window, 'data', [FITSData(path="0.fits"), FITSData(path="1.fits"), FITSData(path="2.fits")])
+        set_session_field(window, 'dirty', [False, False, True])
+        window._session.current_index = 1
         window._frame_step_direction = 1
         try:
             with patch.object(window, "_schedule_frame_render") as schedule_mock:
@@ -2257,8 +2263,8 @@ class TestMainWindowLoading(unittest.TestCase):
 
     def test_switch_frame_updates_recent_step_direction_on_loop_wrap(self) -> None:
         window = MainWindow()
-        window._frames = [FITSData(path="0.fits"), FITSData(path="1.fits"), FITSData(path="2.fits")]
-        window._current_frame_index = 2
+        set_session_field(window, 'data', [FITSData(path="0.fits"), FITSData(path="1.fits"), FITSData(path="2.fits")])
+        window._session.current_index = 2
         window.frame_player_dock = Mock()
         try:
             with patch.object(window, "_activate_frame") as activate_mock:
@@ -2271,8 +2277,8 @@ class TestMainWindowLoading(unittest.TestCase):
 
     def test_go_prev_frame_wraps_from_first_frame_to_last(self) -> None:
         window = MainWindow()
-        window._frames = [FITSData(path="0.fits"), FITSData(path="1.fits"), FITSData(path="2.fits")]
-        window._current_frame_index = 0
+        set_session_field(window, 'data', [FITSData(path="0.fits"), FITSData(path="1.fits"), FITSData(path="2.fits")])
+        window._session.current_index = 0
         try:
             with patch.object(window, "_switch_frame") as switch_mock:
                 window._go_prev_frame()
@@ -2283,8 +2289,8 @@ class TestMainWindowLoading(unittest.TestCase):
 
     def test_go_prev_frame_pauses_playback_before_switching(self) -> None:
         window = MainWindow()
-        window._frames = [FITSData(path="0.fits"), FITSData(path="1.fits"), FITSData(path="2.fits")]
-        window._current_frame_index = 0
+        set_session_field(window, 'data', [FITSData(path="0.fits"), FITSData(path="1.fits"), FITSData(path="2.fits")])
+        window._session.current_index = 0
         window.frame_player_dock = Mock()
         window.frame_player_dock.is_playing.return_value = True
         try:
@@ -2298,8 +2304,8 @@ class TestMainWindowLoading(unittest.TestCase):
 
     def test_go_next_frame_wraps_from_last_frame_to_first(self) -> None:
         window = MainWindow()
-        window._frames = [FITSData(path="0.fits"), FITSData(path="1.fits"), FITSData(path="2.fits")]
-        window._current_frame_index = 2
+        set_session_field(window, 'data', [FITSData(path="0.fits"), FITSData(path="1.fits"), FITSData(path="2.fits")])
+        window._session.current_index = 2
         try:
             with patch.object(window, "_switch_frame") as switch_mock:
                 window._go_next_frame()
@@ -2310,8 +2316,8 @@ class TestMainWindowLoading(unittest.TestCase):
 
     def test_go_next_frame_pauses_playback_before_switching(self) -> None:
         window = MainWindow()
-        window._frames = [FITSData(path="0.fits"), FITSData(path="1.fits"), FITSData(path="2.fits")]
-        window._current_frame_index = 2
+        set_session_field(window, 'data', [FITSData(path="0.fits"), FITSData(path="1.fits"), FITSData(path="2.fits")])
+        window._session.current_index = 2
         window.frame_player_dock = Mock()
         window.frame_player_dock.is_playing.return_value = True
         try:
@@ -2499,13 +2505,13 @@ class TestMainWindowLoading(unittest.TestCase):
     def test_persist_session_state_collapses_multiframe_cube_paths(self) -> None:
         window = MainWindow()
         window._settings = Mock()
-        window._frames = [
+        set_session_field(window, 'data', [
             FITSData(path="D:\\fits\\cube.fits", frame_index=0, frame_count=3, source_group_id=5),
             FITSData(path="D:\\fits\\cube.fits", frame_index=1, frame_count=3, source_group_id=5),
             FITSData(path="D:\\fits\\cube.fits", frame_index=2, frame_count=3, source_group_id=5),
             FITSData(path="D:\\fits\\other.fits", frame_index=0, frame_count=1, source_group_id=6),
-        ]
-        window._current_frame_index = 2
+        ])
+        window._session.current_index = 2
         try:
             window._persist_session_state()
 
@@ -2798,10 +2804,10 @@ class TestMainWindowLoading(unittest.TestCase):
     def test_build_canvas_image_state_reports_loading_before_preview_is_ready(self) -> None:
         window = MainWindow()
         window.fits_service.current_data = FITSData(path="frame.fits", data=np.zeros((2, 2)))
-        window._frames = [window.fits_service.current_data]
-        window._frame_images = [None]
-        window._frame_dirty = [True]
-        window._current_frame_index = 0
+        set_session_field(window, 'data', [window.fits_service.current_data])
+        set_session_field(window, 'image', [None])
+        set_session_field(window, 'dirty', [True])
+        window._session.current_index = 0
         try:
             state = window.build_canvas_image_state()
 
@@ -2827,10 +2833,10 @@ class TestMainWindowLoading(unittest.TestCase):
     def test_build_canvas_image_state_reports_loading_after_preview_is_ready(self) -> None:
         window = MainWindow()
         window.fits_service.current_data = FITSData(path="frame.fits", data=np.zeros((2, 2)))
-        window._frames = [window.fits_service.current_data]
-        window._frame_images = ["preview-image"]
-        window._frame_dirty = [True]
-        window._current_frame_index = 0
+        set_session_field(window, 'data', [window.fits_service.current_data])
+        set_session_field(window, 'image', ["preview-image"])
+        set_session_field(window, 'dirty', [True])
+        window._session.current_index = 0
         try:
             state = window.build_canvas_image_state()
 
@@ -2843,10 +2849,10 @@ class TestMainWindowLoading(unittest.TestCase):
     def test_build_canvas_image_state_reports_ready_after_render_finishes(self) -> None:
         window = MainWindow()
         window.fits_service.current_data = FITSData(path="frame.fits", data=np.zeros((2, 2)))
-        window._frames = [window.fits_service.current_data]
-        window._frame_images = ["final-image"]
-        window._frame_dirty = [False]
-        window._current_frame_index = 0
+        set_session_field(window, 'data', [window.fits_service.current_data])
+        set_session_field(window, 'image', ["final-image"])
+        set_session_field(window, 'dirty', [False])
+        window._session.current_index = 0
         try:
             state = window.build_canvas_image_state()
 
@@ -2858,10 +2864,10 @@ class TestMainWindowLoading(unittest.TestCase):
     def test_rerender_all_frames_updates_current_canvas_feedback_to_loading(self) -> None:
         window = MainWindow()
         window.canvas = Mock()
-        window._frames = [FITSData(path="frame.fits")]
-        window._frame_images = ["old-image"]
-        window._frame_dirty = [False]
-        window._current_frame_index = 0
+        set_session_field(window, 'data', [FITSData(path="frame.fits")])
+        set_session_field(window, 'image', ["old-image"])
+        set_session_field(window, 'dirty', [False])
+        window._session.current_index = 0
         window.fits_service.current_data = FITSData(path="frame.fits", data=np.zeros((2, 2)))
         try:
             with patch.object(window, "_cancel_active_frame_renders") as cancel_mock:
@@ -2870,7 +2876,7 @@ class TestMainWindowLoading(unittest.TestCase):
 
             cancel_mock.assert_called_once_with(wait=False)
             ensure_mock.assert_called_once_with(0)
-            self.assertEqual(window._frame_dirty, [True])
+            self.assertEqual([frame.dirty for frame in window._session], [True])
             window.canvas.set_image_state.assert_called_once()
             state = window.canvas.set_image_state.call_args.args[0]
             self.assertEqual(state.feedback.status, "loading")
@@ -2959,6 +2965,7 @@ class TestMainWindowLoading(unittest.TestCase):
             self.assertIs(window._sep_thread, thread)
             window.app_status_bar.clear_activity.assert_not_called()
 
+            thread.isRunning.return_value = False
             window._clear_sep_worker_refs(7, thread, worker)
 
             window.app_status_bar.clear_activity.assert_called_once_with()
@@ -3056,9 +3063,9 @@ class TestMainWindowLoading(unittest.TestCase):
 
     def test_activate_frame_enables_sep_panel(self) -> None:
         window = MainWindow()
-        window._frames = [FITSData(path="first.fits")]
-        window._frame_images = [None]
-        window._frame_dirty = [False]
+        set_session_field(window, 'data', [FITSData(path="first.fits")])
+        set_session_field(window, 'image', [None])
+        set_session_field(window, 'dirty', [False])
         window.sep_panel = Mock()
         try:
             window._activate_frame(0)

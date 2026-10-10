@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests.frame_session_fixtures import set_session_field
+
 import os
 from pathlib import Path
 import sys
@@ -65,14 +67,14 @@ class TestMovingTargetMainWindow(unittest.TestCase):
         window.initialize(apply_startup_request=False)
         window._roi_action = "measure"
         frames = [FITSData(path=f"f-{i}.fits", data=np.zeros((60, 80))) for i in range(5)]
-        window._frames = frames
-        window._frame_images = [QImage(80, 60, QImage.Format.Format_Grayscale8) for _ in frames]
-        window._frame_dirty = [False] * 5
-        window._frame_bkg_cache = [None] * 5
-        window._frame_residual_cache = [None] * 5
-        window._frame_cached_preview_dim = [0] * 5
+        set_session_field(window, 'data', frames)
+        set_session_field(window, 'image', [QImage(80, 60, QImage.Format.Format_Grayscale8) for _ in frames])
+        set_session_field(window, 'dirty', [False] * 5)
+        set_session_field(window, 'background', [None] * 5)
+        set_session_field(window, 'residual', [None] * 5)
+        set_session_field(window, 'preview_dimension', [0] * 5)
         window.fits_service.current_data = frames[0]
-        window._current_frame_index = 0
+        window._session.current_index = 0
         window._sync_moving_target_context()
         return window
 
@@ -191,8 +193,8 @@ class TestMovingTargetMainWindow(unittest.TestCase):
             window._moving_target_result = _result()
             window._redraw_moving_target_overlays()
             self.assertEqual(window.canvas._moving_target_centers, [(10.0, 20.0)])
-            window._current_frame_index = 3
-            window.fits_service.current_data = window._frames[3]
+            window._session.current_index = 3
+            window.fits_service.current_data = window._session[3].data
             window._redraw_moving_target_overlays()
             self.assertEqual(window.canvas._moving_target_centers, [(16.0, 20.0)])
             window._comparison_active = True

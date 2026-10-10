@@ -13,6 +13,7 @@ if str(REPO_PARENT) not in sys.path:
     sys.path.insert(0, str(REPO_PARENT))
 
 from astroview.app.file_load_worker import FITSLoadWorker
+from astroview.core.contracts import RenderResult
 from astroview.core.fits_data import FITSData
 
 
@@ -25,6 +26,50 @@ class _FakeThread:
 
 
 class TestFITSLoadWorker(unittest.TestCase):
+    def test_sampled_loading_preview_preserves_frame_coordinates(self) -> None:
+        frame = FITSData(data=np.arange(35, dtype=np.float32).reshape(5, 7))
+        worker = FITSLoadWorker(
+            ["sampled.fits"], preview_first_frame=True, sampled_previews=True,
+            preview_max_dimension=3, interval_name="Original",
+        )
+        loaded = []
+        worker.file_loaded.connect(lambda data, preview: loaded.append((data, preview)))
+
+        with patch("astroview.app.file_load_worker.FITSData.load_frames", return_value=[frame]):
+            worker.run()
+
+        self.assertEqual(len(loaded), 1)
+        self.assertIs(loaded[0][0], frame)
+        preview = loaded[0][1]
+        self.assertIsInstance(preview, RenderResult)
+        self.assertEqual((preview.width, preview.height, preview.sample_step), (7, 5, 3))
+        self.assertEqual(preview.image_u8.shape, (2, 3))
+        self.assertEqual(preview.resolved_spec.limits, (0.0, 34.0))
+
+    def test_cancellation_during_sampled_preview_rejects_loaded_callback(self) -> None:
+        thread = _FakeThread()
+        frame = FITSData(data=np.ones((4, 4)))
+        worker = FITSLoadWorker(
+            ["sampled.fits"], preview_first_frame=True, sampled_previews=True,
+            preview_max_dimension=2,
+        )
+        loaded = []
+        finished = []
+        worker.file_loaded.connect(lambda data, preview: loaded.append((data, preview)))
+        worker.finished.connect(lambda: finished.append(True))
+
+        def preview_then_cancel(*args, **kwargs):
+            thread.interrupted = True
+            return RenderResult(np.zeros((2, 2), dtype=np.uint8), width=4, height=4, sample_step=2)
+
+        with patch("astroview.app.file_load_worker.QThread.currentThread", return_value=thread):
+            with patch("astroview.app.file_load_worker.FITSData.load_frames", return_value=[frame]):
+                with patch("astroview.app.file_load_worker.render_preview_result", side_effect=preview_then_cancel):
+                    worker.run()
+
+        self.assertEqual(loaded, [])
+        self.assertEqual(finished, [True])
+
     def test_run_emits_loaded_progress_and_finished(self) -> None:
         worker = FITSLoadWorker(["a.fits", "b.fits"], hdu_index=3, source_group_start=10)
         loaded: list[tuple[FITSData, object]] = []

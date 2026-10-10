@@ -21,7 +21,6 @@ from PySide6.QtWidgets import (
     QFrame,
     QGraphicsEllipseItem,
     QGraphicsItem,
-    QGraphicsPixmapItem,
     QGraphicsPathItem,
     QGraphicsRectItem,
     QGraphicsScene,
@@ -30,7 +29,9 @@ from PySide6.QtWidgets import (
     QRubberBand,
 )
 
+from .canvas_layers import CatalogLayer, MeasurementLayer, RegionLayer, SourceLayer
 from .compass_overlay import CompassOverlay
+from .image_item import ImagePixmapItem
 from .magnifier_overlay import MagnifierOverlay, _make_crosshair_cursor
 from .contracts import CanvasImageState, CanvasOverlayState, ViewFeedbackState
 from ..core.contracts import ROISelection, ZoomState
@@ -63,12 +64,11 @@ class ImageCanvas(QGraphicsView):
     def __init__(self, parent: Any | None = None) -> None:
         super().__init__(parent)
         self.current_image: QImage | None = None
-        self.current_catalog: Any = None
         self.zoom_state = ZoomState()
         self.image_state = CanvasImageState()
         self.overlay_state = CanvasOverlayState()
         self._scene = QGraphicsScene(self)
-        self._pixmap_item = QGraphicsPixmapItem()
+        self._pixmap_item = ImagePixmapItem()
         self._feedback_background_item = QGraphicsRectItem()
         self._feedback_item = QGraphicsTextItem("No Image Loaded")
 
@@ -76,26 +76,23 @@ class ImageCanvas(QGraphicsView):
         self._drag_origin: QPoint | None = None
         self._left_press_pos: QPoint | None = None
         self._marker_items: list[QGraphicsEllipseItem] = []
-        self._source_items: list[QGraphicsEllipseItem] = []
-        self._catalog_items: list[QGraphicsPathItem] = []
+        self._source_layer = SourceLayer(self._scene, self._SOURCE_INDEX_DATA_KEY)
+        self._catalog_layer = CatalogLayer(self._scene, self._CATALOG_INDEX_DATA_KEY)
+        self._region_layer = RegionLayer(self._scene, self._REGION_INDEX_DATA_KEY)
+        self._measurement_layer = MeasurementLayer(self._scene)
+        # Stable aliases preserve inspection by existing integration callers.
+        self._source_items = self._source_layer.items
+        self._catalog_items = self._catalog_layer.items
         self._moving_target_items: list[QGraphicsItem] = []
         self._moving_target_centers: list[tuple[float, float] | None] = []
         self._moving_target_roi_item: QGraphicsRectItem | None = None
         self._wcs_grid_items: list[QGraphicsItem] = []
-        self._measurement_roi_item: QGraphicsRectItem | None = None
-        self._aperture_items: list[QGraphicsEllipseItem] = []
-        self._region_path_items: list[QGraphicsPathItem] = []
-        self._region_label_items: list[QGraphicsTextItem] = []
-        self._region_items_by_index: dict[int, list[QGraphicsPathItem]] = {}
-        self._region_base_pens: dict[int, QPen] = {}
+        self._aperture_items = self._measurement_layer.apertures.items
+        self._region_path_items = self._region_layer.paths.items
+        self._region_label_items = self._region_layer.labels.items
+        self._region_items_by_index = self._region_layer.items_by_index
         self._roi_color = QColor(255, 0, 0)
         self._roi_line_width = 5
-        self._source_pen = QPen(QColor(255, 0, 0))
-        self._source_pen.setWidth(5)
-        self._source_pen.setCosmetic(True)
-        self._highlight_pen = QPen(QColor(255, 255, 0))
-        self._highlight_pen.setWidth(6)
-        self._highlight_pen.setCosmetic(True)
 
         self.setObjectName("image_canvas")
         self.setFrameShape(QFrame.Shape.NoFrame)
@@ -127,6 +124,18 @@ class ImageCanvas(QGraphicsView):
 
         self.magnifier = MagnifierOverlay(self)
         self.magnifier.hide()
+
+    @property
+    def current_catalog(self) -> Any:
+        return self._source_layer.catalog
+
+    @current_catalog.setter
+    def current_catalog(self, catalog: Any) -> None:
+        self._source_layer.catalog = catalog
+
+    @property
+    def _measurement_roi_item(self) -> QGraphicsRectItem | None:
+        return self._measurement_layer.roi_item
 
     def resizeEvent(self, event) -> None:  # noqa: ANN001
         super().resizeEvent(event)
@@ -170,18 +179,30 @@ class ImageCanvas(QGraphicsView):
         if self.current_catalog is not None:
             self.draw_sources(self.current_catalog)
 
-    def set_image(self, image: QImage | None) -> None:
+    def set_image(
+        self,
+        image: QImage | None,
+        *,
+        logical_size: tuple[int, int] | None = None,
+        sample_step: int | None = None,
+        sampling_offset: tuple[float, float] = (0.0, 0.0),
+    ) -> None:
         """Set the current image shown on the canvas.
 
-        Expected caller: `MainWindow.refresh_image()`.
+        ``logical_size`` keeps scene coordinates in original pixels when the
+        raster is a sampled preview. ``sample_step`` and ``sampling_offset``
+        preserve cropped edge blocks through orientation changes.
         """
 
         self.current_image = image
         if image is None:
-            self._pixmap_item.setPixmap(QPixmap())
+            self._pixmap_item.set_raster(QPixmap())
             self._layout_feedback_item()
             return
-        self._pixmap_item.setPixmap(QPixmap.fromImage(image))
+        self._pixmap_item.set_raster(
+            QPixmap.fromImage(image), logical_size=logical_size,
+            sample_step=sample_step, sampling_offset=sampling_offset,
+        )
         self._update_scene_rect()
         self._layout_feedback_item()
 
@@ -263,7 +284,7 @@ class ImageCanvas(QGraphicsView):
         """Clear the currently displayed image."""
 
         self.current_image = None
-        self._pixmap_item.setPixmap(QPixmap())
+        self._pixmap_item.set_raster(QPixmap())
         self._layout_feedback_item()
 
     def set_image_state(self, state: CanvasImageState) -> None:
@@ -292,7 +313,7 @@ class ImageCanvas(QGraphicsView):
     def render_scene_image(self) -> QImage | None:
         """Render the current pixmap plus scene overlays (sources, markers) to a QImage.
 
-        The output matches the pixmap's native pixel size. Feedback text
+        The output matches the original image's logical pixel size. Feedback text
         (e.g. "No Image Loaded") is suppressed so it does not appear in
         exported images. Returns ``None`` if no image is displayed.
         """
@@ -302,7 +323,7 @@ class ImageCanvas(QGraphicsView):
             return None
 
         source_rect = self._pixmap_item.sceneBoundingRect()
-        image = QImage(pixmap.size(), QImage.Format.Format_ARGB32)
+        image = QImage(source_rect.size().toSize(), QImage.Format.Format_ARGB32)
         image.fill(Qt.GlobalColor.black)
 
         feedback_visible = self._feedback_item.isVisible()
@@ -314,13 +335,36 @@ class ImageCanvas(QGraphicsView):
         try:
             painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
             painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
-            target_rect = QRectF(0, 0, float(pixmap.width()), float(pixmap.height()))
+            target_rect = QRectF(0, 0, source_rect.width(), source_rect.height())
             self._scene.render(painter, target_rect, source_rect)
         finally:
             painter.end()
             self._feedback_item.setVisible(feedback_visible)
             self._feedback_background_item.setVisible(background_visible)
 
+        return image
+
+    def render_raster_image(self) -> QImage | None:
+        """Export only the displayed raster in original logical dimensions.
+
+        Sampled textures are expanded here on demand using their exact crop
+        and orientation offsets. Overlays and feedback are excluded.
+        """
+        if self.current_image is None or self._pixmap_item.pixmap().isNull():
+            return None
+        image_rect = self._pixmap_item.boundingRect()
+        if (
+            self._pixmap_item.image_to_scene.isIdentity()
+            and self.current_image.size() == image_rect.size().toSize()
+        ):
+            return self.current_image
+        image = QImage(image_rect.size().toSize(), QImage.Format.Format_ARGB32)
+        image.fill(Qt.GlobalColor.black)
+        painter = QPainter(image)
+        try:
+            self._pixmap_item.paint(painter, None)
+        finally:
+            painter.end()
         return image
 
     def fit_to_window(self) -> None:
@@ -357,31 +401,10 @@ class ImageCanvas(QGraphicsView):
         self._zoom_by_factor(1 / 1.15)
 
     def draw_sources(self, catalog: Any) -> None:
-        """Draw source ellipses for detected sources.
-
-        Expected caller: `MainWindow.handle_roi_selected()`.
-        Each source is drawn as an ellipse using a, b, theta from the catalog.
-        """
-
-        self.clear_sources()
-        self.current_catalog = catalog
-        if catalog is None:
-            return
-        for index, record in enumerate(catalog):
-            a = max(record.a, 1.0) * 3
-            b = max(record.b, 1.0) * 3
-            item = QGraphicsEllipseItem(-a, -b, a * 2, b * 2)
-            item.setPen(self._source_pen)
-            px, py = record.x, record.y
-            if self._source_position_transform is not None:
-                px, py = self._source_position_transform(px, py)
-            item.setPos(px, py)
-            item.setRotation(math.degrees(record.theta))
-            item.setData(self._SOURCE_INDEX_DATA_KEY, index)
-            self._scene.addItem(item)
-            self._source_items.append(item)
-
-        self._refresh_source_pens()
+        """Draw detected sources using the independent source layer."""
+        self._source_layer.position_transform = self._source_position_transform
+        self._source_layer.highlighted_index = self.overlay_state.highlighted_index
+        self._source_layer.draw_sources(catalog)
 
     def set_overlay_state(self, state: CanvasOverlayState) -> None:
         """Apply structured overlay presentation state to the canvas."""
@@ -394,12 +417,7 @@ class ImageCanvas(QGraphicsView):
         return self.overlay_state
 
     def clear_sources(self) -> None:
-        """Clear all source overlays."""
-
-        for item in self._source_items:
-            self._scene.removeItem(item)
-        self._source_items.clear()
-        self.current_catalog = None
+        self._source_layer.clear_sources()
 
     def highlight_source(self, index: int) -> None:
         """Highlight a single source overlay, reset others.
@@ -418,29 +436,14 @@ class ImageCanvas(QGraphicsView):
         self.centerOn(self._source_items[index].scenePos())
 
     def set_source_overlay_style(
-        self,
-        color: QColor | None = None,
-        line_width: int | None = None,
+        self, color: QColor | None = None, line_width: int | None = None,
     ) -> None:
-        """Update source-overlay color and width, then repaint existing items."""
-
-        if color is not None:
-            self._source_pen.setColor(QColor(color))
-        if line_width is not None:
-            width = max(1, int(line_width))
-            self._source_pen.setWidth(width)
-            self._highlight_pen.setWidth(width + 1)
-        self._refresh_source_pens()
+        self._source_layer.highlighted_index = self.overlay_state.highlighted_index
+        self._source_layer.set_source_overlay_style(color, line_width)
 
     def _refresh_source_pens(self) -> None:
-        """Reapply source pens so style changes appear immediately."""
-
-        highlighted_index = self.overlay_state.highlighted_index
-        for i, item in enumerate(self._source_items):
-            if highlighted_index is not None and i == highlighted_index:
-                item.setPen(self._highlight_pen)
-            else:
-                item.setPen(self._source_pen)
+        self._source_layer.highlighted_index = self.overlay_state.highlighted_index
+        self._source_layer._refresh_source_pens()
 
     def set_markers(
         self,
@@ -518,49 +521,12 @@ class ImageCanvas(QGraphicsView):
         self._wcs_grid_items.clear()
 
     def set_catalog_sources(
-        self,
-        sources: list[Any],
-        pixel_coords: list[tuple[float, float]],
-        *,
-        transform=None,
+        self, sources: list[Any], pixel_coords: list[tuple[float, float]], *, transform=None,
     ) -> None:
-        """Draw bounded Gaia catalog markers at projected original-image pixels."""
-
-        self.clear_catalog_sources()
-        point_transform = transform or (lambda x, y: (x, y))
-        base_color = QColor(50, 255, 170)
-        for index, (source, point) in enumerate(zip(sources, pixel_coords)):
-            x, y = point_transform(float(point[0]), float(point[1]))
-            magnitude = getattr(source, "g_mag", None)
-            radius = 6.0
-            if magnitude is not None and math.isfinite(float(magnitude)):
-                radius = max(3.0, min(8.0, 8.0 - 0.22 * (float(magnitude) - 8.0)))
-            path = QPainterPath()
-            path.addEllipse(QRectF(-radius, -radius, radius * 2.0, radius * 2.0))
-            path.moveTo(-radius - 3.0, 0.0)
-            path.lineTo(radius + 3.0, 0.0)
-            path.moveTo(0.0, -radius - 3.0)
-            path.lineTo(0.0, radius + 3.0)
-            item = QGraphicsPathItem(path)
-            pen = QPen(base_color)
-            pen.setWidth(1)
-            pen.setCosmetic(True)
-            item.setPen(pen)
-            item.setPos(float(x), float(y))
-            item.setZValue(3.0)
-            item.setData(self._CATALOG_INDEX_DATA_KEY, index)
-            source_id = str(getattr(source, "source_id", index + 1))
-            tooltip = f"Gaia DR3 {source_id}"
-            if magnitude is not None:
-                tooltip += f"\nG = {float(magnitude):.3f} mag"
-            item.setToolTip(tooltip)
-            self._scene.addItem(item)
-            self._catalog_items.append(item)
+        self._catalog_layer.set_catalog_sources(sources, pixel_coords, transform=transform)
 
     def clear_catalog_sources(self) -> None:
-        for item in self._catalog_items:
-            self._scene.removeItem(item)
-        self._catalog_items.clear()
+        self._catalog_layer.clear_catalog_sources()
 
     def set_moving_target_overlays(
         self,
@@ -662,152 +628,27 @@ class ImageCanvas(QGraphicsView):
             self._moving_target_roi_item = None
 
     def set_measurement_roi(self, selection: ROISelection, *, transform=None) -> None:
-        """Persist the most recently measured rectangular ROI on the canvas."""
-
-        self.clear_measurement_roi()
-        point_transform = transform or (lambda x, y: (x, y))
-        corners = (
-            point_transform(selection.x0, selection.y0),
-            point_transform(selection.x0 + selection.width, selection.y0 + selection.height),
-        )
-        x0, x1 = sorted((float(corners[0][0]), float(corners[1][0])))
-        y0, y1 = sorted((float(corners[0][1]), float(corners[1][1])))
-        item = QGraphicsRectItem(QRectF(x0, y0, x1 - x0, y1 - y0))
-        pen = QPen(QColor(255, 196, 64))
-        pen.setWidth(2)
-        pen.setCosmetic(True)
-        pen.setStyle(Qt.PenStyle.DashLine)
-        item.setPen(pen)
-        item.setZValue(2.0)
-        self._scene.addItem(item)
-        self._measurement_roi_item = item
+        self._measurement_layer.set_measurement_roi(selection, transform=transform)
 
     def clear_measurement_roi(self) -> None:
-        if self._measurement_roi_item is not None:
-            self._scene.removeItem(self._measurement_roi_item)
-            self._measurement_roi_item = None
+        self._measurement_layer.clear_measurement_roi()
 
     def set_aperture_overlay(
-        self,
-        center_x: float,
-        center_y: float,
-        radii: tuple[float, float, float],
-        *,
-        transform=None,
+        self, center_x: float, center_y: float, radii: tuple[float, float, float], *, transform=None,
     ) -> None:
-        """Draw a circular source aperture plus the two background-annulus edges."""
-
-        self.clear_aperture_overlay()
-        point_transform = transform or (lambda x, y: (x, y))
-        x, y = point_transform(float(center_x), float(center_y))
-        colors = (QColor(255, 225, 80), QColor(80, 220, 255), QColor(80, 220, 255))
-        for radius, color in zip(radii, colors):
-            normalized_radius = float(radius)
-            if not math.isfinite(normalized_radius) or normalized_radius <= 0:
-                continue
-            item = QGraphicsEllipseItem(
-                float(x) - normalized_radius,
-                float(y) - normalized_radius,
-                normalized_radius * 2.0,
-                normalized_radius * 2.0,
-            )
-            pen = QPen(color)
-            pen.setWidth(2 if not self._aperture_items else 1)
-            pen.setCosmetic(True)
-            pen.setStyle(Qt.PenStyle.DashLine if self._aperture_items else Qt.PenStyle.SolidLine)
-            item.setPen(pen)
-            item.setZValue(2.2)
-            self._scene.addItem(item)
-            self._aperture_items.append(item)
+        self._measurement_layer.set_aperture_overlay(center_x, center_y, radii, transform=transform)
 
     def clear_aperture_overlay(self) -> None:
-        for item in self._aperture_items:
-            self._scene.removeItem(item)
-        self._aperture_items.clear()
+        self._measurement_layer.clear_aperture_overlay()
 
     def set_region_overlays(self, overlays: list[dict[str, Any]]) -> None:
-        """Draw already-projected, bounded DS9 geometries in display coordinates."""
-
-        self.clear_region_overlays()
-        for overlay in overlays:
-            try:
-                index = int(overlay["index"])
-                points = [(float(x), float(y)) for x, y in overlay["points"]]
-            except (KeyError, TypeError, ValueError, OverflowError):
-                continue
-            if not points or any(not (math.isfinite(x) and math.isfinite(y)) for x, y in points):
-                continue
-            is_point = bool(overlay.get("point", False))
-            closed = bool(overlay.get("closed", not is_point))
-            path = QPainterPath()
-            if is_point:
-                x, y = points[0]
-                radius = 6.0
-                path.moveTo(x - radius, y)
-                path.lineTo(x + radius, y)
-                path.moveTo(x, y - radius)
-                path.lineTo(x, y + radius)
-                path.addEllipse(QRectF(x - 2.0, y - 2.0, 4.0, 4.0))
-            else:
-                path.moveTo(*points[0])
-                for point in points[1:]:
-                    path.lineTo(*point)
-                if closed:
-                    path.closeSubpath()
-
-            color = QColor(str(overlay.get("color", "green")))
-            if not color.isValid():
-                color = QColor(80, 255, 120)
-            include = bool(overlay.get("include", True))
-            width = max(1, min(int(overlay.get("width", 1)), 10))
-            pen = QPen(color)
-            pen.setWidth(width)
-            pen.setCosmetic(True)
-            pen.setStyle(Qt.PenStyle.SolidLine if include else Qt.PenStyle.DashLine)
-            item = QGraphicsPathItem(path)
-            item.setPen(pen)
-            item.setZValue(2.5)
-            item.setData(self._REGION_INDEX_DATA_KEY, index)
-            tooltip = str(overlay.get("tooltip", "DS9 Region"))
-            item.setToolTip(tooltip)
-            self._scene.addItem(item)
-            self._region_path_items.append(item)
-            self._region_items_by_index.setdefault(index, []).append(item)
-            self._region_base_pens[id(item)] = QPen(pen)
-
-            label_text = str(overlay.get("label", "")).strip()
-            if label_text:
-                label = QGraphicsTextItem(label_text)
-                label.setDefaultTextColor(color)
-                label.setFont(QFont("Segoe UI", 8))
-                label.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations, True)
-                bounds = path.boundingRect()
-                label.setPos(bounds.left() + 3.0, bounds.top() + 3.0)
-                label.setZValue(2.6)
-                label.setToolTip(tooltip)
-                label.setData(self._REGION_INDEX_DATA_KEY, index)
-                self._scene.addItem(label)
-                self._region_label_items.append(label)
+        self._region_layer.set_region_overlays(overlays)
 
     def clear_region_overlays(self) -> None:
-        for item in self._region_path_items:
-            self._scene.removeItem(item)
-        for item in self._region_label_items:
-            self._scene.removeItem(item)
-        self._region_path_items.clear()
-        self._region_label_items.clear()
-        self._region_items_by_index.clear()
-        self._region_base_pens.clear()
+        self._region_layer.clear_region_overlays()
 
     def highlight_region(self, index: int | None) -> None:
-        for region_index, items in self._region_items_by_index.items():
-            for item in items:
-                base = self._region_base_pens.get(id(item), item.pen())
-                pen = QPen(base)
-                if index is not None and region_index == int(index):
-                    pen.setColor(QColor(255, 230, 80))
-                    pen.setWidth(min(12, max(2, base.width() + 2)))
-                item.setPen(pen)
+        self._region_layer.highlight_region(index)
 
     def center_on_region(self, index: int) -> None:
         items = self._region_items_by_index.get(int(index), [])
@@ -815,11 +656,7 @@ class ImageCanvas(QGraphicsView):
             self.centerOn(items[0].sceneBoundingRect().center())
 
     def highlight_catalog_source(self, index: int | None) -> None:
-        for item_index, item in enumerate(self._catalog_items):
-            pen = QPen(QColor(255, 230, 80) if item_index == index else QColor(50, 255, 170))
-            pen.setWidth(2 if item_index == index else 1)
-            pen.setCosmetic(True)
-            item.setPen(pen)
+        self._catalog_layer.highlight_catalog_source(index)
 
     def center_on_catalog_source(self, index: int) -> None:
         if 0 <= index < len(self._catalog_items):
@@ -1033,6 +870,8 @@ class ImageCanvas(QGraphicsView):
                 scene_pos.y(),
                 event.pos(),
                 self.zoom_state.scale_factor,
+                image_to_scene=self._pixmap_item.image_to_scene,
+                logical_image_rect=self._pixmap_item.boundingRect(),
             )
 
         if self._drag_origin is not None:

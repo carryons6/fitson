@@ -144,7 +144,7 @@ gzip/ZIP/bzip2/xz/LZW 压缩会在解压前被拒绝；请先在确认展开大�
 ### Windows 发布安装包
 
 请从 [GitHub Releases 页面](https://github.com/carryons6/fitson/releases) 下载
-`AstroView_Setup_1.10.0.exe` 与 `SHA256SUMS.txt`。Windows 安装包**尚未进行
+`AstroView_Setup_1.11.0.exe` 与 `SHA256SUMS.txt`。Windows 安装包**尚未进行
 Authenticode 数字签名**，因此 Windows SmartScreen 可能显示警告。运行前请使用
 Release 中的校验清单核验安装包。
 
@@ -164,6 +164,10 @@ Release 中的校验清单核验安装包。
   - `contracts.py` — 跨层共享的类型化数据类
 
 - **`app/`** — PySide6 UI 层
+  - `frame_session.py` — 统一管理每帧数据、显示纹理与派生缓存
+  - `file_load_controller.py`、`sep_controller.py`、`comparison_controller.py` — 功能请求及任务生命周期
+  - `task_lifecycle.py` — 共享的请求有效性与 worker 占用管理
+  - `canvas_layers.py`、`image_item.py` — 叠加层管理及原图坐标中的采样纹理
   - `main_window.py` — 组合 UI、控制器、worker 与服务的应用装配根
   - `canvas.py` — 基于 QGraphicsView 的图像显示与叠加层
   - `sep_panel.py` — SEP 参数表单
@@ -179,6 +183,8 @@ Release 中的校验清单核验安装包。
   - `moving_target_worker.py` — 可取消的 SEP 序列分析子进程适配器
   - `header_dialog.py` — FITS Header 查看对话框
   - `status_bar.py` — 光标/缩放/帧状态显示
+
+坐标、预览和任务生命周期约定及回归检查详见 [架构说明](docs/architecture.md)。
 
 `MainWindow` 保留跨功能装配与策略协调职责，功能内部状态和 worker 生命周期则交给
 专用控制器。视图模块通过信号和 setter 通信，不直接调用服务；服务模块返回领域对象，

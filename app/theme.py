@@ -6,11 +6,10 @@ via QSettings under the "ui/theme" key so it survives restarts.
 from __future__ import annotations
 
 import logging
-import tempfile
 from pathlib import Path
 
-from PySide6.QtCore import QPoint, QSettings, QStandardPaths, Qt
-from PySide6.QtGui import QColor, QPainter, QPalette, QPen, QPixmap
+from PySide6.QtCore import QSettings
+from PySide6.QtGui import QColor, QPalette
 from PySide6.QtWidgets import QApplication
 
 THEME_KEY = "ui/theme"
@@ -78,125 +77,32 @@ def _light_palette() -> QPalette:
     return p
 
 
-_arrow_cache_context: tempfile.TemporaryDirectory[str] | None = None
-_arrow_cache_dir: Path | None = None
-_arrow_cache_init_attempted = False
-_arrow_paths_cache: dict[tuple[str, str], str] = {}
+_ARROW_RESOURCE_NAMES = {
+    ("up", "#1f2430"): "spinbox_arrow_up_light.png",
+    ("down", "#1f2430"): "spinbox_arrow_down_light.png",
+    ("up", "#e4e7eb"): "spinbox_arrow_up_dark.png",
+    ("down", "#e4e7eb"): "spinbox_arrow_down_dark.png",
+}
 
 
-def _create_private_arrow_cache(base_dir: Path | None) -> tuple[tempfile.TemporaryDirectory[str], Path]:
-    """Create a process-private, unpredictable directory for generated icons."""
+def _theme_icon_dir() -> Path:
+    """Return the packaged theme-icon directory in source and frozen builds."""
 
-    if base_dir is not None:
-        base_dir.mkdir(parents=True, exist_ok=True)
-    context = tempfile.TemporaryDirectory(
-        prefix="astroview-theme-icons-",
-        dir=str(base_dir) if base_dir is not None else None,
-    )
-    cache_dir = Path(context.name)
-    # TemporaryDirectory already creates mode 0700 on POSIX.  Re-apply it in
-    # case an unusual platform umask or temporary-directory implementation did
-    # not, while leaving Windows ACL handling to the OS.
-    try:
-        cache_dir.chmod(0o700)
-    except OSError:
-        if not cache_dir.is_dir():
-            context.cleanup()
-            raise
-    if not cache_dir.is_dir():
-        context.cleanup()
-        raise OSError(f"Theme icon cache was not created: {cache_dir}")
-    return context, cache_dir
-
-
-def _get_arrow_cache_dir() -> Path | None:
-    """Return a private per-process cache, or ``None`` if it cannot be made."""
-
-    global _arrow_cache_context, _arrow_cache_dir, _arrow_cache_init_attempted
-    if _arrow_cache_dir is not None:
-        return _arrow_cache_dir
-    if _arrow_cache_init_attempted:
-        return None
-    _arrow_cache_init_attempted = True
-
-    cache_location = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.CacheLocation)
-    candidates = [Path(cache_location) if cache_location else None]
-    if candidates[0] is not None:
-        # A secure random directory in the system temp location is a fallback
-        # when the per-user Qt cache is read-only or otherwise unavailable.
-        candidates.append(None)
-
-    for base_dir in candidates:
-        try:
-            context, cache_dir = _create_private_arrow_cache(base_dir)
-        except OSError as exc:
-            logger.warning("Could not create theme icon cache under %s: %s", base_dir, exc)
-            continue
-        _arrow_cache_context = context
-        _arrow_cache_dir = cache_dir
-        return cache_dir
-
-    logger.warning("Theme arrow icons are disabled because no writable private cache is available")
-    return None
-
-
-def _arrow_pixmap(direction: str, color: QColor, size: int = 12) -> QPixmap:
-    """Draw a chevron arrow into a transparent pixmap."""
-    pm = QPixmap(size, size)
-    pm.fill(Qt.GlobalColor.transparent)
-    painter = QPainter(pm)
-    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-    pen = QPen(color)
-    pen.setWidthF(1.8)
-    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-    pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
-    painter.setPen(pen)
-    # Chevron points inside the pixmap with a small inset.
-    inset_x = 2
-    if direction == "up":
-        top_y = size // 2 - 2
-        bot_y = size // 2 + 2
-        left = QPoint(inset_x, bot_y)
-        mid = QPoint(size // 2, top_y)
-        right = QPoint(size - inset_x, bot_y)
-    else:  # down
-        top_y = size // 2 - 2
-        bot_y = size // 2 + 2
-        left = QPoint(inset_x, top_y)
-        mid = QPoint(size // 2, bot_y)
-        right = QPoint(size - inset_x, top_y)
-    painter.drawPolyline([left, mid, right])
-    painter.end()
-    return pm
+    return Path(__file__).resolve().parent.parent / "resources" / "icons"
 
 
 def _arrow_path(direction: str, hex_color: str) -> str | None:
-    """Return an absolute file path to a cached PNG arrow icon."""
-    key = (direction, hex_color)
-    cached = _arrow_paths_cache.get(key)
-    if cached and Path(cached).exists():
-        return cached
-    cache_dir = _get_arrow_cache_dir()
-    if cache_dir is None:
+    """Return an absolute path to a trusted, packaged PNG arrow icon."""
+
+    resource_name = _ARROW_RESOURCE_NAMES.get((direction, hex_color.lower()))
+    if resource_name is None:
+        logger.warning("No packaged theme arrow matches %s / %s", direction, hex_color)
         return None
-    pm = _arrow_pixmap(direction, QColor(hex_color))
-    out = cache_dir / f"arrow_{direction}_{hex_color.lstrip('#')}.png"
-    try:
-        saved = pm.save(str(out), "PNG")
-    except (OSError, RuntimeError) as exc:
-        logger.warning("Could not write theme arrow icon %s: %s", out, exc)
+    resource_path = _theme_icon_dir() / resource_name
+    if not resource_path.is_file():
+        logger.warning("Packaged theme arrow icon is missing: %s", resource_path)
         return None
-    if not saved or not out.is_file():
-        logger.warning("Could not write theme arrow icon %s", out)
-        try:
-            out.unlink(missing_ok=True)
-        except OSError:
-            pass
-        return None
-    # Qt QSS url() wants forward slashes; absolute path works cross-platform.
-    url = out.as_posix()
-    _arrow_paths_cache[key] = url
-    return url
+    return resource_path.as_posix()
 
 
 def _spinbox_qss(btn_bg: str, btn_hover: str, btn_pressed: str, border: str, arrow_color: str) -> str:

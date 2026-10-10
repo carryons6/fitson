@@ -5,7 +5,7 @@ import logging
 from PySide6.QtCore import QObject, QThread, Signal, Slot
 
 from ..core.fits_data import FITSData
-from ..core.fits_service import render_preview_u8
+from ..core.fits_service import render_preview_result, render_preview_u8
 
 
 logger = logging.getLogger(__name__)
@@ -31,6 +31,7 @@ class FITSLoadWorker(QObject):
         interval_name: str = "ZScale",
         preview_max_dimension: int = 2048,
         manual_limits: tuple[float, float] | None = None,
+        sampled_previews: bool = False,
     ) -> None:
         super().__init__()
         self.paths = list(paths)
@@ -42,6 +43,7 @@ class FITSLoadWorker(QObject):
         self.interval_name = interval_name
         self.preview_max_dimension = preview_max_dimension
         self.manual_limits = manual_limits
+        self.sampled_previews = sampled_previews
 
     @Slot()
     def run(self) -> None:
@@ -117,7 +119,8 @@ class FITSLoadWorker(QObject):
     def _render_preview(self, data: FITSData):
         """Render a fast preview for the first successfully loaded frame."""
 
-        return render_preview_u8(
+        preview_renderer = render_preview_result if self.sampled_previews else render_preview_u8
+        return preview_renderer(
             data,
             self.stretch_name,
             self.interval_name,

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QPoint, QRectF, Qt
-from PySide6.QtGui import QColor, QCursor, QFont, QImage, QPainter, QPen, QPixmap
+from PySide6.QtGui import QColor, QCursor, QFont, QImage, QPainter, QPen, QPixmap, QTransform
 from PySide6.QtWidgets import QWidget
 
 
@@ -68,6 +68,8 @@ class MagnifierOverlay(QWidget):
         self._scene_x: float = 0.0
         self._scene_y: float = 0.0
         self._source_image: QImage | None = None
+        self._image_to_scene = QTransform()
+        self._logical_image_rect = QRectF()
         self.setFixedSize(self.SIZE, self.SIZE)
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
 
@@ -86,6 +88,9 @@ class MagnifierOverlay(QWidget):
         scene_y: float,
         view_pos: QPoint,
         canvas_scale: float,
+        *,
+        image_to_scene: QTransform | None = None,
+        logical_image_rect: QRectF | None = None,
     ) -> None:
         """Reposition near *view_pos* and repaint from *source_image*."""
 
@@ -93,6 +98,12 @@ class MagnifierOverlay(QWidget):
         self._scene_x = scene_x
         self._scene_y = scene_y
         self._canvas_scale = canvas_scale
+        self._image_to_scene = QTransform(image_to_scene) if image_to_scene is not None else QTransform()
+        self._logical_image_rect = (
+            QRectF(logical_image_rect)
+            if logical_image_rect is not None
+            else QRectF(source_image.rect()) if source_image is not None else QRectF()
+        )
 
         # Place the overlay offset from the cursor, flipping when near edges.
         parent = self.parentWidget()
@@ -134,10 +145,26 @@ class MagnifierOverlay(QWidget):
         sy = self._scene_y - src_span / 2.0
 
         src_rect = QRectF(sx, sy, src_span, src_span)
+        scene_to_image, invertible = self._image_to_scene.inverted()
+        if invertible:
+            src_rect = scene_to_image.mapRect(src_rect)
         dst_rect = QRectF(0, 0, self.SIZE, self.SIZE)
 
         painter.setClipRect(self.rect())
-        painter.drawImage(dst_rect, self._source_image, src_rect)
+        painter.save()
+        try:
+            # A flipped sampled texture may extend beyond the logical image.
+            # Do not reveal its cropped row/column when inspecting the edge.
+            logical_target = QRectF(
+                (self._logical_image_rect.left() - sx) * effective_mag,
+                (self._logical_image_rect.top() - sy) * effective_mag,
+                self._logical_image_rect.width() * effective_mag,
+                self._logical_image_rect.height() * effective_mag,
+            )
+            painter.setClipRect(logical_target, Qt.ClipOperation.IntersectClip)
+            painter.drawImage(dst_rect, self._source_image, src_rect)
+        finally:
+            painter.restore()
 
         # -- crosshair --
         mag = self._magnification

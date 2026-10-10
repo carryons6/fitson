@@ -2,8 +2,14 @@ from __future__ import annotations
 
 from PySide6.QtCore import QObject, QThread, Signal, Slot
 
+from ..core.contracts import RenderResult, ResolvedRenderSpec
 from ..core.fits_data import FITSData
-from ..core.fits_service import compute_interval_limits, render_image_u8, render_preview_u8
+from ..core.fits_service import (
+    compute_interval_limits,
+    render_image_u8,
+    render_preview_result,
+    render_preview_u8,
+)
 
 
 class FrameRenderWorker(QObject):
@@ -26,6 +32,8 @@ class FrameRenderWorker(QObject):
         preview_dimensions: tuple[int, ...] = (1024, 2048),
         manual_limits: tuple[float, float] | None = None,
         preview_only: bool = False,
+        sampled_previews: bool = False,
+        resolved_spec: ResolvedRenderSpec | None = None,
     ) -> None:
         super().__init__()
         self.request_id = request_id
@@ -37,21 +45,24 @@ class FrameRenderWorker(QObject):
         self.preview_dimensions = tuple(sorted(set(preview_dimensions)))
         self.manual_limits = manual_limits
         self.preview_only = preview_only
+        self.sampled_previews = sampled_previews
+        self.resolved_spec = resolved_spec
 
     @Slot()
     def run(self) -> None:
         thread = QThread.currentThread()
 
         try:
-            effective_interval, effective_manual_limits = self._resolve_shared_limits()
+            spec = self._resolve_render_spec()
+            preview_renderer = render_preview_result if self.sampled_previews else render_preview_u8
 
             for max_dimension in self.preview_dimensions:
-                preview = render_preview_u8(
+                preview = preview_renderer(
                     self.data,
                     self.stretch_name,
-                    effective_interval,
+                    self.interval_name,
                     max_dimension=max_dimension,
-                    manual_limits=effective_manual_limits,
+                    resolved_spec=spec,
                 )
                 if preview is not None:
                     self.preview_ready.emit(self.request_id, self.generation, self.frame_index, preview)
@@ -64,34 +75,38 @@ class FrameRenderWorker(QObject):
             image_u8 = render_image_u8(
                 self.data,
                 self.stretch_name,
-                effective_interval,
-                manual_limits=effective_manual_limits,
+                self.interval_name,
+                resolved_spec=spec,
             )
             if thread.isInterruptionRequested():
                 return
-            self.render_ready.emit(self.request_id, self.generation, self.frame_index, image_u8)
+            result = image_u8
+            if self.sampled_previews:
+                height, width = (0, 0) if self.data.data is None else self.data.data.shape[:2]
+                result = RenderResult(
+                    image_u8=image_u8,
+                    width=width,
+                    height=height,
+                    invalid_pixels=self.data.invalid_pixels,
+                    resolved_spec=spec,
+                )
+            self.render_ready.emit(self.request_id, self.generation, self.frame_index, result)
         except Exception as exc:
             self.render_error.emit(self.request_id, self.generation, self.frame_index, str(exc))
         finally:
             self.finished.emit(self.request_id)
 
-    def _resolve_shared_limits(self) -> tuple[str, tuple[float, float] | None]:
-        """Compute interval limits once so preview and full render share them.
+    def _resolve_render_spec(self) -> ResolvedRenderSpec:
+        """Keep one immutable mapping, including constant/all-invalid frames."""
 
-        For non-Manual intervals (e.g. ZScale) the limits would otherwise be
-        recomputed independently per render stage. By precomputing them and
-        switching downstream calls to ``"Manual"`` we avoid that redundant
-        work and also guarantee the preview and final image align visually.
-        """
-
-        if self.interval_name == "Manual":
-            return self.interval_name, self.manual_limits
-
-        shared = compute_interval_limits(
-            self.data,
-            self.interval_name,
-            manual_limits=self.manual_limits,
+        if self.resolved_spec is not None:
+            return self.resolved_spec
+        return ResolvedRenderSpec(
+            stretch_name=self.stretch_name,
+            interval_name=self.interval_name,
+            limits=compute_interval_limits(
+                self.data,
+                self.interval_name,
+                manual_limits=self.manual_limits,
+            ),
         )
-        if shared is None:
-            return self.interval_name, self.manual_limits
-        return "Manual", shared

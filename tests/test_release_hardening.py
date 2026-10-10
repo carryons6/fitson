@@ -60,6 +60,12 @@ class TestReleaseConfigurationHardening(unittest.TestCase):
         self.assertIn("_collect_conda_icu_binaries", spec)
         self.assertIn('"metadata.py"', spec)
         self.assertIn("Required runtime binary", spec)
+        self.assertIn('"pyside6.*.dll"', spec)
+        self.assertNotIn('"pyside6*.dll"', spec)
+        self.assertIn('"main_icon.ico"', spec)
+        self.assertIn('"spinbox_arrow_up_light.png"', spec)
+        self.assertNotIn('"main_icon.png"', spec)
+        self.assertNotIn('"qico.dll"', spec)
 
     def test_release_build_smoke_tests_and_hashes_frozen_executable(self) -> None:
         build_script = (ROOT / "scripts" / "build_windows.ps1").read_text(encoding="utf-8")
@@ -75,6 +81,10 @@ class TestReleaseConfigurationHardening(unittest.TestCase):
         self.assertIn('-TimeoutMilliseconds 300000', build_script)
         self.assertIn('-AttemptName "warm-start"', build_script)
         self.assertIn('-TimeoutMilliseconds 60000', build_script)
+        self.assertIn("startup-timings.json", build_script)
+        self.assertIn("coldStartMilliseconds", build_script)
+        self.assertIn("warmStartMilliseconds", build_script)
+        self.assertIn("Elapsed.TotalMilliseconds", build_script)
         self.assertIn("$process.Kill($true)", build_script)
         self.assertIn('"System32\\taskkill.exe"', build_script)
         self.assertIn("/PID $process.Id /T /F", build_script)

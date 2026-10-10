@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests.frame_session_fixtures import set_session_field
+
 import os
 import unittest
 from unittest.mock import Mock, patch
@@ -62,12 +64,12 @@ class TestWCSCatalogIntegration(unittest.TestCase):
                 wcs=_simple_wcs(),
                 has_wcs=True,
             )
-            window._frames = [data]
-            window._frame_images = [QImage(100, 80, QImage.Format.Format_Grayscale8)]
-            window._frame_dirty = [False]
-            window._frame_bkg_cache = [None]
-            window._frame_residual_cache = [None]
-            window._frame_cached_preview_dim = [0]
+            set_session_field(window, 'data', [data])
+            set_session_field(window, 'image', [QImage(100, 80, QImage.Format.Format_Grayscale8)])
+            set_session_field(window, 'dirty', [False])
+            set_session_field(window, 'background', [None])
+            set_session_field(window, 'residual', [None])
+            set_session_field(window, 'preview_dimension', [0])
             window.fits_service.current_data = data
 
             window._sync_wcs_catalog_state()
@@ -91,8 +93,8 @@ class TestWCSCatalogIntegration(unittest.TestCase):
                 has_wcs=True,
             )
             window.fits_service.current_data = data
-            window._frames = [data]
-            window._current_frame_index = 0
+            set_session_field(window, 'data', [data])
+            window._session.current_index = 0
             worker = Mock()
             window._active_gaia_query_request_id = 7
             window._gaia_results_enabled = True
@@ -127,7 +129,7 @@ class TestWCSCatalogIntegration(unittest.TestCase):
         window._gaia_query_thread = thread
         window._active_gaia_query_request_id = 8
         window._gaia_results_enabled = True
-        window._current_frame_index = 0
+        window._session.current_index = 0
         try:
             self.assertFalse(window._stop_gaia_query(wait=False))
             self.assertFalse(window._gaia_results_enabled)
@@ -153,7 +155,7 @@ class TestWCSCatalogIntegration(unittest.TestCase):
             window.initialize(apply_startup_request=False)
             wcs = _simple_wcs()
             data = FITSData(data=np.zeros((80, 100)), wcs=wcs, has_wcs=True)
-            window._frames = [data]
+            set_session_field(window, 'data', [data])
             window.fits_service.current_data = data
             with patch("astroview.app.main_window.build_wcs_grid", wraps=build_wcs_grid) as builder:
                 window._sync_wcs_catalog_state()
@@ -171,7 +173,7 @@ class TestWCSCatalogIntegration(unittest.TestCase):
         try:
             window.initialize(apply_startup_request=False)
             data = FITSData(data=np.zeros((80, 100)), wcs=_simple_wcs(), has_wcs=True)
-            window._frames = [data]
+            set_session_field(window, 'data', [data])
             window.fits_service.current_data = data
             window._sync_wcs_catalog_state()
             window._comparison_active = True

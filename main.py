@@ -26,6 +26,12 @@ def _resource_path() -> Path:
     return Path(__file__).resolve().parent / "resources"
 
 
+def _application_icon_path() -> Path:
+    """Return the compact multi-resolution application icon."""
+
+    return _resource_path() / "icons" / "main_icon.ico"
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     """Create the CLI parser for the application entry point."""
 
@@ -66,10 +72,16 @@ def run_smoke_test() -> int:
         apply_theme(app, "light")
 
         _write_smoke_report("RUNNING icon")
-        icon_path = _resource_path() / "icons" / "main_icon.png"
+        icon_path = _application_icon_path()
         if not icon_path.is_file():
             raise FileNotFoundError(f"Bundled application icon is missing: {icon_path}")
-        app.setWindowIcon(QIcon(str(icon_path)))
+        icon = QIcon(str(icon_path))
+        for size in (16, 32):
+            if icon.pixmap(size, size).isNull():
+                raise RuntimeError(
+                    f"Bundled application icon cannot be decoded at {size}x{size}: {icon_path}"
+                )
+        app.setWindowIcon(icon)
 
         _write_smoke_report("RUNNING FITS")
         sample = np.zeros((16, 16), dtype=np.float32)
@@ -77,6 +89,10 @@ def run_smoke_test() -> int:
         Time("2026-01-01T00:00:00", scale="utc")
         _write_smoke_report("RUNNING SEP")
         sep.extract(sample, 1.0)
+        _write_smoke_report("RUNNING moving-target spawn")
+        from .app.release_smoke import run_moving_target_spawn_smoke
+
+        run_moving_target_spawn_smoke()
         _write_smoke_report("RUNNING Qt events")
         app.processEvents()
     except Exception:
@@ -125,7 +141,7 @@ def main() -> int:
     install_translator(app)
     apply_theme(app, load_saved_theme())
 
-    icon_path = _resource_path() / "icons" / "main_icon.png"
+    icon_path = _application_icon_path()
     if icon_path.exists():
         app.setWindowIcon(QIcon(str(icon_path)))
 

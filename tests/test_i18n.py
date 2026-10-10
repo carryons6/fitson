@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests.frame_session_fixtures import set_session_field
+
 import os
 import tempfile
 import unittest
@@ -155,7 +157,7 @@ class TestI18n(unittest.TestCase):
                 FITSData(path=f"small-{index}.fits", data=np.zeros((8, 8)))
                 for index in range(5)
             ]
-            window._frames = frames
+            set_session_field(window, 'data', frames)
             window.fits_service.current_data = frames[0]
             window._moving_target_roi = ROISelection(0, 0, 8, 8)
             window._start_moving_target_detection(MovingTargetParameters(), 1.0, False)

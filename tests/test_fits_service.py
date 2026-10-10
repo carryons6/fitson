@@ -8,7 +8,17 @@ from unittest.mock import patch
 import numpy as np
 
 from core.fits_data import FITSData
-from core.fits_service import FITSService, _OriginalInterval, _subsample, render_preview_u8
+from core.fits_service import (
+    FITSService,
+    _OriginalInterval,
+    _subsample,
+    compute_interval_limits,
+    render_frame,
+    render_image_u8,
+    render_preview_result,
+    render_preview_u8,
+    resolve_render_spec,
+)
 
 
 class _IdentityStretch:
@@ -211,6 +221,107 @@ class TestFITSService(unittest.TestCase):
         )
 
         self.assertEqual(service.finite_data_range(), (5.0, 10.0))
+
+    def test_interval_apis_share_finite_fallback_for_mixed_invalid_pixels(self) -> None:
+        pixels = np.array([[np.nan, -np.inf, 2.0], [np.inf, 4.0, 8.0]], dtype=np.float32)
+        original = pixels.copy()
+        service = FITSService()
+        service.current_data = FITSData(data=pixels)
+        service.set_interval("Original")
+
+        spec = service.resolve_render_spec()
+        result = service.render(resolved_spec=spec)
+        counts, low, high = service.histogram(bins=4, resolved_spec=spec)
+
+        self.assertEqual(spec.limits, (2.0, 8.0))
+        self.assertEqual(service.current_interval_limits(), spec.limits)
+        self.assertEqual(compute_interval_limits(service.current_data, "Original"), spec.limits)
+        self.assertEqual((low, high), spec.limits)
+        self.assertEqual(counts.sum(), 3)
+        self.assertEqual(result.image_u8[0, 0], 0)
+        self.assertEqual(result.image_u8[1, 2], 255)
+        np.testing.assert_array_equal(pixels, original)
+
+    def test_preview_uses_original_frame_limits_even_when_sampling_misses_peak(self) -> None:
+        pixels = np.arange(35, dtype=np.float32).reshape(5, 7)
+        pixels[1, 1] = 1000.0
+        data = FITSData(data=pixels)
+        preview = render_preview_result(data, "Linear", "Original", max_dimension=3)
+        full = render_image_u8(data, "Linear", "Original")
+
+        self.assertEqual(preview.resolved_spec.limits, (0.0, 1000.0))
+        self.assertEqual((preview.width, preview.height, preview.sample_step), (7, 5, 3))
+        np.testing.assert_array_equal(preview.image_u8, full[::3, ::3])
+
+    def test_resolved_mapping_is_reused_without_interval_estimation(self) -> None:
+        data = FITSData(data=np.arange(35, dtype=np.float32).reshape(5, 7))
+        spec = resolve_render_spec(data, "Sqrt", "MinMax")
+
+        with patch("core.fits_service._build_interval", side_effect=AssertionError("recomputed")):
+            preview = render_preview_result(
+                data, "Sqrt", "MinMax", max_dimension=3, resolved_spec=spec
+            )
+            full = render_frame(data, spec)
+
+        self.assertIs(preview.resolved_spec, spec)
+        self.assertIs(full.resolved_spec, spec)
+        np.testing.assert_array_equal(preview.image_u8, full.image_u8[::3, ::3])
+
+    def test_constant_frame_has_one_mapping_for_histogram_preview_and_full_image(self) -> None:
+        service = FITSService()
+        service.current_data = FITSData(data=np.full((4, 4), 7.0, dtype=np.float32))
+        service.set_interval("Original")
+        spec = service.resolve_render_spec()
+
+        preview = render_preview_result(
+            service.current_data, "Linear", "Original", max_dimension=2, resolved_spec=spec
+        )
+        full = service.render(resolved_spec=spec)
+        counts, low, high = service.histogram(bins=4, resolved_spec=spec)
+
+        self.assertEqual(spec.limits, (7.0, 7.0))
+        self.assertEqual((low, high), spec.limits)
+        self.assertEqual(counts.sum(), 16)
+        self.assertFalse(np.any(preview.image_u8))
+        self.assertFalse(np.any(full.image_u8))
+
+    def test_all_invalid_frame_keeps_empty_mapping_across_render_stages(self) -> None:
+        service = FITSService()
+        service.current_data = FITSData(data=np.full((4, 4), np.nan, dtype=np.float32))
+        spec = service.resolve_render_spec()
+
+        with patch("core.fits_service._build_interval", side_effect=AssertionError("recomputed")):
+            preview = render_preview_result(
+                service.current_data, "Linear", "ZScale", max_dimension=2, resolved_spec=spec
+            )
+            result = service.render(resolved_spec=spec)
+            counts, low, high = service.histogram(resolved_spec=spec)
+
+        self.assertIsNone(spec.limits)
+        self.assertFalse(np.any(preview.image_u8))
+        self.assertFalse(np.any(result.image_u8))
+        self.assertEqual(counts.sum(), 0)
+        self.assertEqual((low, high), (0.0, 0.0))
+
+    def test_sampled_preview_budget_counts_texture_without_weakening_legacy_budget(self) -> None:
+        data = FITSData(data=np.arange(35, dtype=np.float32).reshape(5, 7))
+        preview = render_preview_result(
+            data, "Linear", "Original", max_dimension=3, max_output_pixels=6
+        )
+
+        self.assertEqual(preview.image_u8.shape, (2, 3))
+        self.assertEqual(preview.image_u8.nbytes, 6)
+        with self.assertRaisesRegex(ValueError, "6 pixels"):
+            render_preview_result(data, "Linear", "Original", max_dimension=3, max_output_pixels=5)
+        with self.assertRaisesRegex(ValueError, "35 pixels"):
+            render_preview_u8(data, "Linear", "Original", max_dimension=3, max_output_pixels=6)
+
+    def test_sampled_preview_rejects_invalid_budget_and_dimension_controls(self) -> None:
+        data = FITSData(data=np.ones((4, 4)))
+        for invalid in (True, 0, -1, 2.5):
+            for name in ("max_dimension", "max_output_pixels"):
+                with self.subTest(name=name, value=invalid), self.assertRaises(ValueError):
+                    render_preview_result(data, "Linear", "Original", **{name: invalid})
 
 
 if __name__ == "__main__":

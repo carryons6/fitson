@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests.frame_session_fixtures import set_session_field
+
 import os
 import unittest
 from unittest.mock import Mock, patch
@@ -25,12 +27,12 @@ class TestMeasurementIntegration(unittest.TestCase):
         window.initialize(apply_startup_request=False)
         window._roi_action = "measure"
         frame = FITSData(path="measurement.fits", data=data)
-        window._frames = [frame]
-        window._frame_images = [QImage(data.shape[1], data.shape[0], QImage.Format.Format_Grayscale8)]
-        window._frame_dirty = [False]
-        window._frame_bkg_cache = [None]
-        window._frame_residual_cache = [None]
-        window._frame_cached_preview_dim = [0]
+        set_session_field(window, 'data', [frame])
+        set_session_field(window, 'image', [QImage(data.shape[1], data.shape[0], QImage.Format.Format_Grayscale8)])
+        set_session_field(window, 'dirty', [False])
+        set_session_field(window, 'background', [None])
+        set_session_field(window, 'residual', [None])
+        set_session_field(window, 'preview_dimension', [0])
         window.fits_service.current_data = frame
         window.measurement_dock.set_image_shape(data.shape[1], data.shape[0])
         return window
